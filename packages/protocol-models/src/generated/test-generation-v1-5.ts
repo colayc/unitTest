@@ -165,6 +165,7 @@ export interface TestGenerationPreviewV15 {
     candidateSetDigest:      string;
     characterizationDigest?: string;
     confirmationDigest:      string;
+    diff?:                   string;
     diffDigest:              string;
 }
 

@@ -2,12 +2,15 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,8 +30,12 @@ type generationDriverFixture struct {
 	launches             int
 	complete             bool
 	candidateSetMismatch bool
+	projectionMismatch   string
 	block                <-chan struct{}
+	ignoreCancel         bool
 }
+
+const fixtureGenerationDiff = "--- a/tests/generated/classify_test.cpp\n+++ b/tests/generated/classify_test.cpp\n@@ -0,0 +1 @@\n+TEST(classify, generated) {}\n--- a/CMakeLists.txt\n+++ b/CMakeLists.txt\n@@ -1 +1,2 @@\n add_executable(tests)\n+target_sources(tests PRIVATE tests/generated/classify_test.cpp)\n"
 
 func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
 	base := t.TempDir()
@@ -106,6 +113,10 @@ func (d *generationDriverFixture) RunStage(ctx context.Context, run testgendomai
 	d.launches++
 	d.mu.Unlock()
 	if next == testgendomain.StateBaseline && d.block != nil {
+		if d.ignoreCancel {
+			<-d.block
+			return GenerationStageResult{}, ctx.Err()
+		}
 		select {
 		case <-ctx.Done():
 			return GenerationStageResult{}, ctx.Err()
@@ -117,7 +128,7 @@ func (d *generationDriverFixture) RunStage(ctx context.Context, run testgendomai
 	}
 	if next == testgendomain.StateValidating && d.complete {
 		artifact := task.Artifact{ID: strings.Repeat("4", 32), TaskID: run.TaskID, Kind: "test-generation-source", RelativePath: "tasks/" + run.TaskID + "/" + strings.Repeat("4", 32) + ".source", MIMEType: "application/octet-stream", Size: 12, SHA256: strings.Repeat("e", 64), CreatedAt: run.CreatedAt}
-		candidate := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256}, CodeDigest: strings.Repeat("7", 64), PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/generated/classify_test.cpp", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}}}
+		candidate := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256}, CodeDigest: strings.Repeat("7", 64), BaselineCoverage: testgendomain.CoveragePercent{FunctionPercent: 20, LinePercent: 30, BranchPercent: 10}, DeltaCoveragePercent: testgendomain.CoveragePercent{FunctionPercent: 5, LinePercent: 4, BranchPercent: 3}, Diagnostics: []testgendomain.Diagnostic{{Code: testgendomain.DiagnosticCoverageGap, Severity: testgendomain.SeverityWarning, Reason: "uncovered-branch"}}, PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/generated/classify_test.cpp", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}, {Path: "CMakeLists.txt", Operation: testgendomain.EditModify, BeforeDigest: strings.Repeat("9", 64), AfterDigest: strings.Repeat("a", 64)}}}
 		return GenerationStageResult{Next: next, Candidates: []testgendomain.Candidate{candidate}, Artifacts: []task.Artifact{artifact}}, nil
 	}
 	if next == testgendomain.StateAwaitingConfirmation && d.complete {
@@ -135,12 +146,35 @@ func (d *generationDriverFixture) ProjectCandidate(_ context.Context, _ testgend
 		}
 		edits = append(edits, item)
 	}
-	return generationv15.TestGenerationCandidateV15{
+	diagnostics := make([]generationv15.TestGenerationDiagnosticV15, 0, len(candidate.Diagnostics))
+	for _, diagnostic := range candidate.Diagnostics {
+		item := generationv15.TestGenerationDiagnosticV15{Code: generationv15.TestGenerationDiagnosticCodeV15(diagnostic.Code), Severity: generationv15.Severity(diagnostic.Severity)}
+		if diagnostic.Reason != "" {
+			reason := generationv15.TestGenerationDiagnosticReasonV15(diagnostic.Reason)
+			item.Reason = &reason
+		}
+		diagnostics = append(diagnostics, item)
+	}
+	projected := generationv15.TestGenerationCandidateV15{
 		CandidateID: candidate.CaseID, Kind: generationv15.TestGenerationCandidateKindV15(candidate.Kind),
 		CodeDigest: candidate.CodeDigest, ArtifactDigest: candidate.StagedSourceArtifact.Digest,
 		AssertionProvenance: generationv15.TestGenerationAssertionProvenanceV15{Kind: generationv15.Kind(candidate.Assertions[0].Kind), EvidenceDigest: candidate.Assertions[0].EvidenceDigest},
-		PlannedEdits:        edits, Diagnostics: []generationv15.TestGenerationDiagnosticV15{},
-	}, nil
+		BaselineCoverage:    generationv15.TestGenerationCoverageV15{FunctionPercent: candidate.BaselineCoverage.FunctionPercent, LinePercent: candidate.BaselineCoverage.LinePercent, BranchPercent: candidate.BaselineCoverage.BranchPercent},
+		DeltaCoverage:       generationv15.TestGenerationCoverageV15{FunctionPercent: candidate.DeltaCoveragePercent.FunctionPercent, LinePercent: candidate.DeltaCoveragePercent.LinePercent, BranchPercent: candidate.DeltaCoveragePercent.BranchPercent},
+		PlannedEdits:        edits, Diagnostics: diagnostics,
+	}
+	d.mu.Lock()
+	mismatch := d.projectionMismatch
+	d.mu.Unlock()
+	switch mismatch {
+	case "oracle":
+		projected.AssertionProvenance.EvidenceDigest = strings.Repeat("0", 64)
+	case "coverage":
+		projected.DeltaCoverage.BranchPercent++
+	case "diagnostic":
+		projected.Diagnostics[0].Severity = generationv15.Error
+	}
+	return projected, nil
 }
 func (d *generationDriverFixture) ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error {
 	return nil
@@ -238,7 +272,8 @@ func (p *generationPublisherFixture) Plan(ctx context.Context, set testgenpublis
 		return testgenpublish.PublishPlan{}, err
 	}
 	if p.complete {
-		return testgenpublish.PublishPlan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, CandidateSetDigest: strings.Repeat("b", 64), DiffDigest: strings.Repeat("c", 64), ConfirmationDigest: strings.Repeat("d", 64)}, nil
+		sum := sha256.Sum256([]byte(fixtureGenerationDiff))
+		return testgenpublish.PublishPlan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, CandidateSetDigest: strings.Repeat("b", 64), Diff: fixtureGenerationDiff, DiffDigest: hex.EncodeToString(sum[:]), ConfirmationDigest: strings.Repeat("d", 64)}, nil
 	}
 	return testgenpublish.PublishPlan{}, task.ErrInvalidArgument
 }
@@ -478,6 +513,106 @@ func TestGenerationCancelAndPrivateProgressReplayAreOwnerScoped(t *testing.T) {
 	}
 }
 
+func TestGenerationCancelWaitsForStageExitAndProcessAttestation(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	release := make(chan struct{})
+	driver := &generationDriverFixture{block: release, ignoreCancel: true}
+	var processLive atomic.Bool
+	service, err := newGenerationService(GenerationServiceConfig{
+		Store: store, Driver: driver, Publisher: &generationPublisherFixture{}, Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return r.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+		VerifyProcess: func(context.Context, string, string) error {
+			if processLive.Load() {
+				return errors.New("live child")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	owner := strings.Repeat("e", 64)
+	started, err := service.StartTestGeneration(context.Background(), owner, generationv15.TestGenerationStartRequestV15{
+		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64), ProjectID: "core",
+		Scope: generationv15.Workspace, Framework: generationv15.Auto,
+		Goals:   generationv15.TestGenerationGoalsV15{FunctionPercent: 70, LinePercent: 80, BranchPercent: 60},
+		Budgets: generationv15.TestGenerationBudgetsV15{WallTimeMS: 60000, CandidateCount: 4, MemoryMiB: 64, Concurrency: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		driver.mu.Lock()
+		entered := len(driver.stages) > 0
+		driver.mu.Unlock()
+		if entered {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	driver.mu.Lock()
+	entered := len(driver.stages) > 0
+	driver.mu.Unlock()
+	if !entered {
+		t.Fatal("stage did not enter")
+	}
+	ctx, stop := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stop()
+	if _, err := service.CancelTestGeneration(ctx, owner, started.RunID); err == nil {
+		t.Fatal("cancel completed while stage ignored cancellation")
+	}
+	run, err := service.GetTestGenerationRun(context.Background(), owner, started.RunID)
+	if err != nil || testgendomain.IsTerminal(testgendomain.State(run.State)) {
+		t.Fatalf("premature terminal run = %+v, %v", run, err)
+	}
+	processLive.Store(true)
+	close(release)
+	released = true
+	if _, err := service.CancelTestGeneration(context.Background(), owner, started.RunID); err == nil {
+		t.Fatal("cancel completed with live process owner")
+	}
+	processLive.Store(false)
+	finished, err := service.CancelTestGeneration(context.Background(), owner, started.RunID)
+	if err != nil || finished.State != generationv15.Cancelled {
+		t.Fatalf("attested cancel = %+v, %v", finished, err)
+	}
+	processLive.Store(true)
+	if err := service.ResumeAll(context.Background()); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("restart adopted live cancelled process: %v", err)
+	}
+	if _, err := service.CancelTestGeneration(context.Background(), owner, started.RunID); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("idempotent cancel ignored live process: %v", err)
+	}
+	processLive.Store(false)
+}
+
+func TestGenerationProcessAttestationDeadlineIsBoundedEvenForBrokenVerifier(t *testing.T) {
+	release := make(chan struct{})
+	service := &generationService{verifyProcess: func(context.Context, string, string) error { <-release; return nil }}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := service.attestProcessGone(ctx, strings.Repeat("1", 32), strings.Repeat("a", 64)); !errors.Is(err, task.ErrConflict) {
+		close(release)
+		t.Fatalf("unbounded verifier result = %v", err)
+	}
+	close(release)
+}
+
 func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
 	if err != nil {
@@ -527,6 +662,9 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	if run.Preview == nil || run.Preview.ConfirmationDigest != strings.Repeat("d", 64) {
 		t.Fatalf("owner-scoped preview is missing: %+v", run.Preview)
 	}
+	if run.Preview.Diff == nil || *run.Preview.Diff != fixtureGenerationDiff {
+		t.Fatalf("exact generated-test and CMake review diff missing: %+v", run.Preview)
+	}
 	persisted, err := store.GetGeneration(context.Background(), run.RunID)
 	if err != nil || persisted.Record.Preview == nil || persisted.Record.Preview.ConfirmationDigest != strings.Repeat("d", 64) {
 		t.Fatalf("durable preview = %+v, %v", persisted.Record, err)
@@ -548,15 +686,31 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	if err := restarted.ResumeAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	resumed, err := restarted.GetTestGenerationRun(context.Background(), owner, run.RunID)
+	if err != nil || resumed.Preview == nil || resumed.Preview.Diff == nil || *resumed.Preview.Diff != fixtureGenerationDiff {
+		t.Fatalf("restarted exact preview diff = %+v, %v", resumed.Preview, err)
+	}
 	review, err := restarted.ListTestGenerationCandidates(context.Background(), owner, generationv15.TestGenerationCandidateListRequestV15{RunID: run.RunID})
-	if err != nil || len(review.Items) != 1 || len(review.Items[0].PlannedEdits) != 1 ||
+	if err != nil || len(review.Items) != 1 || len(review.Items[0].PlannedEdits) != 2 ||
 		review.Items[0].PlannedEdits[0].Path != "tests/generated/classify_test.cpp" ||
-		review.Items[0].PlannedEdits[0].AfterDigest != strings.Repeat("8", 64) {
+		review.Items[0].PlannedEdits[0].AfterDigest != strings.Repeat("8", 64) ||
+		review.Items[0].PlannedEdits[1].Path != "CMakeLists.txt" {
 		t.Fatalf("restarted review metadata = %+v, %v", review, err)
 	}
 	if _, err := restarted.ListTestGenerationCandidates(context.Background(), strings.Repeat("f", 64), generationv15.TestGenerationCandidateListRequestV15{RunID: run.RunID}); !errors.Is(err, task.ErrNotFound) {
 		t.Fatalf("foreign review = %v", err)
 	}
+	for _, mismatch := range []string{"oracle", "coverage", "diagnostic"} {
+		driver.mu.Lock()
+		driver.projectionMismatch = mismatch
+		driver.mu.Unlock()
+		if _, err := restarted.ListTestGenerationCandidates(context.Background(), owner, generationv15.TestGenerationCandidateListRequestV15{RunID: run.RunID}); !errors.Is(err, task.ErrStorageUnavailable) {
+			t.Fatalf("%s projection mismatch = %v", mismatch, err)
+		}
+	}
+	driver.mu.Lock()
+	driver.projectionMismatch = ""
+	driver.mu.Unlock()
 	accepted, err := restarted.AcceptTestGeneration(context.Background(), owner, generationv15.TestGenerationAcceptRequestV15{
 		RunID: run.RunID, CandidateID: strings.Repeat("5", 32), ConfirmationDigest: strings.Repeat("d", 64), ConfirmCharacterization: false,
 	})

@@ -1,6 +1,9 @@
 package testgendomain
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 type State string
 
@@ -72,9 +75,15 @@ type Coverage struct {
 	Lines     int64 `json:"lines"`
 	Branches  int64 `json:"branches"`
 }
+type CoveragePercent struct {
+	FunctionPercent float64 `json:"functionPercent"`
+	LinePercent     float64 `json:"linePercent"`
+	BranchPercent   float64 `json:"branchPercent"`
+}
 type Diagnostic struct {
 	Code     DiagnosticCode `json:"code"`
 	Severity Severity       `json:"severity"`
+	Reason   string         `json:"reason,omitempty"`
 }
 type PlannedEdit struct {
 	Path         string        `json:"path"`
@@ -83,15 +92,17 @@ type PlannedEdit struct {
 	AfterDigest  string        `json:"afterDigest"`
 }
 type Candidate struct {
-	CaseID               string        `json:"caseId"`
-	Kind                 CandidateKind `json:"kind"`
-	TargetSymbol         string        `json:"targetSymbol"`
-	Assertions           []Assertion   `json:"assertions"`
-	StagedSourceArtifact ArtifactRef   `json:"stagedSourceArtifact"`
-	CodeDigest           string        `json:"codeDigest"`
-	CoverageDelta        Coverage      `json:"coverageDelta"`
-	Diagnostics          []Diagnostic  `json:"diagnostics"`
-	PlannedEdits         []PlannedEdit `json:"plannedEdits"`
+	CaseID               string          `json:"caseId"`
+	Kind                 CandidateKind   `json:"kind"`
+	TargetSymbol         string          `json:"targetSymbol"`
+	Assertions           []Assertion     `json:"assertions"`
+	StagedSourceArtifact ArtifactRef     `json:"stagedSourceArtifact"`
+	CodeDigest           string          `json:"codeDigest"`
+	CoverageDelta        Coverage        `json:"coverageDelta"`
+	BaselineCoverage     CoveragePercent `json:"baselineCoverage"`
+	DeltaCoveragePercent CoveragePercent `json:"deltaCoveragePercent"`
+	Diagnostics          []Diagnostic    `json:"diagnostics"`
+	PlannedEdits         []PlannedEdit   `json:"plannedEdits"`
 }
 
 type Run struct {
@@ -171,7 +182,7 @@ func ValidateRun(r Run) error {
 	return nil
 }
 func ValidateCandidate(c Candidate) error {
-	if !validID(c.CaseID) || !validSymbol(c.TargetSymbol) || !validID(c.StagedSourceArtifact.ID) || !validDigest(c.StagedSourceArtifact.Digest) || !validDigest(c.CodeDigest) || len(c.Assertions) < 1 || len(c.Assertions) > 128 || len(c.PlannedEdits) < 1 || len(c.PlannedEdits) > 128 || len(c.Diagnostics) > 1000 || c.CoverageDelta.Functions < 0 || c.CoverageDelta.Lines < 0 || c.CoverageDelta.Branches < 0 {
+	if !validID(c.CaseID) || !validSymbol(c.TargetSymbol) || !validID(c.StagedSourceArtifact.ID) || !validDigest(c.StagedSourceArtifact.Digest) || !validDigest(c.CodeDigest) || len(c.Assertions) < 1 || len(c.Assertions) > 128 || len(c.PlannedEdits) < 1 || len(c.PlannedEdits) > 128 || len(c.Diagnostics) > 1000 || c.CoverageDelta.Functions < 0 || c.CoverageDelta.Lines < 0 || c.CoverageDelta.Branches < 0 || !validCoveragePercent(c.BaselineCoverage) || !validCoveragePercent(c.DeltaCoveragePercent) {
 		return ErrInvalid
 	}
 	switch c.Kind {
@@ -198,6 +209,11 @@ func ValidateCandidate(c Candidate) error {
 		}
 	}
 	for _, d := range c.Diagnostics {
+		switch d.Reason {
+		case "", "uncovered-branch", "uncovered-line", "uncovered-function", "budget-limit", "unsupported-target", "oracle-unavailable", "validation-failed":
+		default:
+			return ErrInvalid
+		}
 		switch d.Code {
 		case DiagnosticCoverageGap, DiagnosticTargetUnsupported, DiagnosticOracleUnavailable, DiagnosticBudgetExceeded, DiagnosticValidationFailed, DiagnosticNoCandidate:
 		default:
@@ -210,6 +226,15 @@ func ValidateCandidate(c Candidate) error {
 		}
 	}
 	return nil
+}
+
+func validCoveragePercent(c CoveragePercent) bool {
+	for _, value := range []float64{c.FunctionPercent, c.LinePercent, c.BranchPercent} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+			return false
+		}
+	}
+	return true
 }
 func ValidateCandidates(cs []Candidate) error {
 	if len(cs) > 1000 {

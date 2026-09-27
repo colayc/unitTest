@@ -286,7 +286,7 @@ func TestGenerationV10UpgradeBackfillsOrTerminalizesWithoutAdoption(t *testing.T
 			}
 			global, err := s.EventsAfter(context.Background(), 0, 100, 200)
 			if err != nil || len(global) != 1 || global[0].Type != task.EventTaskOutput ||
-				!bytes.Equal(global[0].Payload, []byte(`{"stepId":"generation-redacted","stream":"combined","text":"","truncated":false}`)) {
+				!bytes.Equal(global[0].Payload, []byte(`{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}`)) {
 				t.Fatalf("legacy cursor tombstone = %+v, %v", global, err)
 			}
 			watermark, err := s.Watermark(context.Background())

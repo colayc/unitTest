@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"sort"
@@ -60,15 +62,22 @@ type GenerationServiceConfig struct {
 }
 
 type generationService struct {
-	store        *taskstore.Store
-	coord        *testgencoord.Coordinator
-	driver       GenerationDriver
-	publisher    generationPublisher
-	publishEvent func(task.Event)
-	mu           sync.Mutex
-	acceptMu     sync.Mutex
-	running      map[string]context.CancelFunc
-	wg           sync.WaitGroup
+	store         *taskstore.Store
+	coord         *testgencoord.Coordinator
+	driver        GenerationDriver
+	publisher     generationPublisher
+	verifyProcess testgencoord.ProcessOwnerVerifier
+	publishEvent  func(task.Event)
+	mu            sync.Mutex
+	acceptMu      sync.Mutex
+	running       map[string]*generationExecution
+	cancelPending map[string]bool
+	wg            sync.WaitGroup
+}
+
+type generationExecution struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func newGenerationService(config GenerationServiceConfig) (*generationService, error) {
@@ -80,8 +89,8 @@ func newGenerationService(config GenerationServiceConfig) (*generationService, e
 	}
 	return &generationService{
 		store: config.Store, coord: testgencoord.NewWithProcessVerifier(config.Store, config.VerifySnapshot, config.VerifyArtifact, config.VerifyProcess),
-		driver: config.Driver, publisher: config.Publisher, publishEvent: config.PublishEvent,
-		running: make(map[string]context.CancelFunc),
+		driver: config.Driver, publisher: config.Publisher, publishEvent: config.PublishEvent, verifyProcess: config.VerifyProcess,
+		running: make(map[string]*generationExecution), cancelPending: make(map[string]bool),
 	}, nil
 }
 
@@ -128,6 +137,9 @@ func (s *generationService) GetTestGenerationRun(ctx context.Context, owner, run
 }
 
 func (s *generationService) CancelTestGeneration(ctx context.Context, owner, runID string) (generationv15.TestGenerationRunV15, error) {
+	if s == nil || ctx == nil {
+		return generationv15.TestGenerationRunV15{}, task.ErrInvalidArgument
+	}
 	s.acceptMu.Lock()
 	defer s.acceptMu.Unlock()
 	run, err := s.owned(ctx, owner, runID)
@@ -135,20 +147,63 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 		return generationv15.TestGenerationRunV15{}, err
 	}
 	if testgendomain.IsTerminal(run.State) {
+		if run.State == testgendomain.StateCancelled && s.attestProcessGone(ctx, run.TaskID, run.Request.ProcessOwnerDigest) != nil {
+			return generationv15.TestGenerationRunV15{}, task.ErrConflict
+		}
 		return generationRunV15(run), nil
 	}
 	s.mu.Lock()
-	stop := s.running[run.ID]
+	s.cancelPending[run.ID] = true
+	execution := s.running[run.ID]
 	s.mu.Unlock()
-	if stop != nil {
-		stop()
+	if execution != nil {
+		execution.cancel()
+		waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer waitCancel()
+		select {
+		case <-execution.done:
+		case <-waitCtx.Done():
+			return generationv15.TestGenerationRunV15{}, task.ErrConflict
+		}
+	}
+	if err := s.attestProcessGone(ctx, run.TaskID, run.Request.ProcessOwnerDigest); err != nil {
+		return generationv15.TestGenerationRunV15{}, task.ErrConflict
+	}
+	run, err = s.owned(ctx, owner, runID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if testgendomain.IsTerminal(run.State) {
+		return generationRunV15(run), nil
 	}
 	cancelled, err := s.coord.Cancel(ctx, run.TaskID)
 	if err != nil {
 		return generationv15.TestGenerationRunV15{}, err
 	}
+	s.mu.Lock()
+	delete(s.cancelPending, run.ID)
+	s.mu.Unlock()
 	s.publishNewEvents(ctx, run, cancelled)
 	return generationRunV15(cancelled), nil
+}
+
+func (s *generationService) attestProcessGone(ctx context.Context, taskID, ownerDigest string) error {
+	if s == nil || s.verifyProcess == nil || ctx == nil {
+		return task.ErrConflict
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- s.verifyProcess(verifyCtx, taskID, ownerDigest) }()
+	select {
+	case err := <-result:
+		if err != nil {
+			return task.ErrConflict
+		}
+		return nil
+	case <-verifyCtx.Done():
+		return task.ErrConflict
+	}
 }
 
 func (s *generationService) ReplayTestGenerationEvents(ctx context.Context, owner string, input generationv15.TestGenerationEventReplayRequestV15) (generationv15.TestGenerationEventPageV15, error) {
@@ -247,13 +302,33 @@ func (s *generationService) ListTestGenerationCandidates(ctx context.Context, ow
 func matchesDurableReview(candidate testgendomain.Candidate, projected generationv15.TestGenerationCandidateV15) bool {
 	if projected.CandidateID != candidate.CaseID || projected.Kind != generationv15.TestGenerationCandidateKindV15(candidate.Kind) ||
 		projected.CodeDigest != candidate.CodeDigest || projected.ArtifactDigest != candidate.StagedSourceArtifact.Digest ||
-		len(projected.PlannedEdits) != len(candidate.PlannedEdits) {
+		len(projected.PlannedEdits) != len(candidate.PlannedEdits) || len(projected.Diagnostics) != len(candidate.Diagnostics) ||
+		projected.CharacterizationConfirmed ||
+		projected.BaselineCoverage.FunctionPercent != candidate.BaselineCoverage.FunctionPercent || projected.BaselineCoverage.LinePercent != candidate.BaselineCoverage.LinePercent || projected.BaselineCoverage.BranchPercent != candidate.BaselineCoverage.BranchPercent ||
+		projected.DeltaCoverage.FunctionPercent != candidate.DeltaCoveragePercent.FunctionPercent || projected.DeltaCoverage.LinePercent != candidate.DeltaCoveragePercent.LinePercent || projected.DeltaCoverage.BranchPercent != candidate.DeltaCoveragePercent.BranchPercent {
+		return false
+	}
+	matchedAssertion := false
+	for _, assertion := range candidate.Assertions {
+		if projected.AssertionProvenance.Kind == generationv15.Kind(assertion.Kind) && projected.AssertionProvenance.EvidenceDigest == assertion.EvidenceDigest {
+			matchedAssertion = true
+			break
+		}
+	}
+	if !matchedAssertion {
 		return false
 	}
 	for i, edit := range candidate.PlannedEdits {
 		got := projected.PlannedEdits[i]
 		if got.Path != edit.Path || got.Operation != generationv15.Operation(edit.Operation) || got.AfterDigest != edit.AfterDigest ||
 			(edit.BeforeDigest == "" && got.BeforeDigest != nil) || (edit.BeforeDigest != "" && (got.BeforeDigest == nil || *got.BeforeDigest != edit.BeforeDigest)) {
+			return false
+		}
+	}
+	for i, diagnostic := range candidate.Diagnostics {
+		got := projected.Diagnostics[i]
+		if got.Code != generationv15.TestGenerationDiagnosticCodeV15(diagnostic.Code) || got.Severity != generationv15.Severity(diagnostic.Severity) ||
+			(diagnostic.Reason == "" && got.Reason != nil) || (diagnostic.Reason != "" && (got.Reason == nil || string(*got.Reason) != diagnostic.Reason)) {
 			return false
 		}
 	}
@@ -286,7 +361,7 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 		}
 		return generationRunV15(run), nil
 	}
-	if run.State != testgendomain.StateAwaitingConfirmation || run.Record.Preview == nil || input.ConfirmationDigest != run.Record.Preview.ConfirmationDigest {
+	if run.State != testgendomain.StateAwaitingConfirmation || run.Record.Preview == nil || run.Record.Preview.Diff == "" || input.ConfirmationDigest != run.Record.Preview.ConfirmationDigest {
 		return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
 	}
 	if err := s.publisher.Recover(ctx); err != nil {
@@ -318,7 +393,7 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 		if planErr != nil {
 			return generationv15.TestGenerationRunV15{}, planErr
 		}
-		if plan.CandidateSetDigest != preview.CandidateSetDigest || plan.DiffDigest != preview.DiffDigest || plan.ConfirmationDigest != preview.ConfirmationDigest || plan.CharacterizationDigest != preview.CharacterizationDigest {
+		if plan.CandidateSetDigest != preview.CandidateSetDigest || plan.DiffDigest != preview.DiffDigest || plan.Diff != preview.Diff || plan.ConfirmationDigest != preview.ConfirmationDigest || plan.CharacterizationDigest != preview.CharacterizationDigest {
 			return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
 		}
 	}
@@ -426,6 +501,9 @@ func generationRunV15(run testgendomain.Run) generationv15.TestGenerationRunV15 
 			DiffDigest:         preview.DiffDigest,
 			ConfirmationDigest: preview.ConfirmationDigest,
 		}
+		if preview.Diff != "" {
+			result.Preview.Diff = &preview.Diff
+		}
 		if preview.CharacterizationDigest != "" {
 			result.Preview.CharacterizationDigest = &preview.CharacterizationDigest
 		}
@@ -435,17 +513,25 @@ func generationRunV15(run testgendomain.Run) generationv15.TestGenerationRunV15 
 
 func (s *generationService) launch(runID string) {
 	s.mu.Lock()
-	if _, exists := s.running[runID]; exists {
+	if _, exists := s.running[runID]; exists || s.cancelPending[runID] {
 		s.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.running[runID] = cancel
+	execution := &generationExecution{cancel: cancel, done: make(chan struct{})}
+	s.running[runID] = execution
 	s.wg.Add(1)
 	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
-		defer func() { s.mu.Lock(); delete(s.running, runID); s.mu.Unlock() }()
+		defer func() {
+			s.mu.Lock()
+			if s.running[runID] == execution {
+				delete(s.running, runID)
+			}
+			close(execution.done)
+			s.mu.Unlock()
+		}()
 		s.run(ctx, runID)
 	}()
 }
@@ -472,7 +558,9 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		}
 		reservation, err := ledger.Reserve(ctx, amount)
 		if err != nil {
-			s.fail(run)
+			if ctx.Err() == nil {
+				s.fail(run)
+			}
 			return
 		}
 		stageCtx, cancel := reservation.StageContext(ctx)
@@ -483,7 +571,9 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		if stageErr != nil || stageContextErr != nil {
 			cancel()
 			reservation.Release()
-			s.fail(run)
+			if ctx.Err() == nil {
+				s.fail(run)
+			}
 			return
 		}
 		if result.Next == "" {
@@ -528,9 +618,16 @@ func (s *generationService) run(ctx context.Context, runID string) {
 				s.fail(run)
 				return
 			}
+			planDiffHash := sha256.Sum256([]byte(plan.Diff))
+			if len(plan.Diff) == 0 || len(plan.Diff) > 262144 || hex.EncodeToString(planDiffHash[:]) != plan.DiffDigest {
+				cancel()
+				reservation.Release()
+				s.fail(run)
+				return
+			}
 			record.Preview = &testgendomain.PreviewIdentity{
 				CandidateSetDigest: plan.CandidateSetDigest, DiffDigest: plan.DiffDigest,
-				ConfirmationDigest: plan.ConfirmationDigest, CharacterizationDigest: plan.CharacterizationDigest,
+				Diff: plan.Diff, ConfirmationDigest: plan.ConfirmationDigest, CharacterizationDigest: plan.CharacterizationDigest,
 			}
 		}
 		cancel()
@@ -565,10 +662,19 @@ func generationLedger(run testgendomain.Run) (*testgencoord.BudgetLedger, error)
 }
 
 func (s *generationService) fail(run testgendomain.Run) {
+	s.mu.Lock()
+	cancelling := s.cancelPending[run.ID]
+	s.mu.Unlock()
+	if cancelling {
+		return
+	}
 	if run.State == testgendomain.StateCancelled || testgendomain.IsTerminal(run.State) {
 		return
 	}
-	_, _ = s.coord.Fail(context.Background(), run.TaskID)
+	failed, err := s.coord.Fail(context.Background(), run.TaskID)
+	if err == nil {
+		s.publishNewEvents(context.Background(), run, failed)
+	}
 }
 
 func (s *generationService) publishNewEvents(ctx context.Context, before, after testgendomain.Run) {
@@ -599,7 +705,13 @@ func (s *generationService) ResumeAll(ctx context.Context) error {
 			if getErr != nil {
 				return getErr
 			}
-			if testgendomain.IsTerminal(run.State) || run.State == testgendomain.StateAwaitingConfirmation {
+			if testgendomain.IsTerminal(run.State) {
+				if err := s.attestProcessGone(ctx, run.TaskID, run.Request.ProcessOwnerDigest); err != nil {
+					return task.ErrConflict
+				}
+				continue
+			}
+			if run.State == testgendomain.StateAwaitingConfirmation {
 				continue
 			}
 			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {
@@ -620,8 +732,8 @@ func (s *generationService) Close() {
 		return
 	}
 	s.mu.Lock()
-	for _, cancel := range s.running {
-		cancel()
+	for _, execution := range s.running {
+		execution.cancel()
 	}
 	s.mu.Unlock()
 	s.wg.Wait()

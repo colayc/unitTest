@@ -337,6 +337,13 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 }
 
 func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
+	// Pre-v1.5 generation rows retain only cursor tombstones after migration.
+	// Keep the numeric sequence for old subscribers, but do not expose the
+	// original generation task identity or occurrence time in legacy envelopes.
+	if event.Type == task.EventTaskOutput && bytes.Equal(event.Payload, []byte(`{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}`)) {
+		event.TaskID = "00000000000000000000000000000000"
+		event.At = time.Unix(0, 0).UTC()
+	}
 	eventType := event.Type
 	payload := event.Payload
 	if version != protocol.Version14 && coverageDomainEvent(event.Type) {

@@ -30,6 +30,7 @@ type GenerationRecord struct {
 type PreviewIdentity struct {
 	CandidateSetDigest     string `json:"candidateSetDigest"`
 	DiffDigest             string `json:"diffDigest"`
+	Diff                   string `json:"diff,omitempty"`
 	ConfirmationDigest     string `json:"confirmationDigest"`
 	CharacterizationDigest string `json:"characterizationDigest,omitempty"`
 }
@@ -55,10 +56,15 @@ func (r GenerationRecord) ValidFor(request Request, candidateCount int) bool {
 		}
 		previous = id
 	}
-	if r.Preview != nil && (len(r.MinimizedCaseIDs) == 0 || !validDigest(r.Preview.CandidateSetDigest) || !validDigest(r.Preview.DiffDigest) || !validDigest(r.Preview.ConfirmationDigest) || r.Preview.CharacterizationDigest != "" && !validDigest(r.Preview.CharacterizationDigest)) {
+	if r.Preview != nil && (len(r.MinimizedCaseIDs) == 0 || !validDigest(r.Preview.CandidateSetDigest) || !validDigest(r.Preview.DiffDigest) || !validDigest(r.Preview.ConfirmationDigest) || r.Preview.CharacterizationDigest != "" && !validDigest(r.Preview.CharacterizationDigest) || len(r.Preview.Diff) > 262144 || r.Preview.Diff != "" && !previewDiffMatches(*r.Preview)) {
 		return false
 	}
 	return true
+}
+
+func previewDiffMatches(preview PreviewIdentity) bool {
+	sum := sha256.Sum256([]byte(preview.Diff))
+	return hex.EncodeToString(sum[:]) == preview.DiffDigest
 }
 
 func (r GenerationRecord) MonotonicAfter(previous GenerationRecord) bool {

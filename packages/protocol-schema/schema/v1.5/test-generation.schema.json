@@ -172,6 +172,7 @@
       "properties": {
         "candidateSetDigest": { "$ref": "#/$defs/digest" },
         "diffDigest": { "$ref": "#/$defs/digest" },
+        "diff": { "type": "string", "minLength": 1, "maxLength": 262144 },
         "confirmationDigest": { "$ref": "#/$defs/digest" },
         "characterizationDigest": { "$ref": "#/$defs/digest" }
       }

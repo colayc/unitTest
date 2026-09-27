@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   ArtifactMetadata,
   ArtifactMetadataV12,
@@ -270,6 +271,10 @@ export function decodeTestGenerationTargetList(value: unknown): TestGenerationTa
 export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
   const wire = record(value, "test generation run");
   const preview = wire.preview === undefined ? undefined : record(wire.preview, "generation preview");
+  const previewDiff = preview?.diff === undefined ? undefined : wireString(preview.diff, "generation preview diff");
+  if (previewDiff !== undefined && createHash("sha256").update(previewDiff, "utf8").digest("hex") !== preview?.diffDigest) {
+    throw new Error("invalid generation preview diff digest");
+  }
   return {
     runId: wireString(wire.runId, "generation run id"),
     taskId: wireString(wire.taskId, "generation task id"),
@@ -284,6 +289,7 @@ export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
       candidateSetDigest: wireString(preview.candidateSetDigest, "candidate set digest"),
       diffDigest: wireString(preview.diffDigest, "preview diff digest"),
       confirmationDigest: wireString(preview.confirmationDigest, "preview confirmation digest"),
+      ...(previewDiff === undefined ? {} : { diff: previewDiff }),
       ...(preview.characterizationDigest === undefined ? {} : { characterizationDigest: wireString(preview.characterizationDigest, "characterization digest") })
     } })
   };

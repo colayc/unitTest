@@ -26,5 +26,5 @@ UPDATE tasks SET last_sequence=COALESCE((
 -- legacy clients receive a closed, empty output tombstone at the same cursor.
 UPDATE task_events
 SET event_type='task.output',
-    payload_json='{"stepId":"generation-redacted","stream":"combined","text":"","truncated":false}'
+    payload_json='{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}'
 WHERE task_id IN (SELECT task_id FROM tasks WHERE kind='test_generation');

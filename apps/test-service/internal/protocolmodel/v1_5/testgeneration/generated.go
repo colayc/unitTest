@@ -110,6 +110,7 @@ type TestGenerationPreviewV15 struct {
 	CandidateSetDigest     string  `json:"candidateSetDigest"`
 	CharacterizationDigest *string `json:"characterizationDigest,omitempty"`
 	ConfirmationDigest     string  `json:"confirmationDigest"`
+	Diff                   *string `json:"diff,omitempty"`
 	DiffDigest             string  `json:"diffDigest"`
 }
 

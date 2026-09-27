@@ -24,6 +24,10 @@ func TestCandidateRejectsUnsafeAndDuplicateValues(t *testing.T) {
 		{"duplicate edit", func(c *Candidate) { c.PlannedEdits = append(c.PlannedEdits, c.PlannedEdits[0]) }},
 		{"unproven verified", func(c *Candidate) { c.Assertions[0].Kind = AssertionObservedOutput }},
 		{"bad digest", func(c *Candidate) { c.StagedSourceArtifact.Digest = "bad" }},
+		{"bad coverage percent", func(c *Candidate) { c.BaselineCoverage.LinePercent = 101 }},
+		{"bad diagnostic reason", func(c *Candidate) {
+			c.Diagnostics = []Diagnostic{{Code: DiagnosticCoverageGap, Severity: SeverityWarning, Reason: "secret source"}}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := candidateFixture()

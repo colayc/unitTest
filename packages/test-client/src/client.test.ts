@@ -317,10 +317,11 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
 });
 
 test("protocol 1.5 client routes typed generation methods and rejects downgrade", async () => {
+  const previewDiff = "--- a/tests/new_test.cpp\n+++ b/tests/new_test.cpp\n@@ -0,0 +1 @@\n+TEST(generated) {}\n--- a/CMakeLists.txt\n+++ b/CMakeLists.txt\n@@ -0,0 +1 @@\n+target_sources(tests PRIVATE tests/new_test.cpp)\n";
   const run = {
     runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
     projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8, candidateCount: 1,
-    preview: { candidateSetDigest: "b".repeat(64), diffDigest: "c".repeat(64), confirmationDigest: "d".repeat(64) }
+    preview: { candidateSetDigest: "b".repeat(64), diffDigest: createHash("sha256").update(previewDiff).digest("hex"), diff: previewDiff, confirmationDigest: "d".repeat(64) }
   };
   const candidate = {
     candidateId: ARTIFACT_ID, kind: "characterization", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
@@ -353,6 +354,7 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   const retrieved = await fixture.client.getTestGenerationRun(RUN_ID);
   assert.equal(retrieved.createdAt.getTime(), new Date(SENT_AT).getTime());
   assert.equal(retrieved.preview?.confirmationDigest, "d".repeat(64));
+  assert.equal(retrieved.preview?.diff, previewDiff);
   const candidates = await fixture.client.listTestGenerationCandidates({ runId: RUN_ID });
   assert.equal(candidates.items[0]?.codeDigest, "a".repeat(64));
   assert.equal(candidates.items[0]?.diagnostics[0]?.reason, "uncovered-branch");
@@ -420,6 +422,19 @@ test("protocol 1.5 generation input fails closed before writing", async () => {
   await assert.rejects(() => fixture.client.replayTestGenerationEvents({ runId: RUN_ID, afterSequence: 0, sourcePath: "C:/private" } as never), /invalid protocol request/);
   await assert.rejects(() => fixture.client.cancelTestGeneration("unsafe/path"), /invalid protocol request/);
   assert.equal(fixture.requests.length, 1);
+  fixture.client.close();
+});
+
+test("protocol 1.5 rejects an exact review diff that does not match its digest", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
+    : response(request, {
+      runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
+      projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8,
+      preview: { candidateSetDigest: "b".repeat(64), diffDigest: "c".repeat(64), diff: "generated secret", confirmationDigest: "d".repeat(64) }
+    }, "1.5"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  await assert.rejects(() => fixture.client.getTestGenerationRun(RUN_ID), /preview diff digest/);
   fixture.client.close();
 });
 
