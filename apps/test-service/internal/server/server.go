@@ -20,9 +20,11 @@ import (
 	"unit-test-ide.local/test-service/internal/task"
 )
 
-const MaxMessageBytes = 1024 * 1024
+// A 262144-byte preview diff can expand sixfold when JSON-escaped. Keep the
+// complete wire envelope bounded while allowing every valid v1.5 preview.
+const MaxMessageBytes = 2 * 1024 * 1024
 
-var errOutboundMessageTooLarge = errors.New("outbound message exceeds the 1 MiB limit")
+var errOutboundMessageTooLarge = errors.New("outbound message exceeds the 2 MiB limit")
 
 type ConnectionConfig struct {
 	HandshakeTimeout time.Duration
@@ -118,7 +120,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		}
 		if len(scanner.Bytes()) > MaxMessageBytes {
 			request := protocol.Request{MessageID: "00000000000000000000000000000000"}
-			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 2 MiB limit", false))
 			return
 		}
 		request, err := protocol.DecodeRequest(scanner.Bytes())
@@ -179,7 +181,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			return
 		}
 		request := protocol.Request{MessageID: "00000000000000000000000000000000"}
-		_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+		_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 2 MiB limit", false))
 	}
 }
 
@@ -240,7 +242,7 @@ func outboundLimitFailure(value any) protocol.Response {
 	case protocol.Event:
 		version = envelope.ProtocolVersion
 	}
-	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", "outbound message exceeds the 1 MiB limit", true)
+	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", "outbound message exceeds the 2 MiB limit", true)
 }
 
 func writeAll(connection net.Conn, value []byte) error {

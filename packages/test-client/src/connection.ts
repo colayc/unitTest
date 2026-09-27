@@ -7,7 +7,8 @@ import { decodeTaskEvent } from "./decoders.js";
 import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
-export const MAX_MESSAGE_BYTES = 1024 * 1024;
+// JSON may escape every byte of a 262144-byte generation preview diff sixfold.
+export const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 
 const require = createRequire(import.meta.url);
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
@@ -104,7 +105,7 @@ export class Connection {
     }
     const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
-      return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
+      return Promise.reject(new Error("protocol line exceeds the 2 MiB limit"));
     }
     const handshakeAttempt = method === "handshake";
     const acceptLegacyUnsupportedProtocol = handshakeAttempt
@@ -161,14 +162,14 @@ export class Connection {
       this.#buffer = this.#buffer.subarray(newline + 1);
       if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
       if (line.byteLength > MAX_MESSAGE_BYTES) {
-        this.#closeWithError(new Error("protocol line exceeds the 1 MiB limit"));
+        this.#closeWithError(new Error("protocol line exceeds the 2 MiB limit"));
         return;
       }
       if (!this.#onLine(line.toString("utf8"))) return;
     }
     const bufferedBodyBytes = this.#buffer.at(-1) === 0x0d ? this.#buffer.byteLength - 1 : this.#buffer.byteLength;
     if (bufferedBodyBytes > MAX_MESSAGE_BYTES) {
-      this.#closeWithError(new Error("protocol line exceeds the 1 MiB limit"));
+      this.#closeWithError(new Error("protocol line exceeds the 2 MiB limit"));
     }
   }
 

@@ -376,6 +376,24 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   old.client.close();
 });
 
+test("protocol 1.5 client decodes an escape-heavy preview over 1 MiB", async () => {
+  const diff = "--- a/tests/generated.cpp\n+++ b/tests/generated.cpp\n@@ -0,0 +1 @@\n+" + "\u0000".repeat(261_000) + "\n";
+  const run = {
+    runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8, candidateCount: 1,
+    preview: { candidateSetDigest: "b".repeat(64), diffDigest: createHash("sha256").update(diff).digest("hex"), diff, confirmationDigest: "d".repeat(64) }
+  };
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
+    : response(request, run, "1.5"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  const encoded = JSON.stringify(response({ messageId: MESSAGE_ID, method: "testGeneration/runs/get" }, run, "1.5"));
+  assert.ok(Buffer.byteLength(encoded) > 1 << 20 && Buffer.byteLength(encoded) < 2 << 20);
+  const retrieved = await fixture.client.getTestGenerationRun(RUN_ID);
+  assert.equal(retrieved.preview?.diff, diff);
+  fixture.client.close();
+});
+
 test("protocol 1.5 generic task cancellation returns a generation snapshot", async () => {
   const fixture = scriptedClient((request) => request.method === "handshake"
     ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
@@ -2068,17 +2086,17 @@ test("client rejects a Max+1 response body with CRLF", async () => {
     setImmediate(() => serverStream.write("\n"));
   });
   const client = ProtocolClient.attach(clientStream);
-  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /1 MiB/);
+  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /2 MiB/);
   client.close();
 });
 
 test("protocol line limit uses UTF-8 bytes rather than JavaScript string length", async () => {
   const [clientStream, serverStream] = pair();
   createInterface({ input: serverStream }).once("line", () => {
-    serverStream.write(`${JSON.stringify({ value: "界".repeat(400_000) })}\n`);
+    serverStream.write(`${JSON.stringify({ value: "界".repeat(700_000) })}\n`);
   });
   const client = ProtocolClient.attach(clientStream);
-  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /1 MiB/);
+  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /2 MiB/);
   client.close();
 });
 
@@ -2565,7 +2583,7 @@ test("an oversized outbound request rejects only that request and leaves the con
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.ok(pendingCapabilitiesRequest);
 
-  await assert.rejects(() => client.listTasks({ cursor: "x".repeat(MAX_MESSAGE_BYTES) }), /1 MiB/);
+  await assert.rejects(() => client.listTasks({ cursor: "x".repeat(MAX_MESSAGE_BYTES) }), /2 MiB/);
   assert.equal(requests.some(({ method }) => method === "tasks/list"), false);
 
   serverStream.write(`${JSON.stringify(response(pendingCapabilitiesRequest, capabilities, "1.1"))}\n`);

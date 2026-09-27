@@ -79,6 +79,46 @@ func TestConnectionWriterEnforcesEncodedLineLimitForResponsesAndEvents(t *testin
 	}
 }
 
+func TestConnectionWriterCarriesEscapedGenerationPreview(t *testing.T) {
+	diff := "--- a/tests/generated.cpp\n+++ b/tests/generated.cpp\n@@ -0,0 +1 @@\n+" + strings.Repeat("\x00", 261000) + "\n"
+	value := protocol.Response{
+		ProtocolVersion: protocol.Version15, Kind: "response", MessageID: strings.Repeat("1", 32),
+		RequestID: strings.Repeat("2", 32), Method: "testGeneration/runs/get", SentAt: "2026-07-22T00:00:00Z",
+		Payload: map[string]any{"runId": strings.Repeat("3", 32), "preview": map[string]string{"diff": diff}},
+	}
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) <= 1<<20 || len(raw) > 2<<20 {
+		t.Fatalf("escaped preview size=%d err=%v", len(raw), err)
+	}
+	client, service := net.Pipe()
+	defer client.Close()
+	outbound := make(chan outboundMessage, 1)
+	done := make(chan struct{})
+	go connectionWriter(service, 10*time.Second, outbound, done, func() { _ = service.Close() })
+	ack := make(chan error, 1)
+	outbound <- outboundMessage{value: value, done: ack}
+	line, err := bufio.NewReader(client).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-ack; err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Payload struct {
+			Preview struct {
+				Diff string `json:"diff"`
+			} `json:"preview"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(line, &decoded); err != nil || decoded.Payload.Preview.Diff != diff {
+		t.Fatalf("wire preview mismatch: %v", err)
+	}
+	close(outbound)
+	<-done
+	_ = service.Close()
+}
+
 func sizedOutboundEnvelope(t *testing.T, kind string, size int) any {
 	t.Helper()
 	const messageID = "11111111111111111111111111111111"
