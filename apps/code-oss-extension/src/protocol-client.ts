@@ -15,6 +15,36 @@ import {
   type TestRunInput,
   type WorkspaceSnapshot
 } from "@unit-test-ide/test-client";
+import type {
+  Capabilities,
+  CapabilitiesV11,
+  CapabilitiesV12,
+  CapabilitiesV13,
+  CapabilitiesV14,
+  CapabilitiesV15,
+  TestGenerationAcceptInput,
+  TestGenerationCandidateListInput,
+  TestGenerationCandidatePageV15,
+  TestGenerationEventPageV15,
+  TestGenerationEventReplayInput,
+  TestGenerationRunV15,
+  TestGenerationStartInput,
+  TestGenerationTargetListInput,
+  TestGenerationTargetListV15
+} from "@unit-test-ide/test-client";
+
+export type ExtensionCapabilities = Capabilities | CapabilitiesV11 | CapabilitiesV12 | CapabilitiesV13 | CapabilitiesV14 | CapabilitiesV15;
+
+export interface ExtensionGenerationProtocolClient {
+  getCapabilities(): Promise<ExtensionCapabilities>;
+  listTestGenerationTargets(input: TestGenerationTargetListInput): Promise<TestGenerationTargetListV15>;
+  startTestGeneration(input: TestGenerationStartInput): Promise<TestGenerationRunV15>;
+  getTestGenerationRun(runId: string): Promise<TestGenerationRunV15>;
+  cancelTestGeneration(runId: string): Promise<TestGenerationRunV15>;
+  replayTestGenerationEvents(input: TestGenerationEventReplayInput): Promise<TestGenerationEventPageV15>;
+  listTestGenerationCandidates(input: TestGenerationCandidateListInput): Promise<TestGenerationCandidatePageV15>;
+  acceptTestGeneration(input: TestGenerationAcceptInput): Promise<TestGenerationRunV15>;
+}
 
 export interface ExtensionCoverageProtocolClient {
   startCoverage(input: CoverageRunInput): Promise<CoverageRun>;
@@ -37,6 +67,14 @@ export interface ExtensionProtocolClient {
   getCoverageReport?: ExtensionCoverageProtocolClient["getCoverageReport"];
   listArtifacts?: ExtensionCoverageProtocolClient["listArtifacts"];
   readArtifact?: ExtensionCoverageProtocolClient["readArtifact"];
+  getCapabilities?: ExtensionGenerationProtocolClient["getCapabilities"];
+  listTestGenerationTargets?: ExtensionGenerationProtocolClient["listTestGenerationTargets"];
+  startTestGeneration?: ExtensionGenerationProtocolClient["startTestGeneration"];
+  getTestGenerationRun?: ExtensionGenerationProtocolClient["getTestGenerationRun"];
+  cancelTestGeneration?: ExtensionGenerationProtocolClient["cancelTestGeneration"];
+  replayTestGenerationEvents?: ExtensionGenerationProtocolClient["replayTestGenerationEvents"];
+  listTestGenerationCandidates?: ExtensionGenerationProtocolClient["listTestGenerationCandidates"];
+  acceptTestGeneration?: ExtensionGenerationProtocolClient["acceptTestGeneration"];
   subscribeEvents(afterSequence: number): Promise<EventSubscription>;
   close(): void;
 }

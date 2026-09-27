@@ -13,3 +13,17 @@ export interface ExtensionState {
   trust: TrustState;
   service: ServiceStatus;
 }
+
+export const TEST_GENERATION_COMMANDS = [
+  "unitTestIde.generateTests",
+  "unitTestIde.generateTestsForSymbol",
+  "unitTestIde.generateTestsForFile",
+  "unitTestIde.generateTestsForTarget",
+  "unitTestIde.generateTestsForCoverageGap",
+  "unitTestIde.reviewGeneratedTests",
+  "unitTestIde.acceptGeneratedTests",
+  "unitTestIde.cancelTestGeneration"
+] as const;
+export type TestGenerationCommand = typeof TEST_GENERATION_COMMANDS[number];
+
+export type TestGenerationAvailability = "available" | "unavailable" | "blocked-trust" | "stale-workspace";

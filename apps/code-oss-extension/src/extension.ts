@@ -7,6 +7,7 @@ import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   registerCommands,
   registerCoverageCommands,
+  registerTestGenerationCommands,
   presentManagerError,
   type CommandContext,
   type CommandHost,
@@ -23,6 +24,7 @@ import {
 } from "./testing-api.js";
 import { createVSCodeTestingController } from "./vscode-testing-bridge.js";
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
+import { createTestGenerationController, type TestGenerationController } from "./test-generation-controller.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 export const EXTENSION_ACTIVATION_MARKER = "UNIT_TEST_IDE_EXTENSION_ACTIVATED";
@@ -44,6 +46,9 @@ export interface ExtensionHost extends CommandHost {
   openCoverageHtml?: (html: string) => void | PromiseLike<void>;
   openCoverageSource?: (path: string) => void | PromiseLike<void>;
   pickCoverageSource?: (sources: readonly CoverageSourceSnapshotV14[]) => CoverageSourceSnapshotV14 | undefined | PromiseLike<CoverageSourceSnapshotV14 | undefined>;
+  showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
+  confirmGeneration?: (message: string) => boolean | PromiseLike<boolean>;
+  openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -212,6 +217,9 @@ class ExtensionController {
   readonly #stopTimeoutMs: number;
   #testingAdapter: TestingApiAdapter | undefined;
   #coverageController: CoverageController | undefined;
+  #generationController: TestGenerationController | undefined;
+  #generationWorkspaceGeneration = "";
+  #generationProjectId = "";
   #testingSessionRoot: string | undefined;
   #activated = false;
   #deactivating = false;
@@ -275,6 +283,16 @@ class ExtensionController {
     });
     this.host.context.subscriptions.push(this.#coverageController);
 
+    this.#generationController = createTestGenerationController({
+      readContext: () => ({
+        trust: this.#testingTrust(),
+        client: this.#manager.session?.client,
+        projectId: this.#generationProjectId || undefined,
+        workspaceGeneration: this.#generationWorkspaceGeneration || undefined
+      })
+    });
+    this.host.context.subscriptions.push(this.#generationController);
+
     registerCommands(
       this.host.context,
       this.#manager,
@@ -297,6 +315,13 @@ class ExtensionController {
       this.#output,
       () => this.host.workspaceSnapshot().workspaceRoot
     );
+    registerTestGenerationCommands(
+      this.host.context,
+      this.#generationController,
+      this.#status,
+      this.host,
+      this.#output
+    );
     this.host.context.subscriptions.push(
       this.host.onDidChangeWorkspaceFolders(() => this.#enqueueReconcile()),
       this.host.onDidGrantWorkspaceTrust(() => this.#enqueueReconcile())
@@ -305,6 +330,7 @@ class ExtensionController {
     if (this.#status.trustState === "trusted" && this.host.configuration("autoStart", true)) {
       await this.#startService();
     }
+    this.#refreshGenerationContext();
     await this.#refreshTesting();
   }
 
@@ -313,6 +339,7 @@ class ExtensionController {
     this.#deactivating = true;
     this.#testingAdapter?.close();
     this.#coverageController?.dispose();
+    this.#generationController?.dispose();
     const transitions = this.#transitionTail.catch(() => undefined);
     const stop = this.#manager.stop().catch(() => presentManagerError(
       this.host,
@@ -369,6 +396,7 @@ class ExtensionController {
     try {
       await this.#manager.start();
       this.#bindTestingSession();
+      this.#refreshGenerationContext();
     } catch {
       this.#invalidateTestingSession();
       await presentManagerError(
@@ -385,6 +413,8 @@ class ExtensionController {
     this.#status.projectService({ state: "stopping" });
     try {
       await this.#manager.stop();
+      this.#generationWorkspaceGeneration = "";
+      this.#generationProjectId = "";
     } catch {
       await presentManagerError(
         this.host,
@@ -413,6 +443,18 @@ class ExtensionController {
   async #refreshTesting(): Promise<void> {
     if (this.#deactivating) return;
     await this.#testingAdapter?.refresh().catch(() => undefined);
+    this.#refreshGenerationContext();
+  }
+
+  #refreshGenerationContext(): void {
+    const catalog = this.#testingAdapter?.catalogState;
+    if (!catalog || this.#testingTrust() !== "trusted") {
+      this.#generationWorkspaceGeneration = "";
+      this.#generationProjectId = "";
+      return;
+    }
+    this.#generationWorkspaceGeneration = catalog.workspaceGeneration;
+    this.#generationProjectId = catalog.projectId;
   }
 
   #bindTestingSession(): void {
@@ -432,6 +474,8 @@ class ExtensionController {
     if (this.#gate.update(snapshot) !== "trusted" || snapshot.workspaceRoot !== this.#testingSessionRoot) {
       this.#invalidateTestingSession();
       this.#coverageController?.setTrustState(this.#gate.update(snapshot));
+      this.#generationWorkspaceGeneration = "";
+      this.#generationProjectId = "";
     }
   }
 
@@ -497,6 +541,13 @@ function createVSCodeHost(
     openCoverageSource: async (path) => {
       const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
       await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+    },
+    showInformationMessage: (message) => vscode.window.showInformationMessage(message),
+    confirmGeneration: async (message) => Boolean(await vscode.window.showInformationMessage(message, { modal: true }, "Accept") === "Accept"),
+    openGenerationDiff: async (title, diff) => {
+      const document = await vscode.workspace.openTextDocument({ content: diff, language: "diff" });
+      await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
+      void title;
     },
     pickCoverageSource: async (sources) => {
       const picked = await vscode.window.showQuickPick(

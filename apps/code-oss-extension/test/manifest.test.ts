@@ -23,7 +23,15 @@ test("extension manifest declares workspace extension and safe commands", async 
       "unitTestIde.runCoverage",
       "unitTestIde.refreshCoverage",
       "unitTestIde.openCoverageReport",
-      "unitTestIde.openCoverageSource"
+      "unitTestIde.openCoverageSource",
+      "unitTestIde.generateTests",
+      "unitTestIde.generateTestsForSymbol",
+      "unitTestIde.generateTestsForFile",
+      "unitTestIde.generateTestsForTarget",
+      "unitTestIde.generateTestsForCoverageGap",
+      "unitTestIde.reviewGeneratedTests",
+      "unitTestIde.acceptGeneratedTests",
+      "unitTestIde.cancelTestGeneration"
     ]
   );
 });
@@ -32,6 +40,15 @@ test("contracts expose explicit lifecycle states", async () => {
   const contracts = await import("../src/contracts.js");
   assert.deepEqual(contracts.TRUST_STATES, ["no-workspace", "blocked-untrusted", "blocked-multi-root", "trusted"]);
   assert.deepEqual(contracts.SERVICE_STATES, ["stopped", "starting", "running", "stopping", "failed"]);
+  assert.equal(contracts.TEST_GENERATION_COMMANDS.length, 8);
+});
+
+test("generation menus use resource/editor contexts and do not shell out", async () => {
+  const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as { contributes: { menus: Record<string, Array<{ command: string; when?: string }>> } };
+  const menus = manifest.contributes.menus;
+  assert.ok(menus["editor/context"]?.some((item) => item.command === "unitTestIde.generateTestsForSymbol" && item.when?.includes("editorLangId")));
+  assert.ok(menus["explorer/context"]?.some((item) => item.command === "unitTestIde.generateTestsForFile" && item.when?.includes("resourceLangId")));
+  assert.deepEqual(menus["editor/context"]?.map((item) => item.command), ["unitTestIde.generateTestsForSymbol"]);
 });
 
 test("Code-OSS can require the extension entrypoint before activating its ESM implementation", async () => {

@@ -16,8 +16,34 @@
       { "command": "unitTestIde.runCoverage", "title": "Unit Test: Run with Coverage" },
       { "command": "unitTestIde.refreshCoverage", "title": "Unit Test: Refresh Coverage" },
       { "command": "unitTestIde.openCoverageReport", "title": "Unit Test: Open Coverage Report" },
-      { "command": "unitTestIde.openCoverageSource", "title": "Unit Test: Open Coverage Source" }
+      { "command": "unitTestIde.openCoverageSource", "title": "Unit Test: Open Coverage Source" },
+      { "command": "unitTestIde.generateTests", "title": "Unit Test: Generate Tests" },
+      { "command": "unitTestIde.generateTestsForSymbol", "title": "Unit Test: Generate Tests for Symbol" },
+      { "command": "unitTestIde.generateTestsForFile", "title": "Unit Test: Generate Tests for File" },
+      { "command": "unitTestIde.generateTestsForTarget", "title": "Unit Test: Generate Tests for Target" },
+      { "command": "unitTestIde.generateTestsForCoverageGap", "title": "Unit Test: Generate Tests for Coverage Gap" },
+      { "command": "unitTestIde.reviewGeneratedTests", "title": "Unit Test: Review Generated Tests" },
+      { "command": "unitTestIde.acceptGeneratedTests", "title": "Unit Test: Accept Generated Tests" },
+      { "command": "unitTestIde.cancelTestGeneration", "title": "Unit Test: Cancel Test Generation" }
     ],
+    "menus": {
+      "commandPalette": [
+        { "command": "unitTestIde.generateTests" },
+        { "command": "unitTestIde.generateTestsForSymbol" },
+        { "command": "unitTestIde.generateTestsForFile" },
+        { "command": "unitTestIde.generateTestsForTarget" },
+        { "command": "unitTestIde.generateTestsForCoverageGap" },
+        { "command": "unitTestIde.reviewGeneratedTests" },
+        { "command": "unitTestIde.acceptGeneratedTests" },
+        { "command": "unitTestIde.cancelTestGeneration" }
+      ],
+      "editor/context": [
+        { "command": "unitTestIde.generateTestsForSymbol", "when": "editorLangId == cpp || editorLangId == c" }
+      ],
+      "explorer/context": [
+        { "command": "unitTestIde.generateTestsForFile", "when": "resourceLangId == cpp || resourceLangId == c" }
+      ]
+    },
     "configuration": {
       "title": "Unit Test IDE",
       "properties": {
@@ -38,7 +64,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test test/extension-host-smoke-support.test.mjs dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
+    "test": "pnpm run build && node --test test/extension-host-smoke-support.test.mjs dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js dist/test/test-generation-controller.test.js dist/test/test-generation-results.test.js dist/test/test-generation-diff.test.js dist/test/test-generation-commands.test.js",
     "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:coverage-service-smoke": "pnpm run build && node --test dist/test/coverage-service-smoke.test.js",
     "test:coverage-service-smoke:linux": "pnpm run build && node --test dist/test/coverage-service-smoke-linux.test.js",
