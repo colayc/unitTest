@@ -234,7 +234,7 @@ func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 	}{
 		{"windows clang-cl", "windows", toolchain.FamilyClangCL, coveragedomain.CompilerFamilyClangCL, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov, false},
 		{"linux gcc", "linux", toolchain.FamilyGCC, coveragedomain.CompilerFamilyGCC, coveragedomain.DriverGCov, coveragedomain.CollectorGCovr, false},
-		{"linux clang", "linux", toolchain.FamilyClang, coveragedomain.CompilerFamilyClang, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov, true},
+		{"linux clang", "linux", toolchain.FamilyClang, coveragedomain.CompilerFamilyClang, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov, false},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -278,6 +278,9 @@ func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 			}
 			if test.family == toolchain.FamilyGCC && (got.Collector.Version != "8.6" || got.InstrumentationFingerprint != coveragegcc.InstrumentationFingerprint()) {
 				t.Fatalf("GCC snapshot = %#v, want gcovr/8.6 and the GCC instrumentation contract", got)
+			}
+			if test.family == toolchain.FamilyClang && (got.InstrumentationFingerprint != coveragellvm.InstrumentationFingerprintForPlatform("linux") || got.InstrumentationFingerprint == coveragellvm.InstrumentationFingerprintForPlatform("windows")) {
+				t.Fatalf("Linux Clang snapshot = %#v, want dedicated Linux instrumentation", got)
 			}
 		})
 	}

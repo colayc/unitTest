@@ -10,19 +10,20 @@ import (
 	"sync"
 
 	"unit-test-ide.local/test-service/internal/build"
-	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coverageexec"
 	"unit-test-ide.local/test-service/internal/coveragegcc"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
-	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
 	coverageparsergcovr "unit-test-ide.local/test-service/internal/coverageparser/gcovr"
+	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testrun"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -85,7 +86,7 @@ func newRuntimeCoverageExecutor(config coverageExecutionConfig) (coverageExecuto
 		adapter = llvmCoverageAdapter{}
 	case "linux":
 		native = true
-		adapter = gccCoverageAdapter{bundleRoot: config.CoverageBundleRoot}
+		adapter = linuxCoverageAdapter{bundleRoot: config.CoverageBundleRoot}
 	}
 	coordinator, err := coverageexec.NewCoordinator(coverageexec.Config{
 		Tasks: config.Tasks, Store: config.Store, Build: config.Build,
@@ -117,6 +118,23 @@ type llvmCoverageAdapter struct{}
 
 type gccCoverageAdapter struct{ bundleRoot string }
 
+type linuxCoverageAdapter struct{ bundleRoot string }
+
+func selectLinuxCoverageAdapter(family toolchain.Family, bundleRoot string) coverageexec.Adapter {
+	switch family {
+	case toolchain.FamilyClang:
+		return llvmCoverageAdapter{}
+	case toolchain.FamilyGCC:
+		return gccCoverageAdapter{bundleRoot: bundleRoot}
+	default:
+		return unsupportedCoverageAdapter{}
+	}
+}
+
+func (adapter linuxCoverageAdapter) Prepare(ctx context.Context, input coverageexec.AdapterInput) (coverageexec.PreparedAdapter, error) {
+	return selectLinuxCoverageAdapter(input.Toolchain.Family, adapter.bundleRoot).Prepare(ctx, input)
+}
+
 func (llvmCoverageAdapter) Prepare(ctx context.Context, input coverageexec.AdapterInput) (coverageexec.PreparedAdapter, error) {
 	if ctx == nil {
 		return nil, task.ErrInvalidArgument
@@ -130,7 +148,7 @@ func (llvmCoverageAdapter) Prepare(ctx context.Context, input coverageexec.Adapt
 	if err != nil {
 		return nil, err
 	}
-	instrumentation, err := coveragellvm.WriteInstrumentation(input.TaskRoot)
+	plan, err := coveragellvm.PlanInstrumentation(toolset, coveragellvm.BuildRequest{TaskRoot: input.TaskRoot})
 	if err != nil {
 		_ = toolset.Close()
 		return nil, err
@@ -142,7 +160,7 @@ func (llvmCoverageAdapter) Prepare(ctx context.Context, input coverageexec.Adapt
 	}
 	return &llvmPreparedCoverageAdapter{
 		toolset: toolset, toolsetCloser: toolset, ownsToolset: true,
-		instrumentation: instrumentation,
+		instrumentation: plan.Instrumentation,
 		allocator:       allocator, profileRoot: input.ProfileRoot,
 	}, nil
 }
@@ -311,8 +329,7 @@ func (a *gccPreparedCoverageAdapter) Close() error { if a == nil { return nil };
 type unsupportedCoverageAdapter struct{}
 
 func (unsupportedCoverageAdapter) Prepare(context.Context, coverageexec.AdapterInput) (coverageexec.PreparedAdapter, error) {
-	// Non-Windows execution is dispatched to FinishUnsupported before Prepare.
-	// Keep this guard side-effect free if that invariant is ever violated.
+	// Unsupported platforms and families never acquire native tools.
 	return nil, coveragellvm.ErrUnsupportedPlatform
 }
 

@@ -16,9 +16,9 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
-	"unit-test-ide.local/test-service/internal/coverageplatform"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -58,6 +58,18 @@ func TestCoordinatorAcceptsOnlyTheRetainedInstrumentationContract(t *testing.T) 
 	}
 	if err := validateInstrumentationContract(snapshot, instrumentation); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("mismatched adapter contract error = %v", err)
+	}
+}
+
+func TestCoordinatorRejectsWindowsInstrumentationForLinuxClang(t *testing.T) {
+	windows := coveragellvm.InstrumentationFingerprintForPlatform("windows")
+	snapshot := coveragedomain.ToolchainSnapshot{
+		Platform:                   coveragedomain.PlatformLinux,
+		Compiler:                   coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyClang},
+		InstrumentationFingerprint: windows,
+	}
+	if err := validateInstrumentationContract(snapshot, coveragellvm.Instrumentation{Fingerprint: windows}); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("Linux Clang accepted Windows clang-cl contract: %v", err)
 	}
 }
 
@@ -148,7 +160,7 @@ func (adapter *handoffTestAdapter) RelinquishToolsetOwnership() {
 func (*handoffTestAdapter) Instrumentation() coverageplatform.Instrumentation {
 	return coverageplatform.Instrumentation{}
 }
-func (*handoffTestAdapter) Allocator() testrun.ProfileAllocator { return handoffTestAllocator{} }
+func (*handoffTestAdapter) Allocator() testrun.ProfileAllocator               { return handoffTestAllocator{} }
 func (*handoffTestAdapter) PrepareTests(context.Context, PreparedBuild) error { return nil }
 func (*handoffTestAdapter) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
 	return nil, errors.New("unused")
@@ -156,7 +168,9 @@ func (*handoffTestAdapter) SealEvidence([]testrun.ProfileExpectation, []testrun.
 func (*handoffTestAdapter) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
 	return CollectionPlan{}, errors.New("unused")
 }
-func (*handoffTestAdapter) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
+func (*handoffTestAdapter) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused")
+}
 func (adapter *handoffTestAdapter) Close() error {
 	if adapter.ownsToolset {
 		adapter.ownsToolset = false
@@ -174,14 +188,18 @@ func (*orchestrationStyleAdapterWithoutHandoff) Instrumentation() coverageplatfo
 func (*orchestrationStyleAdapterWithoutHandoff) Allocator() testrun.ProfileAllocator {
 	return handoffTestAllocator{}
 }
-func (*orchestrationStyleAdapterWithoutHandoff) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (*orchestrationStyleAdapterWithoutHandoff) PrepareTests(context.Context, PreparedBuild) error {
+	return nil
+}
 func (*orchestrationStyleAdapterWithoutHandoff) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
 	return nil, errors.New("unused")
 }
 func (*orchestrationStyleAdapterWithoutHandoff) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
 	return CollectionPlan{}, errors.New("unused")
 }
-func (*orchestrationStyleAdapterWithoutHandoff) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
+func (*orchestrationStyleAdapterWithoutHandoff) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused")
+}
 func (*orchestrationStyleAdapterWithoutHandoff) Close() error { return nil }
 
 func TestCoverageBuildInterpretationContinuesOnlyAfterSuccess(t *testing.T) {

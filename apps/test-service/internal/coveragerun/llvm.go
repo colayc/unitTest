@@ -20,12 +20,13 @@ type TrustedPath interface {
 }
 
 type LLVMInputs struct {
-	Profdata         TrustedPath
-	Cov              TrustedPath
-	Binary           TrustedPath
-	ProfileDirectory TrustedPath
-	ProfileFiles     []string
-	MergedProfile    string
+	Profdata           TrustedPath
+	Cov                TrustedPath
+	Binary             TrustedPath
+	AdditionalBinaries []TrustedPath
+	ProfileDirectory   TrustedPath
+	ProfileFiles       []string
+	MergedProfile      string
 }
 
 type LLVMInvocation struct {
@@ -66,19 +67,21 @@ func BuildLLVMInvocation(input LLVMInputs) (LLVMInvocation, error) {
 	if err != nil {
 		return LLVMInvocation{}, err
 	}
-	if !safeAbsolute(profileDirectory) || len(input.ProfileFiles) == 0 || !safeFileName(input.MergedProfile) {
+	if !safeAbsolute(profileDirectory) || len(input.ProfileFiles) == 0 || len(input.ProfileFiles) > 256 ||
+		!safeFileName(input.MergedProfile) || !strings.HasSuffix(input.MergedProfile, ".profdata") ||
+		len(input.AdditionalBinaries) > 126 {
 		return LLVMInvocation{}, ErrInvalidLLVMInvocation
 	}
 	profileFiles := make([]string, len(input.ProfileFiles))
 	seen := make(map[string]struct{}, len(input.ProfileFiles))
 	for index, name := range input.ProfileFiles {
-		if !safeFileName(name) {
+		if !safeFileName(name) || !strings.HasSuffix(name, ".profraw") {
 			return LLVMInvocation{}, ErrInvalidLLVMInvocation
 		}
-		if _, duplicate := seen[name]; duplicate {
+		if _, duplicate := seen[strings.ToLower(name)]; duplicate {
 			return LLVMInvocation{}, ErrInvalidLLVMInvocation
 		}
-		seen[name] = struct{}{}
+		seen[strings.ToLower(name)] = struct{}{}
 		profileFiles[index] = filepath.Join(profileDirectory, name)
 	}
 	merged := filepath.Join(profileDirectory, input.MergedProfile)
@@ -88,6 +91,22 @@ func BuildLLVMInvocation(input LLVMInputs) (LLVMInvocation, error) {
 	mergeArgs = append(mergeArgs, profileFiles...)
 	mergeArgs = append(mergeArgs, "-o", merged)
 	exportArgs := []string{"export", "-format=text", "-instr-profile=" + merged, binary}
+	seenBinaries := map[string]struct{}{strings.ToLower(binary): {}}
+	for _, additional := range input.AdditionalBinaries {
+		if additional == nil {
+			return LLVMInvocation{}, ErrInvalidLLVMInvocation
+		}
+		path, err := verifiedPath(additional)
+		if err != nil {
+			return LLVMInvocation{}, err
+		}
+		key := strings.ToLower(path)
+		if _, duplicate := seenBinaries[key]; duplicate {
+			return LLVMInvocation{}, ErrInvalidLLVMInvocation
+		}
+		seenBinaries[key] = struct{}{}
+		exportArgs = append(exportArgs, "-object", path)
+	}
 	return LLVMInvocation{
 		Merge: processcontrol.Spec{
 			Executable: profdata, Args: mergeArgs, Dir: profileDirectory,
@@ -125,7 +144,7 @@ func verifiedPath(value TrustedPath, executableNames ...string) (string, error) 
 }
 
 func safeAbsolute(path string) bool {
-	return path != "" && filepath.IsAbs(path) && !strings.ContainsRune(path, '\x00')
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsRune(path, '\x00')
 }
 
 func safeFileName(value string) bool {

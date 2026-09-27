@@ -89,3 +89,46 @@ func TestBuildLLVMInvocationRejectsUnverifiedToolsAndUnsafeProfileNames(t *testi
 func TestLLVMInvocationUsesOnlySupportedProcessFields(t *testing.T) {
 	var _ processcontrol.Spec
 }
+
+func TestBuildLLVMInvocationRejectsZeroProfilesAndWrongExtensions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "profiles")
+	input := LLVMInputs{
+		Profdata:         fakeTrustedPath{path: filepath.Join(root, "llvm-profdata")},
+		Cov:              fakeTrustedPath{path: filepath.Join(root, "llvm-cov")},
+		Binary:           fakeTrustedPath{path: filepath.Join(root, "test")},
+		ProfileDirectory: fakeTrustedPath{path: root}, MergedProfile: "coverage.profdata",
+	}
+	for _, names := range [][]string{nil, {"wrong.txt"}, {"first.profraw", "first.profraw"}} {
+		input.ProfileFiles = names
+		if _, err := BuildLLVMInvocation(input); !errors.Is(err, ErrInvalidLLVMInvocation) {
+			t.Fatalf("profiles %#v accepted: %v", names, err)
+		}
+	}
+	input.ProfileFiles = []string{"first.profraw"}
+	input.MergedProfile = "coverage.profraw"
+	if _, err := BuildLLVMInvocation(input); !errors.Is(err, ErrInvalidLLVMInvocation) {
+		t.Fatalf("merged raw profile accepted: %v", err)
+	}
+}
+
+func TestBuildLLVMInvocationExportsAdditionalPinnedBinaries(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "profiles")
+	input := LLVMInputs{
+		Profdata:           fakeTrustedPath{path: filepath.Join(root, "llvm-profdata")},
+		Cov:                fakeTrustedPath{path: filepath.Join(root, "llvm-cov")},
+		Binary:             fakeTrustedPath{path: filepath.Join(root, "c-tests")},
+		AdditionalBinaries: []TrustedPath{fakeTrustedPath{path: filepath.Join(root, "cpp-tests")}},
+		ProfileDirectory:   fakeTrustedPath{path: root}, ProfileFiles: []string{"first.profraw"}, MergedProfile: "coverage.profdata",
+	}
+	got, err := BuildLLVMInvocation(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Export.Args) != 6 || got.Export.Args[4] != "-object" || got.Export.Args[5] != filepath.Join(root, "cpp-tests") {
+		t.Fatalf("export args = %#v", got.Export.Args)
+	}
+	input.AdditionalBinaries = []TrustedPath{input.Binary}
+	if _, err := BuildLLVMInvocation(input); !errors.Is(err, ErrInvalidLLVMInvocation) {
+		t.Fatalf("duplicate binary accepted: %v", err)
+	}
+}

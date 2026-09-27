@@ -18,6 +18,7 @@ import (
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
@@ -60,27 +61,28 @@ type execution struct {
 	terminalErr     error
 	terminalOutcome task.Outcome
 
-	mu                sync.Mutex
-	embedded          testrun.EmbeddedRun
-	testOriginals     map[string]task.ExecutionStep
-	testOrder         []string
-	outcomes          map[string]testrun.InvocationOutcome
-	binaries          []*retainedFile
-	targets           []processTarget
-	state             coveragerun.State
-	failedPhase       coveragerun.Phase
-	exportOutput      bytes.Buffer
-	document          coveragemodelv1.CoverageDocumentV1
-	coverageJSON      []byte
-	normalized        bool
-	bindings          []coveragenormalize.SourceBinding
-	reportSet         *coveragereport.Set
-	finishedTestRun   *testdomain.TestRun
-	events            []task.DomainEvent
-	completionEvents  []task.DomainEvent
-	coverageStarted   bool
-	buildFinished     bool
-	collectionStarted bool
+	mu                   sync.Mutex
+	embedded             testrun.EmbeddedRun
+	testOriginals        map[string]task.ExecutionStep
+	testOrder            []string
+	outcomes             map[string]testrun.InvocationOutcome
+	binaries             []*retainedFile
+	targets              []processTarget
+	state                coveragerun.State
+	failedPhase          coveragerun.Phase
+	exportOutput         bytes.Buffer
+	collectorOutputBytes int64
+	document             coveragemodelv1.CoverageDocumentV1
+	coverageJSON         []byte
+	normalized           bool
+	bindings             []coveragenormalize.SourceBinding
+	reportSet            *coveragereport.Set
+	finishedTestRun      *testdomain.TestRun
+	events               []task.DomainEvent
+	completionEvents     []task.DomainEvent
+	coverageStarted      bool
+	buildFinished        bool
+	collectionStarted    bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -759,6 +761,11 @@ func validateInstrumentationContract(
 		snapshot.InstrumentationFingerprint != instrumentation.Fingerprint {
 		return task.ErrInvalidArgument
 	}
+	if snapshot.Platform == coveragedomain.PlatformLinux &&
+		snapshot.Compiler.Family == coveragedomain.CompilerFamilyClang &&
+		instrumentation.Fingerprint != coveragellvm.InstrumentationFingerprintForPlatform("linux") {
+		return task.ErrInvalidArgument
+	}
 	return nil
 }
 
@@ -924,14 +931,18 @@ func (execution *execution) ObserveOutput(
 		}
 		return embedded.ObserveOutput(ctx, current, original, output)
 	}
-	if step.Kind != task.StepCoverageNormalize || output.Stream != "stdout" {
+	if step.Kind != task.StepCoverageNormalize && step.Kind != task.StepCoverageMerge {
 		return nil
 	}
 	limits := coveragenormalize.DefaultLimits()
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
-	if int64(execution.exportOutput.Len()) > limits.MaxInputBytes-int64(len(output.Data)) {
+	if execution.collectorOutputBytes > limits.MaxInputBytes-int64(len(output.Data)) {
 		return coveragenormalize.ErrLimitExceeded
+	}
+	execution.collectorOutputBytes += int64(len(output.Data))
+	if step.Kind != task.StepCoverageNormalize || output.Stream != "stdout" {
+		return nil
 	}
 	_, _ = execution.exportOutput.Write(output.Data)
 	return nil
