@@ -7,7 +7,8 @@ import { decodeTaskEvent } from "./decoders.js";
 import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
-// JSON may escape every byte of a 262144-byte generation preview diff sixfold.
+export const LEGACY_MAX_MESSAGE_BYTES = 1024 * 1024;
+// JSON may escape every byte of a 262144-byte v1.5 preview diff sixfold.
 export const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 
 const require = createRequire(import.meta.url);
@@ -99,13 +100,14 @@ export class Connection {
       sentAt: new Date().toISOString(),
       payload
     };
+    const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
+    const limit = Math.min(messageLimitForVersion(version), messageLimitForVersion(this.#negotiatedVersion ?? version));
+    if (encoded.byteLength - 1 > limit) {
+      return Promise.reject(protocolLineLimitError(limit));
+    }
     const validator = validators[version];
     if (!validator(request)) {
       return Promise.reject(new Error(`invalid protocol request: ${ajv.errorsText(validator.errors)}`));
-    }
-    const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
-    if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
-      return Promise.reject(new Error("protocol line exceeds the 2 MiB limit"));
     }
     const handshakeAttempt = method === "handshake";
     const acceptLegacyUnsupportedProtocol = handshakeAttempt
@@ -161,22 +163,32 @@ export class Connection {
       let line = this.#buffer.subarray(0, newline);
       this.#buffer = this.#buffer.subarray(newline + 1);
       if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
-      if (line.byteLength > MAX_MESSAGE_BYTES) {
-        this.#closeWithError(new Error("protocol line exceeds the 2 MiB limit"));
+      const bufferedLimit = this.#bufferLimit();
+      if (line.byteLength > bufferedLimit) {
+        this.#closeWithError(protocolLineLimitError(bufferedLimit));
         return;
       }
-      if (!this.#onLine(line.toString("utf8"))) return;
+      if (!this.#onLine(line)) return;
     }
     const bufferedBodyBytes = this.#buffer.at(-1) === 0x0d ? this.#buffer.byteLength - 1 : this.#buffer.byteLength;
-    if (bufferedBodyBytes > MAX_MESSAGE_BYTES) {
-      this.#closeWithError(new Error("protocol line exceeds the 2 MiB limit"));
+    const bufferedLimit = this.#bufferLimit();
+    if (bufferedBodyBytes > bufferedLimit) {
+      this.#closeWithError(protocolLineLimitError(bufferedLimit));
     }
   }
 
-  #onLine(line: string): boolean {
+  #bufferLimit(): number {
+    if (this.#negotiatedVersion !== undefined) return messageLimitForVersion(this.#negotiatedVersion);
+    for (const pending of this.#pending.values()) {
+      if (pending.version === "1.5") return MAX_MESSAGE_BYTES;
+    }
+    return LEGACY_MAX_MESSAGE_BYTES;
+  }
+
+  #onLine(line: Buffer): boolean {
     let value: unknown;
     try {
-      value = JSON.parse(line);
+      value = JSON.parse(line.toString("utf8"));
     } catch {
       this.#closeWithError(new Error("service returned invalid JSON"));
       return false;
@@ -188,6 +200,14 @@ export class Connection {
     const version = (value as { protocolVersion?: unknown }).protocolVersion;
     if (!isProtocolVersion(version)) {
       this.#closeWithError(new Error("service returned an unsupported protocol version"));
+      return false;
+    }
+    const requestId = (value as { requestId?: unknown }).requestId;
+    const pendingVersion = typeof requestId === "string" ? this.#pending.get(requestId)?.version : undefined;
+    const contextVersion = this.#negotiatedVersion ?? pendingVersion ?? version;
+    const limit = Math.min(messageLimitForVersion(version), messageLimitForVersion(contextVersion));
+    if (line.byteLength > limit) {
+      this.#closeWithError(protocolLineLimitError(limit));
       return false;
     }
     const validator = validators[version];
@@ -313,6 +333,14 @@ function isProtocolVersion(value: unknown): value is ProtocolVersion {
 
 function protocolRank(version: ProtocolVersion): number {
   return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4, "1.5": 5 }[version];
+}
+
+function messageLimitForVersion(version: ProtocolVersion): number {
+  return version === "1.5" ? MAX_MESSAGE_BYTES : LEGACY_MAX_MESSAGE_BYTES;
+}
+
+function protocolLineLimitError(limit: number): Error {
+  return new Error(`protocol line exceeds the ${limit === MAX_MESSAGE_BYTES ? "2" : "1"} MiB limit`);
 }
 
 function isSafeProtocolToken(value: unknown): value is string {

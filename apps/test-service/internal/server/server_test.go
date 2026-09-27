@@ -230,7 +230,7 @@ func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
 	client, service := net.Pipe()
 	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
 	defer client.Close()
-	line := requestLineOfSize(t, server.MaxMessageBytes)
+	line := requestLineOfSize(t, server.LegacyMaxMessageBytes)
 	go func() { _, _ = client.Write(append(line, '\n')) }()
 	var response protocol.Response
 	if err := json.NewDecoder(client).Decode(&response); err != nil {
@@ -241,10 +241,64 @@ func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
 	}
 }
 
+func TestServeConnectionRejectsLegacyLineAboveOneMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSize(t, server.LegacyMaxMessageBytes+1)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "INVALID_MESSAGE" || response.Error.Message != "message exceeds the 1 MiB limit" {
+		t.Fatalf("legacy oversized response: %#v", response)
+	}
+}
+
+func TestServeConnectionAcceptsV15LineAtTwoMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSizeVersion(t, server.MaxMessageBytes, protocol.Version15)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "AUTH_REQUIRED" {
+		t.Fatalf("v1.5 at-limit response: %#v", response)
+	}
+}
+
+func TestServeConnectionLegacySessionRejectsSpoofedV15OversizeLine(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	handshake, _ := json.Marshal(map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"})
+	accepted := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version10, Kind: "request", MessageID: strings.Repeat("1", 32), Method: "handshake", SentAt: sentAt, Payload: handshake})
+	if accepted.Error != nil {
+		t.Fatal(accepted.Error)
+	}
+	line := requestLineOfSizeVersion(t, server.LegacyMaxMessageBytes+1, protocol.Version15)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ProtocolVersion != protocol.Version10 || response.Error == nil || response.Error.Code != "INVALID_MESSAGE" || response.Error.Message != "message exceeds the 1 MiB limit" {
+		t.Fatalf("spoofed v1.5 oversized response: %#v", response)
+	}
+}
+
 func requestLineOfSize(t *testing.T, size int) []byte {
+	return requestLineOfSizeVersion(t, size, protocol.Version)
+}
+
+func requestLineOfSizeVersion(t *testing.T, size int, version string) []byte {
 	t.Helper()
 	request := protocol.Request{
-		ProtocolVersion: protocol.Version,
+		ProtocolVersion: version,
 		Kind:            "request",
 		MessageID:       "0123456789abcdef0123456789abcdef",
 		Method:          "capabilities/get",

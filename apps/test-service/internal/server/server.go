@@ -23,8 +23,7 @@ import (
 // A 262144-byte preview diff can expand sixfold when JSON-escaped. Keep the
 // complete wire envelope bounded while allowing every valid v1.5 preview.
 const MaxMessageBytes = 2 * 1024 * 1024
-
-var errOutboundMessageTooLarge = errors.New("outbound message exceeds the 2 MiB limit")
+const LegacyMaxMessageBytes = 1024 * 1024
 
 type ConnectionConfig struct {
 	HandshakeTimeout time.Duration
@@ -129,6 +128,18 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, invalid, "INVALID_MESSAGE", "message is invalid", false))
 			return
 		}
+		responseVersion := request.ProtocolVersion
+		limitVersion := request.ProtocolVersion
+		if active.Authenticated() {
+			responseVersion = active.NegotiatedVersion()
+			if messageLimitForVersion(responseVersion) < messageLimitForVersion(limitVersion) {
+				limitVersion = responseVersion
+			}
+		}
+		if len(scanner.Bytes()) > messageLimitForVersion(limitVersion) {
+			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(responseVersion, request, "INVALID_MESSAGE", inboundLimitMessage(limitVersion), false))
+			return
+		}
 		if request.Method == "events/subscribe" {
 			retireActiveSubscription()
 		}
@@ -224,10 +235,40 @@ func encodeOutboundLine(value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded) > MaxMessageBytes {
-		return nil, errOutboundMessageTooLarge
+	version := outboundVersion(value)
+	if len(encoded) > messageLimitForVersion(version) {
+		return nil, errors.New(outboundLimitMessage(version))
 	}
 	return append(encoded, '\n'), nil
+}
+
+func messageLimitForVersion(version string) int {
+	if version == protocol.Version15 {
+		return MaxMessageBytes
+	}
+	return LegacyMaxMessageBytes
+}
+
+func inboundLimitMessage(version string) string {
+	if version == protocol.Version15 {
+		return "message exceeds the 2 MiB limit"
+	}
+	return "message exceeds the 1 MiB limit"
+}
+
+func outboundLimitMessage(version string) string {
+	return "outbound " + inboundLimitMessage(version)
+}
+
+func outboundVersion(value any) string {
+	switch envelope := value.(type) {
+	case protocol.Response:
+		return envelope.ProtocolVersion
+	case protocol.Event:
+		return envelope.ProtocolVersion
+	default:
+		return protocol.Version10
+	}
 }
 
 func outboundLimitFailure(value any) protocol.Response {
@@ -242,7 +283,7 @@ func outboundLimitFailure(value any) protocol.Response {
 	case protocol.Event:
 		version = envelope.ProtocolVersion
 	}
-	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", "outbound message exceeds the 2 MiB limit", true)
+	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", outboundLimitMessage(version), true)
 }
 
 func writeAll(connection net.Conn, value []byte) error {

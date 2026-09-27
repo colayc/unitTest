@@ -394,6 +394,36 @@ test("protocol 1.5 client decodes an escape-heavy preview over 1 MiB", async () 
   fixture.client.close();
 });
 
+test("protocol 1.5 client still rejects a response above 2 MiB", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5"))}\n`);
+    } else {
+      serverStream.write(`${"x".repeat(MAX_MESSAGE_BYTES + 1)}\n`);
+    }
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.6.0");
+  await assert.rejects(() => client.getTestGenerationRun(RUN_ID), /2 MiB/);
+  client.close();
+});
+
+test("legacy session cannot raise its request limit by claiming protocol 1.5", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0"))}\n`);
+    }
+  });
+  const connection = new Connection(clientStream);
+  await connection.request("1.0", "handshake", { token: "0123456789abcdef", clientName: "test", clientVersion: "0.1.0" });
+  await assert.rejects(() => connection.request("1.5", "tasks/list", { cursor: "x".repeat(MAX_MESSAGE_BYTES / 2) }), /1 MiB/);
+  connection.close();
+});
+
 test("protocol 1.5 generic task cancellation returns a generation snapshot", async () => {
   const fixture = scriptedClient((request) => request.method === "handshake"
     ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
@@ -2067,7 +2097,7 @@ test("client accepts a fragmented exact-limit response with CRLF", async () => {
   const [clientStream, serverStream] = pair();
   createInterface({ input: serverStream }).once("line", (line) => {
     const request = JSON.parse(line) as JsonObject;
-    serverStream.write(responseLineOfSize(request, MAX_MESSAGE_BYTES));
+    serverStream.write(responseLineOfSize(request, MAX_MESSAGE_BYTES / 2));
     serverStream.write("\r");
     setImmediate(() => serverStream.write("\n"));
   });
@@ -2081,23 +2111,23 @@ test("client rejects a Max+1 response body with CRLF", async () => {
   const [clientStream, serverStream] = pair();
   createInterface({ input: serverStream }).once("line", (line) => {
     const request = JSON.parse(line) as JsonObject;
-    serverStream.write(responseLineOfSize(request, MAX_MESSAGE_BYTES + 1));
+    serverStream.write(responseLineOfSize(request, MAX_MESSAGE_BYTES / 2 + 1));
     serverStream.write("\r");
     setImmediate(() => serverStream.write("\n"));
   });
-  const client = ProtocolClient.attach(clientStream);
-  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /2 MiB/);
-  client.close();
+  const connection = new Connection(clientStream);
+  await assert.rejects(() => connection.request("1.0", "handshake", { token: "0123456789abcdef", clientName: "test", clientVersion: "0.1.0" }), /1 MiB/);
+  connection.close();
 });
 
 test("protocol line limit uses UTF-8 bytes rather than JavaScript string length", async () => {
   const [clientStream, serverStream] = pair();
   createInterface({ input: serverStream }).once("line", () => {
-    serverStream.write(`${JSON.stringify({ value: "界".repeat(700_000) })}\n`);
+    serverStream.write(`${JSON.stringify({ value: "界".repeat(400_000) })}\n`);
   });
-  const client = ProtocolClient.attach(clientStream);
-  await assert.rejects(() => client.handshake("0123456789abcdef", "test", "0.1.0"), /2 MiB/);
-  client.close();
+  const connection = new Connection(clientStream);
+  await assert.rejects(() => connection.request("1.0", "handshake", { token: "0123456789abcdef", clientName: "test", clientVersion: "0.1.0" }), /1 MiB/);
+  connection.close();
 });
 
 test("manual close rejects pending requests when the stream does not emit close", async () => {
@@ -2583,7 +2613,7 @@ test("an oversized outbound request rejects only that request and leaves the con
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.ok(pendingCapabilitiesRequest);
 
-  await assert.rejects(() => client.listTasks({ cursor: "x".repeat(MAX_MESSAGE_BYTES) }), /2 MiB/);
+  await assert.rejects(() => client.listTasks({ cursor: "x".repeat(MAX_MESSAGE_BYTES / 2) }), /1 MiB/);
   assert.equal(requests.some(({ method }) => method === "tasks/list"), false);
 
   serverStream.write(`${JSON.stringify(response(pendingCapabilitiesRequest, capabilities, "1.1"))}\n`);

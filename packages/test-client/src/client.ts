@@ -78,7 +78,7 @@ import type { Method, ProtocolTaskEvent, ProtocolVersion } from "./envelopes.js"
 import { ProtocolError } from "./envelopes.js";
 import { EventSubscription } from "./subscription.js";
 
-export { MAX_MESSAGE_BYTES } from "./connection.js";
+export { LEGACY_MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES } from "./connection.js";
 /** Maximum artifact size materialized by readArtifact(). */
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
