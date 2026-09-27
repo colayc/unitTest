@@ -18,7 +18,23 @@ import (
 )
 
 // Generation rows are typed relations inside the existing task database. Task
-// lifecycle, events, and artifact metadata remain their authoritative stores.
+// lifecycle and artifact metadata remain authoritative; progress uses a
+// private per-run event journal so legacy global subscribers stay contiguous.
+func insertGenerationEvents(ctx context.Context, tx *sql.Tx, after int64, drafts []task.EventDraft, newID func() string) ([]task.Event, error) {
+	events := make([]task.Event, 0, len(drafts))
+	for _, draft := range drafts {
+		if !validEventDraft(draft) {
+			return nil, task.ErrInvalidArgument
+		}
+		event := task.Event{ID: newID(), EventDraft: draft, Sequence: after + int64(len(events)) + 1}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO test_generation_events(task_id,sequence,event_id,event_type,occurred_at,payload_json) VALUES(?,?,?,?,?,?)`, event.TaskID, event.Sequence, event.ID, string(event.Type), formatTime(event.At), string(event.Payload)); err != nil {
+			return nil, storageError("insert generation event", err)
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
 func (s *Store) CreateGeneration(ctx context.Context, run testgendomain.Run) (testgendomain.Run, error) {
 	if s == nil || ctx == nil || testgendomain.ValidateRun(run) != nil || run.State != testgendomain.StateQueued || run.Revision != 1 || run.LastSequence != 0 || run.CandidateCount != 0 || len(run.ArtifactDigests) != 0 {
 		return testgendomain.Run{}, task.ErrInvalidArgument
@@ -59,7 +75,7 @@ func (s *Store) CreateGeneration(ctx context.Context, run testgendomain.Run) (te
 	if err != nil {
 		return testgendomain.Run{}, storageError("create generation relation", err)
 	}
-	events, err := insertEvents(ctx, tx, []task.EventDraft{{TaskID: run.TaskID, Type: task.EventTaskCreated, At: now, Payload: json.RawMessage(`{"status":"queued"}`)}}, s.newID)
+	events, err := insertGenerationEvents(ctx, tx, 0, []task.EventDraft{{TaskID: run.TaskID, Type: task.EventTaskCreated, At: now, Payload: json.RawMessage(`{"status":"queued"}`)}}, s.newID)
 	if err != nil {
 		return testgendomain.Run{}, err
 	}
@@ -326,7 +342,7 @@ func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next t
 		}{outcome.(string)})
 		drafts = append(drafts, task.EventDraft{TaskID: next.TaskID, Type: task.EventTaskFinished, At: at, Payload: terminalPayload})
 	}
-	events, e := insertEvents(ctx, tx, drafts, s.newID)
+	events, e := insertGenerationEvents(ctx, tx, current.LastSequence, drafts, s.newID)
 	if e != nil {
 		return testgendomain.Run{}, e
 	}
@@ -389,7 +405,7 @@ func (s *Store) ReplayGenerationEvents(ctx context.Context, runID string, after 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT sequence,event_id,event_type,occurred_at,payload_json FROM task_events WHERE task_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?`, r.TaskID, after, r.LastSequence, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence,event_id,event_type,occurred_at,payload_json FROM test_generation_events WHERE task_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?`, r.TaskID, after, r.LastSequence, limit)
 	if err != nil {
 		return nil, storageError("replay generation events", err)
 	}

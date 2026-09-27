@@ -319,7 +319,8 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
 test("protocol 1.5 client routes typed generation methods and rejects downgrade", async () => {
   const run = {
     runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
-    projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8, candidateCount: 1
+    projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8, candidateCount: 1,
+    preview: { candidateSetDigest: "b".repeat(64), diffDigest: "c".repeat(64), confirmationDigest: "d".repeat(64) }
   };
   const candidate = {
     candidateId: ARTIFACT_ID, kind: "characterization", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
@@ -346,7 +347,9 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
     budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
   };
   assert.equal((await fixture.client.startTestGeneration(startInput)).runId, RUN_ID);
-  assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).createdAt.getTime(), new Date(SENT_AT).getTime());
+  const retrieved = await fixture.client.getTestGenerationRun(RUN_ID);
+  assert.equal(retrieved.createdAt.getTime(), new Date(SENT_AT).getTime());
+  assert.equal(retrieved.preview?.confirmationDigest, "d".repeat(64));
   const candidates = await fixture.client.listTestGenerationCandidates({ runId: RUN_ID });
   assert.equal(candidates.items[0]?.codeDigest, "a".repeat(64));
   assert.equal(candidates.items[0]?.diagnostics[0]?.reason, "uncovered-branch");

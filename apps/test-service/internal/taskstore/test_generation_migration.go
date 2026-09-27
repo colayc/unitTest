@@ -109,7 +109,7 @@ func (s *Store) reconcileGenerationRecords(ctx context.Context) error {
 			From  testgendomain.State `json:"from"`
 			To    testgendomain.State `json:"to"`
 		}{row.runID, testgendomain.State(row.state), testgendomain.StateFailed})
-		events, err := insertEvents(ctx, tx, []task.EventDraft{{TaskID: row.taskID, Type: task.EventTestGenerationStateChanged, At: at, Payload: payload}, {TaskID: row.taskID, Type: task.EventTaskFinished, At: at, Payload: json.RawMessage(`{"outcome":"infrastructure_failed"}`)}}, s.newID)
+		events, err := insertGenerationEvents(ctx, tx, row.sequence, []task.EventDraft{{TaskID: row.taskID, Type: task.EventTestGenerationStateChanged, At: at, Payload: payload}, {TaskID: row.taskID, Type: task.EventTaskFinished, At: at, Payload: json.RawMessage(`{"outcome":"infrastructure_failed"}`)}}, s.newID)
 		if err != nil {
 			return err
 		}

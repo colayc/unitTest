@@ -359,6 +359,35 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	}
 	return journal.Receipt, nil
 }
+
+// Receipt reports only a completed publication whose immutable receipt and
+// current files match the requested preview. It never plans or writes files.
+func (p *Publisher) Receipt(ctx context.Context, req AcceptRequest) (Receipt, bool, error) {
+	if p == nil || ctx == nil || !validHex(req.RunID, 32) || !validHex(req.CandidateSetDigest, 64) || !validHex(req.SnapshotDigest, 64) || !validHex(req.DiffDigest, 64) || !validHex(req.ConfirmationDigest, 64) || req.CharacterizationDigest != "" && !validHex(req.CharacterizationDigest, 64) {
+		return Receipt{}, false, ErrConflict
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Receipt{}, false, err
+	}
+	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+		return Receipt{}, false, ErrConflict
+	}
+	receipt, exists, err := p.readReceipt(req.ConfirmationDigest)
+	if err != nil || !exists {
+		return receipt, exists, err
+	}
+	if !matchesReceiptRequest(receipt, req) || p.verifyReceiptCurrent(receipt) != nil {
+		return Receipt{}, false, ErrConflict
+	}
+	if _, err := p.journal.Lstat(journalName(req.ConfirmationDigest)); err == nil {
+		return Receipt{}, false, ErrRecoveryRequired
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Receipt{}, false, ErrConflict
+	}
+	return receipt, true, nil
+}
 func matchesRequest(p PublishPlan, r AcceptRequest) bool {
 	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
 }

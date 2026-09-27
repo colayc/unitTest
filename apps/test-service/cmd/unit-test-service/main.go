@@ -198,7 +198,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	service := server.NewServiceWithCoverage(listener, token, transport.PlatformName(), transport.TransportName(), active, active.CoverageBackend(), server.ServiceConfig{MaxConnections: 64})
+	service := server.NewServiceWithGeneration(listener, token, transport.PlatformName(), transport.TransportName(), active, active.CoverageBackend(), active.GenerationBackend(), server.ServiceConfig{MaxConnections: 64})
 	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
 	if err := service.Serve(); err != nil {

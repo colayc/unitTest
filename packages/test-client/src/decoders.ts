@@ -268,6 +268,7 @@ export function decodeTestGenerationTargetList(value: unknown): TestGenerationTa
 
 export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
   const wire = record(value, "test generation run");
+  const preview = wire.preview === undefined ? undefined : record(wire.preview, "generation preview");
   return {
     runId: wireString(wire.runId, "generation run id"),
     taskId: wireString(wire.taskId, "generation task id"),
@@ -277,7 +278,13 @@ export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
     createdAt: date(wire.createdAt, "generation createdAt"),
     lastSequence: safeInteger(wire.lastSequence, "generation lastSequence"),
     ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "generation finishedAt") }),
-    ...(wire.candidateCount === undefined ? {} : { candidateCount: safeInteger(wire.candidateCount, "generation candidateCount") })
+    ...(wire.candidateCount === undefined ? {} : { candidateCount: safeInteger(wire.candidateCount, "generation candidateCount") }),
+    ...(preview === undefined ? {} : { preview: {
+      candidateSetDigest: wireString(preview.candidateSetDigest, "candidate set digest"),
+      diffDigest: wireString(preview.diffDigest, "preview diff digest"),
+      confirmationDigest: wireString(preview.confirmationDigest, "preview confirmation digest"),
+      ...(preview.characterizationDigest === undefined ? {} : { characterizationDigest: wireString(preview.characterizationDigest, "characterization digest") })
+    } })
   };
 }
 

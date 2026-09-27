@@ -442,10 +442,11 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
 		}
-		if s.negotiatedVersion == protocol.Version15 && request.Method == "events/subscribe" {
-			// The legacy broker is workspace-global. Until v1.5 has an
-			// owner-scoped stream, subscribing would expose foreign runs.
-			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped event stream is unavailable", false))
+		if s.negotiatedVersion == protocol.Version15 {
+			// The legacy task and artifact projections cannot encode generation
+			// ownership; the broker is workspace-global. Do not misproject or
+			// expose another realm's generation rows via inherited methods.
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped task routes are unavailable", false))
 		}
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "task service is unavailable", true))
@@ -579,6 +580,8 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 				task.KindTestDiscovery,
 				task.KindTestRun,
 			}
+		} else if version == protocol.Version14 {
+			kinds = []task.Kind{task.KindSimulation, task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun}
 		}
 		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
@@ -698,7 +701,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return invalidPayload(version, request)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
 			parent, getErr := s.backend.Get(ctx, payload.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
@@ -735,7 +738,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return backendFailure(version, request, err)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
 			parent, getErr := s.backend.Get(ctx, chunk.Metadata.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
@@ -2245,6 +2248,9 @@ func validBuildStart(value buildStartPayloadV12) bool {
 }
 
 func legacyTaskHidden(version string, kind task.Kind) bool {
+	if kind == task.KindTestGeneration {
+		return true
+	}
 	switch version {
 	case protocol.Version11:
 		return kind != task.KindSimulation

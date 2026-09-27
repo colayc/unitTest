@@ -147,4 +147,19 @@ func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testin
 	if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" || result.Subscription != nil {
 		t.Fatalf("global event subscription = %+v", result)
 	}
+	for _, route := range []struct {
+		method  string
+		payload map[string]any
+	}{
+		{"tasks/get", map[string]any{"taskId": strings.Repeat("a", 32)}},
+		{"tasks/list", map[string]any{}},
+		{"tasks/cancel", map[string]any{"taskId": strings.Repeat("a", 32)}},
+		{"artifacts/list", map[string]any{"taskId": strings.Repeat("a", 32)}},
+		{"artifacts/read", map[string]any{"artifactId": strings.Repeat("a", 32), "offset": 0, "length": 1}},
+	} {
+		result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, route.method, route.payload))
+		if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
+			t.Fatalf("v1.5 %s must fail closed: %+v", route.method, result.Response)
+		}
+	}
 }

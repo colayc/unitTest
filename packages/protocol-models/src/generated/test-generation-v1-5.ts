@@ -119,11 +119,19 @@ export interface TestGenerationRunV15 {
     createdAt:           Date;
     finishedAt?:         Date;
     lastSequence:        number;
+    preview?:            TestGenerationPreviewV15;
     projectId:           string;
     runId:               string;
     state:               TestGenerationStateV15;
     taskId:              string;
     workspaceGeneration: string;
+}
+
+export interface TestGenerationPreviewV15 {
+    candidateSetDigest:      string;
+    characterizationDigest?: string;
+    confirmationDigest:      string;
+    diffDigest:              string;
 }
 
 export enum TestGenerationStateV15 {

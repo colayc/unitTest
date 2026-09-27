@@ -58,6 +58,27 @@ func TestGenerationPersistenceAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestGenerationEventsStayOutOfLegacyGlobalReplay(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r := generationRunFixture()
+	if _, err := s.CreateGeneration(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	watermark, err := s.Watermark(ctx)
+	if err != nil || watermark != 0 {
+		t.Fatalf("global watermark = %d, %v", watermark, err)
+	}
+	global, err := s.EventsAfter(ctx, 0, 1, 200)
+	if err != nil || len(global) != 0 {
+		t.Fatalf("global generation events = %+v, %v", global, err)
+	}
+	owned, err := s.ReplayGenerationEvents(ctx, r.ID, 0, 200)
+	if err != nil || len(owned) != 1 {
+		t.Fatalf("owned generation events = %+v, %v", owned, err)
+	}
+}
+
 func TestGenerationRejectsTaskMismatchAndImpossibleTransition(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -257,6 +278,14 @@ func TestGenerationV10UpgradeBackfillsOrTerminalizesWithoutAdoption(t *testing.T
 			r, err := s.GetGeneration(context.Background(), strings.Repeat("2", 32))
 			if err != nil {
 				t.Fatal(err)
+			}
+			privateEvents, err := s.ReplayGenerationEvents(context.Background(), r.ID, 0, 200)
+			if err != nil || len(privateEvents) == 0 || privateEvents[0].Sequence != 1 {
+				t.Fatalf("migrated generation replay = %+v, %v", privateEvents, err)
+			}
+			global, err := s.EventsAfter(context.Background(), 0, 100, 200)
+			if err != nil || len(global) != 0 {
+				t.Fatalf("generation leaked to legacy replay = %+v, %v", global, err)
 			}
 			if legacy {
 				if r.State != testgendomain.StateFailed || !r.Record.IsZero() {

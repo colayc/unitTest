@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"sort"
 	"sync"
@@ -25,6 +24,9 @@ type GenerationDriver interface {
 	Resolve(context.Context, generationv15.TestGenerationStartRequestV15) (testgendomain.Request, error)
 	StageBudget(testgendomain.Run, testgendomain.State) testgencoord.BudgetAmount
 	RunStage(context.Context, testgendomain.Run, testgendomain.State, func(context.Context) error) (GenerationStageResult, error)
+	// ValidateCandidate rechecks durable Task 10 execution, oracle and coverage
+	// evidence. Metadata digests alone never authorize publication.
+	ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error
 	ProjectCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error)
 	CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error)
 }
@@ -40,6 +42,7 @@ type GenerationStageResult struct {
 type generationPublisher interface {
 	Recover(context.Context) error
 	Plan(context.Context, testgenpublish.CandidateSet) (testgenpublish.PublishPlan, error)
+	Receipt(context.Context, testgenpublish.AcceptRequest) (testgenpublish.Receipt, bool, error)
 	Accept(context.Context, testgenpublish.AcceptRequest) (testgenpublish.Receipt, error)
 }
 
@@ -62,6 +65,7 @@ type generationService struct {
 	publisher    generationPublisher
 	publishEvent func(task.Event)
 	mu           sync.Mutex
+	acceptMu     sync.Mutex
 	running      map[string]context.CancelFunc
 	wg           sync.WaitGroup
 }
@@ -162,6 +166,8 @@ func (s *generationService) ListTestGenerationCandidates(ctx context.Context, ow
 }
 
 func (s *generationService) AcceptTestGeneration(ctx context.Context, owner string, input generationv15.TestGenerationAcceptRequestV15) (generationv15.TestGenerationRunV15, error) {
+	s.acceptMu.Lock()
+	defer s.acceptMu.Unlock()
 	run, err := s.owned(ctx, owner, input.RunID)
 	if err != nil {
 		return generationv15.TestGenerationRunV15{}, err
@@ -176,8 +182,12 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 		// Accepted is only replayable while Task 12's durable receipt and
 		// published files still attest to the committed preview. Never re-plan
 		// here: the publisher has already changed the workspace.
-		if _, err := s.publisher.Accept(ctx, publicationForRun(run)); err != nil {
+		_, published, err := s.publisher.Receipt(ctx, publicationForRun(run))
+		if err != nil {
 			return generationv15.TestGenerationRunV15{}, err
+		}
+		if !published {
+			return generationv15.TestGenerationRunV15{}, testgenpublish.ErrConflict
 		}
 		return generationRunV15(run), nil
 	}
@@ -187,15 +197,12 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 	if err := s.publisher.Recover(ctx); err != nil {
 		return generationv15.TestGenerationRunV15{}, err
 	}
-	all, err := s.coord.ListCandidates(ctx, run.ID)
-	if err != nil {
+	if _, err := s.coord.Resume(ctx, run.TaskID); err != nil {
 		return generationv15.TestGenerationRunV15{}, err
 	}
-	selected := make([]testgendomain.Candidate, 0, len(run.Record.MinimizedCaseIDs))
-	for _, candidate := range all {
-		if slices.Contains(run.Record.MinimizedCaseIDs, candidate.CaseID) {
-			selected = append(selected, candidate)
-		}
+	set, selected, err := s.authoritativeSet(ctx, run, run.Record.MinimizedCaseIDs)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
 	}
 	if len(selected) != len(run.Record.MinimizedCaseIDs) || len(selected) == 0 || !slices.Contains(run.Record.MinimizedCaseIDs, input.CandidateID) {
 		return generationv15.TestGenerationRunV15{}, task.ErrNotFound
@@ -207,16 +214,11 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 	}
 	preview := run.Record.Preview
 	publication := publicationForRun(run)
-	if _, err := s.publisher.Accept(ctx, publication); errors.Is(err, testgenpublish.ErrConflict) {
-		set, resolveErr := s.driver.CandidateSet(ctx, run, selected)
-		if resolveErr != nil {
-			return generationv15.TestGenerationRunV15{}, resolveErr
-		}
-		ids := append([]string(nil), set.CaseIDs...)
-		sort.Strings(ids)
-		if set.RunID != run.ID || set.SnapshotDigest != run.Record.SnapshotDigest || !slices.Equal(ids, run.Record.MinimizedCaseIDs) {
-			return generationv15.TestGenerationRunV15{}, task.ErrConflict
-		}
+	_, published, err := s.publisher.Receipt(ctx, publication)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if !published {
 		plan, planErr := s.publisher.Plan(ctx, set)
 		if planErr != nil {
 			return generationv15.TestGenerationRunV15{}, planErr
@@ -224,10 +226,12 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 		if plan.CandidateSetDigest != preview.CandidateSetDigest || plan.DiffDigest != preview.DiffDigest || plan.ConfirmationDigest != preview.ConfirmationDigest || plan.CharacterizationDigest != preview.CharacterizationDigest {
 			return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
 		}
-		if _, err = s.publisher.Accept(ctx, publication); err != nil {
-			return generationv15.TestGenerationRunV15{}, err
-		}
-	} else if err != nil {
+	}
+	current, err := s.owned(ctx, owner, run.ID)
+	if err != nil || current.Revision != run.Revision || current.State != run.State || current.Record.Preview == nil || *current.Record.Preview != *preview {
+		return generationv15.TestGenerationRunV15{}, task.ErrConflict
+	}
+	if _, err := s.publisher.Accept(ctx, publication); err != nil {
 		return generationv15.TestGenerationRunV15{}, err
 	}
 	// The publisher itself changes generated tests/CMake. A post-publication
@@ -244,6 +248,35 @@ func (s *generationService) AcceptTestGeneration(ctx context.Context, owner stri
 	}
 	s.publishNewEvents(ctx, run, committed)
 	return generationRunV15(committed), nil
+}
+
+func (s *generationService) authoritativeSet(ctx context.Context, run testgendomain.Run, ids []string) (testgenpublish.CandidateSet, []testgendomain.Candidate, error) {
+	all, err := s.coord.ListCandidates(ctx, run.ID)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, nil, err
+	}
+	selected := make([]testgendomain.Candidate, 0, len(ids))
+	for _, candidate := range all {
+		if slices.Contains(ids, candidate.CaseID) {
+			if err := s.driver.ValidateCandidate(ctx, run, candidate); err != nil {
+				return testgenpublish.CandidateSet{}, nil, err
+			}
+			selected = append(selected, candidate)
+		}
+	}
+	if len(selected) == 0 || len(selected) != len(ids) {
+		return testgenpublish.CandidateSet{}, nil, task.ErrConflict
+	}
+	set, err := s.driver.CandidateSet(ctx, run, selected)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, nil, err
+	}
+	actual := append([]string(nil), set.CaseIDs...)
+	sort.Strings(actual)
+	if set.RunID != run.ID || set.SnapshotDigest != run.Record.SnapshotDigest || !slices.Equal(actual, ids) {
+		return testgenpublish.CandidateSet{}, nil, task.ErrConflict
+	}
+	return set, selected, nil
 }
 
 func publicationForRun(run testgendomain.Run) testgenpublish.AcceptRequest {
@@ -290,6 +323,17 @@ func generationRunV15(run testgendomain.Run) generationv15.TestGenerationRunV15 
 	if run.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(run.State) {
 		count := int64(run.CandidateCount)
 		result.CandidateCount = &count
+	}
+	if run.Record.Preview != nil && (run.State == testgendomain.StateAwaitingConfirmation || run.State == testgendomain.StateAccepted) {
+		preview := run.Record.Preview
+		result.Preview = &generationv15.TestGenerationPreviewV15{
+			CandidateSetDigest: preview.CandidateSetDigest,
+			DiffDigest:         preview.DiffDigest,
+			ConfirmationDigest: preview.ConfirmationDigest,
+		}
+		if preview.CharacterizationDigest != "" {
+			result.Preview.CharacterizationDigest = &preview.CharacterizationDigest
+		}
 	}
 	return result
 }
@@ -373,7 +417,16 @@ func (s *generationService) run(ctx context.Context, runID string) {
 				s.fail(run)
 				return
 			}
-			plan, planErr := s.publisher.Plan(stageCtx, *result.PreviewSet)
+			previewRun := testgendomain.CloneRun(run)
+			previewRun.Record = record
+			set, _, setErr := s.authoritativeSet(stageCtx, previewRun, record.MinimizedCaseIDs)
+			if setErr != nil {
+				cancel()
+				reservation.Release()
+				s.fail(run)
+				return
+			}
+			plan, planErr := s.publisher.Plan(stageCtx, set)
 			if planErr != nil {
 				cancel()
 				reservation.Release()

@@ -40,11 +40,15 @@ const (
 )
 
 type Config struct {
-	DataDir            string
-	ServiceExecutable  string
-	WorkspaceRoot      string
-	TrustedWorkspace   bool
-	CoverageBackend    session.CoverageBackend
+	DataDir           string
+	ServiceExecutable string
+	WorkspaceRoot     string
+	TrustedWorkspace  bool
+	CoverageBackend   session.CoverageBackend
+	// GenerationFactory is supplied only by a deployment that has verified
+	// product-owned bundles, coverage evidence and process ownership.
+	// Nil (the production default today) never advertises Protocol v1.5.
+	GenerationFactory  func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
 	CMakeBundleRoot    string
 	DevCMakeExecutable string
 	Platform           string
@@ -72,6 +76,7 @@ type Runtime struct {
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
 	coverageBackend     session.CoverageBackend
+	generationBackend   *generationService
 	coverageExecutor    coverageExecutor
 
 	shutdownMu          sync.Mutex
@@ -463,7 +468,7 @@ func Open(config Config) (*Runtime, error) {
 			Build: coverageBuildPreparer{delegate: buildPreparer}, Tests: embeddedTests,
 			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
 			CoverageBundleRoot: coverageBundleRoot,
-			Clock: config.Clock, NewID: newID,
+			Clock:              config.Clock, NewID: newID,
 		})
 		if err != nil {
 			return runtimeValue.failOpen(err)
@@ -474,6 +479,29 @@ func Open(config Config) (*Runtime, error) {
 			return runtimeValue.failOpen(err)
 		}
 		runtimeValue.coverageBackend = coverageBackend
+	}
+	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend != nil && config.GenerationFactory != nil {
+		concrete, ok := store.(*taskstore.Store)
+		if !ok {
+			return runtimeValue.failOpen(task.ErrStorageUnavailable)
+		}
+		generationConfig, generationErr := config.GenerationFactory(concrete, runtimeValue)
+		if generationErr != nil {
+			return runtimeValue.failOpen(generationErr)
+		}
+		generationConfig.Store = concrete
+		generationConfig.Trusted = true
+		generationConfig.CoverageReady = true
+		// The legacy broker has no owner filter. Generation events remain in
+		// the dedicated durable replay until a scoped stream exists.
+		generationConfig.PublishEvent = nil
+		runtimeValue.generationBackend, generationErr = newGenerationService(generationConfig)
+		if generationErr != nil {
+			return runtimeValue.failOpen(generationErr)
+		}
+		if generationErr = runtimeValue.generationBackend.ResumeAll(ctx); generationErr != nil {
+			return runtimeValue.failOpen(generationErr)
+		}
 	}
 	if runtimeValue.trustedWorkspace {
 		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
@@ -516,6 +544,13 @@ func (r *Runtime) CoverageBackend() session.CoverageBackend {
 		return nil
 	}
 	return r.coverageBackend
+}
+
+func (r *Runtime) GenerationBackend() session.GenerationBackend {
+	if r == nil || !r.trustedWorkspace || r.coverageBackend == nil || r.generationBackend == nil || !r.generationBackend.TestGenerationReady() {
+		return nil
+	}
+	return r.generationBackend
 }
 
 func clockNow(clock task.Clock) time.Time {
@@ -961,6 +996,9 @@ func (r *Runtime) shutdownAttempt(ctx context.Context) error {
 
 func (r *Runtime) closeResources() error {
 	var testErr, brokerErr, artifactErr, storeErr, lockErr, guardErr error
+	if r.generationBackend != nil {
+		r.generationBackend.Close()
+	}
 	if r.testResources != nil {
 		testErr = r.testResources.Close()
 	}

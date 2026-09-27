@@ -3,12 +3,16 @@ package runtime
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/probe"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -18,10 +22,53 @@ import (
 )
 
 type generationDriverFixture struct {
-	mu       sync.Mutex
-	stages   []testgendomain.State
-	launches int
-	complete bool
+	mu                   sync.Mutex
+	stages               []testgendomain.State
+	launches             int
+	complete             bool
+	candidateSetMismatch bool
+}
+
+func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}, nil
+	}
+	called := 0
+	factory := func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error) {
+		called++
+		return GenerationServiceConfig{
+			Driver: &generationDriverFixture{complete: true}, Publisher: &generationPublisherFixture{complete: true},
+			VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+				return r.SnapshotIdentity(), nil
+			},
+			VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+			VerifyProcess:  func(context.Context, string, string) error { return nil },
+		}, nil
+	}
+	untrusted, err := Open(Config{DataDir: filepath.Join(base, "untrusted"), ServiceExecutable: os.Args[0], WorkspaceRoot: workspaceRoot, Platform: goruntime.GOOS, GenerationFactory: factory, dependencies: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untrusted.GenerationBackend() != nil || called != 0 {
+		t.Fatal("untrusted runtime created generation provider")
+	}
+	if err := untrusted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	trusted, err := Open(Config{DataDir: filepath.Join(base, "trusted"), ServiceExecutable: os.Args[0], WorkspaceRoot: workspaceRoot, TrustedWorkspace: true, CoverageBackend: &runtimeCoverageBackend{}, Platform: goruntime.GOOS, GenerationFactory: factory, dependencies: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trusted.Close()
+	if trusted.GenerationBackend() == nil || !trusted.GenerationBackend().TestGenerationReady() || called != 1 {
+		t.Fatal("trusted runtime did not wire ready generation provider")
+	}
 }
 
 func (d *generationDriverFixture) Targets(context.Context, generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error) {
@@ -74,11 +121,79 @@ func (d *generationDriverFixture) RunStage(ctx context.Context, run testgendomai
 func (d *generationDriverFixture) ProjectCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error) {
 	return generationv15.TestGenerationCandidateV15{}, nil
 }
+func (d *generationDriverFixture) ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error {
+	return nil
+}
 func (d *generationDriverFixture) CandidateSet(_ context.Context, run testgendomain.Run, candidates []testgendomain.Candidate) (testgenpublish.CandidateSet, error) {
 	if !d.complete || len(candidates) != 1 {
 		return testgenpublish.CandidateSet{}, task.ErrInvalidArgument
 	}
-	return testgenpublish.CandidateSet{RunID: run.ID, SnapshotDigest: run.Record.SnapshotDigest, CaseIDs: []string{candidates[0].CaseID}}, nil
+	ids := []string{candidates[0].CaseID}
+	if d.candidateSetMismatch {
+		ids = []string{strings.Repeat("9", 32)}
+	}
+	return testgenpublish.CandidateSet{RunID: run.ID, SnapshotDigest: run.Record.SnapshotDigest, CaseIDs: ids}, nil
+}
+
+func TestWarmAcceptRechecksAuthoritativeCandidatesBeforePublisherWrite(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	driver := &generationDriverFixture{complete: true}
+	publisher := &generationPublisherFixture{complete: true}
+	service, err := newGenerationService(GenerationServiceConfig{
+		Store: store, Driver: driver, Publisher: publisher, Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return r.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+		VerifyProcess:  func(context.Context, string, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	owner := strings.Repeat("e", 64)
+	started, err := service.StartTestGeneration(context.Background(), owner, generationv15.TestGenerationStartRequestV15{
+		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64), ProjectID: "core",
+		Scope: generationv15.Workspace, Framework: generationv15.Auto,
+		Goals:   generationv15.TestGenerationGoalsV15{FunctionPercent: 70, LinePercent: 80, BranchPercent: 60},
+		Budgets: generationv15.TestGenerationBudgetsV15{WallTimeMS: 60000, CandidateCount: 4, MemoryMiB: 64, Concurrency: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		run, getErr := service.GetTestGenerationRun(context.Background(), owner, started.RunID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if run.State == generationv15.AwaitingConfirmation {
+			break
+		}
+		if run.State == generationv15.Failed {
+			t.Fatal("generation failed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	driver.mu.Lock()
+	driver.candidateSetMismatch = true
+	driver.mu.Unlock()
+	_, err = service.AcceptTestGeneration(context.Background(), owner, generationv15.TestGenerationAcceptRequestV15{
+		RunID: started.RunID, CandidateID: strings.Repeat("5", 32), ConfirmationDigest: strings.Repeat("d", 64),
+	})
+	if !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("warm accept = %v, want conflict", err)
+	}
+	publisher.mu.Lock()
+	accepts := publisher.accepts
+	publisher.mu.Unlock()
+	if accepts != 0 {
+		t.Fatalf("publisher wrote %d times before revalidation", accepts)
+	}
 }
 
 type generationPublisherFixture struct {
@@ -105,6 +220,9 @@ func (p *generationPublisherFixture) Plan(ctx context.Context, set testgenpublis
 		return testgenpublish.PublishPlan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, CandidateSetDigest: strings.Repeat("b", 64), DiffDigest: strings.Repeat("c", 64), ConfirmationDigest: strings.Repeat("d", 64)}, nil
 	}
 	return testgenpublish.PublishPlan{}, task.ErrInvalidArgument
+}
+func (p *generationPublisherFixture) Receipt(context.Context, testgenpublish.AcceptRequest) (testgenpublish.Receipt, bool, error) {
+	return testgenpublish.Receipt{}, false, nil
 }
 func (p *generationPublisherFixture) Accept(_ context.Context, request testgenpublish.AcceptRequest) (testgenpublish.Receipt, error) {
 	p.mu.Lock()
@@ -328,6 +446,9 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	if run.State != generationv15.AwaitingConfirmation {
 		t.Fatalf("preview state = %q", run.State)
 	}
+	if run.Preview == nil || run.Preview.ConfirmationDigest != strings.Repeat("d", 64) {
+		t.Fatalf("owner-scoped preview is missing: %+v", run.Preview)
+	}
 	persisted, err := store.GetGeneration(context.Background(), run.RunID)
 	if err != nil || persisted.Record.Preview == nil || persisted.Record.Preview.ConfirmationDigest != strings.Repeat("d", 64) {
 		t.Fatalf("durable preview = %+v, %v", persisted.Record, err)
@@ -358,7 +479,7 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	restartedPublisher.mu.Lock()
 	replans, accepts := restartedPublisher.plans, restartedPublisher.accepts
 	restartedPublisher.mu.Unlock()
-	if replans != 1 || accepts != 2 {
+	if replans != 1 || accepts != 1 {
 		t.Fatalf("receipt replay calls plan=%d accept=%d", replans, accepts)
 	}
 	stored, err := store.GetGeneration(context.Background(), run.RunID)

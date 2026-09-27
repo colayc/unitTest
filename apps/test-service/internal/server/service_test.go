@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
@@ -10,7 +11,42 @@ import (
 
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/server"
+	"unit-test-ide.local/test-service/internal/session"
 )
+
+type readyGenerationHandshake struct{ session.GenerationBackend }
+
+func (readyGenerationHandshake) TestGenerationReady() bool { return true }
+
+func TestServiceNegotiatesV15OnlyWithGenerationProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		generation session.GenerationBackend
+	}{
+		{"missing", protocol.Version14, nil},
+		{"ready", protocol.Version15, readyGenerationHandshake{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := newQueuedListener()
+			service := server.NewServiceWithGeneration(listener, "0123456789abcdef", "linux", "unix-socket", nil, projectionCoverageBackend{}, tc.generation, server.ServiceConfig{})
+			done := make(chan error, 1)
+			go func() { done <- service.Serve() }()
+			defer func() { service.Shutdown(); <-done }()
+			client, accepted := net.Pipe()
+			defer client.Close()
+			listener.connections <- accepted
+			payload, _ := json.Marshal(map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0", "supportedProtocolVersions": []string{protocol.Version15, protocol.Version14}})
+			response := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version15, Kind: "request", MessageID: strings.Repeat("a", 32), Method: "handshake", SentAt: sentAt, Payload: payload})
+			if response.Error != nil {
+				t.Fatalf("handshake = %+v", response.Error)
+			}
+			value, ok := response.Payload.(map[string]any)
+			if !ok || value["negotiatedProtocolVersion"] != tc.want {
+				t.Fatalf("negotiated = %+v, want %s", response.Payload, tc.want)
+			}
+		})
+	}
+}
 
 type queuedListener struct {
 	connections  chan net.Conn

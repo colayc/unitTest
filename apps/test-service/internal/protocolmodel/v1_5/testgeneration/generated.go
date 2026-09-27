@@ -75,15 +75,23 @@ type TestGenerationPlannedEditV15 struct {
 }
 
 type TestGenerationRunV15 struct {
-	CandidateCount      *int64                 `json:"candidateCount,omitempty"`
-	CreatedAt           time.Time              `json:"createdAt"`
-	FinishedAt          *time.Time             `json:"finishedAt,omitempty"`
-	LastSequence        int64                  `json:"lastSequence"`
-	ProjectID           string                 `json:"projectId"`
-	RunID               string                 `json:"runId"`
-	State               TestGenerationStateV15 `json:"state"`
-	TaskID              string                 `json:"taskId"`
-	WorkspaceGeneration string                 `json:"workspaceGeneration"`
+	CandidateCount      *int64                    `json:"candidateCount,omitempty"`
+	CreatedAt           time.Time                 `json:"createdAt"`
+	FinishedAt          *time.Time                `json:"finishedAt,omitempty"`
+	LastSequence        int64                     `json:"lastSequence"`
+	Preview             *TestGenerationPreviewV15 `json:"preview,omitempty"`
+	ProjectID           string                    `json:"projectId"`
+	RunID               string                    `json:"runId"`
+	State               TestGenerationStateV15    `json:"state"`
+	TaskID              string                    `json:"taskId"`
+	WorkspaceGeneration string                    `json:"workspaceGeneration"`
+}
+
+type TestGenerationPreviewV15 struct {
+	CandidateSetDigest     string  `json:"candidateSetDigest"`
+	CharacterizationDigest *string `json:"characterizationDigest,omitempty"`
+	ConfirmationDigest     string  `json:"confirmationDigest"`
+	DiffDigest             string  `json:"diffDigest"`
 }
 
 type TestGenerationRunIDRequestV15 struct {

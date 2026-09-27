@@ -139,6 +139,29 @@ func TestPlanAcceptPublishesAndRepeatsWithoutRewrite(t *testing.T) {
 	}
 }
 
+func TestReceiptProbeRequiresCommittedMatchingFiles(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	request := f.request(plan)
+	if _, found, err := f.p.Receipt(context.Background(), request); err != nil || found {
+		t.Fatalf("pre-publication receipt = %v, %v", found, err)
+	}
+	if _, err := f.p.Accept(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	receipt, found, err := f.p.Receipt(context.Background(), request)
+	if err != nil || !found || receipt.ConfirmationDigest != plan.ConfirmationDigest {
+		t.Fatalf("committed receipt = %+v, %v, %v", receipt, found, err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "tests", "generated", "choose_test.cpp"), []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := f.p.Receipt(context.Background(), request); !errors.Is(err, ErrConflict) || found {
+		t.Fatalf("tampered receipt = %v, %v", found, err)
+	}
+}
+
 func TestAcceptRejectsStalePreimageAndChangedGeneratedFile(t *testing.T) {
 	for _, tc := range []struct{ name, path, value string }{{"cmake", "tests/CMakeLists.txt", "user edit\n"}, {"generated", "tests/generated/choose_test.cpp", "user test\n"}} {
 		t.Run(tc.name, func(t *testing.T) {

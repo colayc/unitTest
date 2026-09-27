@@ -156,11 +156,23 @@
         "state": { "$ref": "#/$defs/state" }, "createdAt": { "type": "string", "format": "date-time" },
         "finishedAt": { "type": "string", "format": "date-time" },
         "lastSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 1000 }
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "preview": { "$ref": "#/$defs/preview" }
       },
       "allOf": [
-        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } }
+        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } },
+        { "if": { "properties": { "state": { "enum": ["awaiting_confirmation", "accepted"] } } }, "then": { "required": ["preview"] } }
       ]
+    },
+    "preview": {
+      "title": "TestGenerationPreviewV15", "type": "object", "additionalProperties": false,
+      "required": ["candidateSetDigest", "diffDigest", "confirmationDigest"],
+      "properties": {
+        "candidateSetDigest": { "$ref": "#/$defs/digest" },
+        "diffDigest": { "$ref": "#/$defs/digest" },
+        "confirmationDigest": { "$ref": "#/$defs/digest" },
+        "characterizationDigest": { "$ref": "#/$defs/digest" }
+      }
     },
     "acceptRequest": {
       "title": "TestGenerationAcceptRequestV15", "type": "object", "additionalProperties": false,
