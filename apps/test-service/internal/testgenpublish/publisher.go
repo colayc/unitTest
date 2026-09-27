@@ -24,6 +24,7 @@ type publisherHooks struct {
 	beforeRename       func(string)
 	beforeRollbackMove func(string)
 	afterRestoreCreate func(string, string)
+	afterReplayRemove  func(string)
 	afterBackup        func(string)
 	cleanupRemove      func(string) error
 }
@@ -645,9 +646,6 @@ func (p *Publisher) sameRestoredEntry(parent *os.Root, left, right string, leftI
 }
 
 func (p *Publisher) clearRestoredPair(parent *os.Root, item journalFile, private string, alsoBackup bool) error {
-	if err := parent.Remove(private); err != nil {
-		return ErrConflict
-	}
 	if alsoBackup {
 		info, err := parent.Lstat(item.BackupName)
 		if err != nil || linked(info) || !info.Mode().IsRegular() {
@@ -660,6 +658,15 @@ func (p *Publisher) clearRestoredPair(parent *os.Root, item journalFile, private
 		if err := parent.Remove(item.BackupName); err != nil {
 			return ErrConflict
 		}
+		if p.hooks.afterReplayRemove != nil {
+			p.hooks.afterReplayRemove(item.BackupName)
+		}
+	}
+	if err := parent.Remove(private); err != nil {
+		return ErrConflict
+	}
+	if p.hooks.afterReplayRemove != nil {
+		p.hooks.afterReplayRemove(private)
 	}
 	if err := parent.Remove(item.StageName); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return ErrConflict

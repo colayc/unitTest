@@ -697,3 +697,81 @@ func TestCrashAfterHeldUserFileRestoreConverges(t *testing.T) {
 		t.Fatalf("user file lost: %q %v", data, err)
 	}
 }
+
+func TestCrashAfterFirstRestoredPairRemovalConverges(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "cleanup" {
+			return errors.New("rollback")
+		}
+		return nil
+	}
+	f.p.hooks.beforeRollbackMove = func(rel string) {
+		if rel != "tests/CMakeLists.txt" {
+			return
+		}
+		target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("user during rollback\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.p.hooks.afterRestoreCreate = func(from, to string) {
+		if strings.HasSuffix(from, ".hold") && to == "CMakeLists.txt" {
+			panic("crash after held restore")
+		}
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("held restore crash not reached")
+			}
+		}()
+		_, _ = f.p.Accept(context.Background(), f.request(plan))
+	}()
+	f.close(t)
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRemoved := ""
+	p.hooks.afterReplayRemove = func(name string) {
+		firstRemoved = name
+		panic("crash after first restored-pair removal")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("restored-pair removal crash not reached")
+			}
+		}()
+		_ = p.Recover(context.Background())
+	}()
+	if firstRemoved == "" {
+		t.Fatal("no private entry removed")
+	}
+	if !strings.HasSuffix(firstRemoved, ".backup") {
+		t.Fatalf("first removal was %s, want backup before hold", firstRemoved)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p, err = New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatalf("recover after first removal of %s: %v", firstRemoved, err)
+	}
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatalf("repeat recover: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil || string(data) != "user during rollback\n" {
+		t.Fatalf("user file lost: %q %v", data, err)
+	}
+}
