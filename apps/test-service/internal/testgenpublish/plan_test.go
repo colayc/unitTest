@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	analysis "unit-test-ide.local/test-service/internal/testgenanalysis"
+	assert "unit-test-ide.local/test-service/internal/testgenassert"
 	"unit-test-ide.local/test-service/internal/testgenrender"
+	solver "unit-test-ide.local/test-service/internal/testgensolver"
 )
 
 func TestPlanRejectsUnsafeDestinationsAndDuplicates(t *testing.T) {
@@ -148,5 +151,30 @@ func TestUnityCMakePatchPublishesOnlyGeneratedTestTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "tests", "generated", "choose_test.c")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRendererOutputPlansWithoutDiffReordering(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	symbol := strings.Repeat("d", 64)
+	vectorID := strings.Repeat("e", 64)
+	sourceDigest := strings.Repeat("a", 64)
+	inputs := []solver.Input{{Name: "x", Value: solver.Value{Kind: analysis.TypeInteger, Integer: "2"}}}
+	program := analysis.Program{Version: analysis.IRVersion, Digest: sourceDigest, Functions: []analysis.Function{{SymbolID: symbol, Name: "choose", ReturnType: analysis.Type{Kind: analysis.TypeInteger, BitWidth: 32, Signed: true}, Parameters: []analysis.Parameter{{Name: "x", Type: analysis.Type{Kind: analysis.TypeInteger, BitWidth: 32, Signed: true}}}, Excerpt: analysis.SourceExcerpt{Digest: sourceDigest}, OracleProofs: []analysis.OracleProof{{Kind: string(assert.EvidenceReturnContract), CandidateID: vectorID, InputDigest: assert.InputDigest(inputs), TargetDigest: symbol, SourceDigest: sourceDigest, ExpectedDigest: assert.ValueDigest(solver.Value{Kind: analysis.TypeInteger, Integer: "7"}), Rule: string(assert.RuleEqual)}}, Decision: analysis.Decision{Kind: analysis.DecisionSupported, Reason: analysis.ReasonNone}}}}
+	r := testgenrender.RenderRequest{Program: program, SymbolID: symbol, Language: testgenrender.LanguageCPP, HeaderPath: "include/choose.h", Target: testgenrender.TargetMetadata{TestTarget: "unit_tests", ProductionTarget: "core", FrameworkTarget: "CppUTest", CMakePath: "tests/CMakeLists.txt", TestPath: "tests/generated/choose_test.cpp", ExistingCMake: f.before}, Cases: []testgenrender.Case{{Vector: solver.InputVector{ID: vectorID, Inputs: inputs}, Observation: assert.Observation{SymbolID: symbol, CandidateID: vectorID, Evidence: []assert.Evidence{{Kind: assert.EvidenceReturnContract, Target: assert.TargetReturn, TargetDigest: symbol, SourceDigest: sourceDigest, Expected: solver.Value{Kind: analysis.TypeInteger, Integer: "7"}, Rule: assert.RuleEqual, Stability: assert.StabilityDeterministic}}}}}}
+	staged, err := testgenrender.Render(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set.Files = staged.Files
+	f.set.Diff = staged.Diff
+	f.set.SymbolID = symbol
+	plan, err := f.p.Plan(context.Background(), f.set)
+	if err != nil {
+		t.Fatalf("renderer output rejected: %v", err)
+	}
+	if plan.Diff != staged.Diff {
+		t.Fatal("renderer diff changed")
 	}
 }

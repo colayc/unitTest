@@ -334,3 +334,136 @@ func TestConcurrentPreimageEditBeforeCommitConflictsWithoutOverwrite(t *testing.
 		t.Fatalf("user edit lost: %q %v", data, err)
 	}
 }
+
+func TestReplacementBetweenReadAndRenameIsRestored(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	f.p.hooks.beforeRename = func(relative string) {
+		if relative != "tests/CMakeLists.txt" {
+			return
+		}
+		target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("user replacement\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("race accepted: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil || string(data) != "user replacement\n" {
+		t.Fatalf("raced user file stranded: %q %v", data, err)
+	}
+}
+
+func TestTrustedSnapshotDriftBeforeAndDuringRenameRollsBack(t *testing.T) {
+	for _, stage := range []string{"stage-last", "commit-last"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newFixture(t)
+			defer f.close(t)
+			drift := false
+			f.p.verify = func(context.Context, string) error {
+				if drift {
+					return ErrConflict
+				}
+				return nil
+			}
+			plan := f.plan(t)
+			f.p.hooks.fail = func(s string) error {
+				if s == stage {
+					drift = true
+				}
+				return nil
+			}
+			if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("stale snapshot accepted: %v", err)
+			}
+			cmake, source, mode := readFixture(t, f)
+			if cmake != f.before || source != nil || mode != f.mode {
+				t.Fatal("drift left partial edits")
+			}
+		})
+	}
+}
+
+func TestPostCommitCleanupFailureReportsRecoveryRequired(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	f.p.hooks.cleanupRemove = func(name string) error {
+		if strings.HasSuffix(name, ".backup") {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	receipt, err := f.p.Accept(context.Background(), f.request(plan))
+	if !errors.Is(err, ErrRecoveryRequired) || receipt.ConfirmationDigest != plan.ConfirmationDigest {
+		t.Fatalf("cleanup status: %+v %v", receipt, err)
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("pending cleanup hidden on repeat: %v", err)
+	}
+	f.close(t)
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Accept(context.Background(), f.request(plan)); err != nil {
+		t.Fatalf("committed receipt lost after recovery: %v", err)
+	}
+}
+
+func TestSnapshotDriftDuringLastRenameRollsBack(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	drift := false
+	f.p.verify = func(context.Context, string) error {
+		if drift {
+			return ErrConflict
+		}
+		return nil
+	}
+	plan := f.plan(t)
+	f.p.hooks.beforeRename = func(relative string) {
+		if relative == "tests/CMakeLists.txt" {
+			drift = true
+		}
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("last rename drift accepted: %v", err)
+	}
+	cmake, source, mode := readFixture(t, f)
+	if cmake != f.before || source != nil || mode != f.mode {
+		t.Fatal("late drift left edit")
+	}
+}
+
+func TestUserCreationAfterBackupRenameIsNotOverwritten(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	f.p.hooks.afterBackup = func(relative string) {
+		if relative == "tests/CMakeLists.txt" {
+			if err := os.WriteFile(filepath.Join(f.root, "tests", "CMakeLists.txt"), []byte("new user file\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("want recovery-required conflict: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil || string(data) != "new user file\n" {
+		t.Fatalf("user file overwritten: %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "tests", "generated", "choose_test.cpp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("earlier generated file not rolled back: %v", err)
+	}
+}

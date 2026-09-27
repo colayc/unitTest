@@ -19,7 +19,12 @@ import (
 
 type SnapshotVerifier func(context.Context, string) error
 type AcceptRequest struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string }
-type publisherHooks struct{ fail func(string) error }
+type publisherHooks struct {
+	fail          func(string) error
+	beforeRename  func(string)
+	afterBackup   func(string)
+	cleanupRemove func(string) error
+}
 type Publisher struct {
 	root, journal *os.Root
 	verify        SnapshotVerifier
@@ -33,6 +38,7 @@ type journalFile struct {
 	Before                                                 []byte
 	Mode                                                   uint32
 	Existed                                                bool
+	publishedIdentity                                      os.FileInfo `json:"-"`
 }
 type journalRecord struct {
 	Version            int
@@ -166,47 +172,47 @@ func exactEntry(root *os.Root, dir, base string) bool {
 	}
 	return false
 }
-func (p *Publisher) readTarget(relative string) ([]byte, os.FileMode, bool, error) {
+func (p *Publisher) readTarget(relative string) ([]byte, os.FileMode, bool, os.FileInfo, error) {
 	parent, err := p.parent(relative, false)
 	if errors.Is(err, errMissingParent) {
-		return nil, 0, false, nil
+		return nil, 0, false, nil, nil
 	}
 	if err != nil {
 		if errors.Is(err, ErrConflict) {
-			return nil, 0, false, ErrConflict
+			return nil, 0, false, nil, ErrConflict
 		}
-		return nil, 0, false, err
+		return nil, 0, false, nil, err
 	}
 	defer parent.Close()
 	name := path.Base(relative)
 	info, err := parent.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		if !exactEntryAlias(parent, name) {
-			return nil, 0, false, nil
+			return nil, 0, false, nil, nil
 		}
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
 	if err != nil || linked(info) || !info.Mode().IsRegular() || !exactEntry(parent, ".", name) {
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
 	f, err := parent.Open(name)
 	if err != nil {
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
 	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil || !os.SameFile(info, opened) || opened.Size() < 0 || opened.Size() > maxEditBytes {
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxEditBytes+1))
 	if err != nil || len(data) > maxEditBytes {
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
 	last, err := parent.Lstat(name)
 	if err != nil || !os.SameFile(last, opened) || linked(last) || last.Size() != opened.Size() {
-		return nil, 0, false, ErrConflict
+		return nil, 0, false, nil, ErrConflict
 	}
-	return data, info.Mode().Perm(), true, nil
+	return data, info.Mode().Perm(), true, opened, nil
 }
 func exactEntryAlias(parent *os.Root, name string) bool {
 	f, err := parent.Open(".")
@@ -244,6 +250,11 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 		if !matchesReceiptRequest(receipt, req) || p.verifyReceiptCurrent(receipt) != nil {
 			return Receipt{}, ErrConflict
 		}
+		if _, err := p.journal.Lstat(journalName(req.ConfirmationDigest)); err == nil {
+			return receipt, ErrRecoveryRequired
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Receipt{}, ErrConflict
+		}
 		return receipt, nil
 	}
 	plan, ok := p.plans[req.ConfirmationDigest]
@@ -273,8 +284,9 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 		recoverErr := p.rollback(journal)
 		if recoverErr == nil {
 			_ = p.journal.Remove(journalName(req.ConfirmationDigest))
+			return Receipt{}, cause
 		}
-		return Receipt{}, errors.Join(cause, recoverErr)
+		return Receipt{}, errors.Join(cause, recoverErr, ErrRecoveryRequired)
 	}
 	for i, file := range plan.files {
 		stage := "stage-first"
@@ -294,7 +306,10 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	if err := p.verifyCurrent(plan.files, false); err != nil {
 		return rollback(err)
 	}
-	for i, item := range journal.Files {
+	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+		return rollback(ErrConflict)
+	}
+	for i := range journal.Files {
 		stage := "commit-first"
 		if i == len(journal.Files)-1 {
 			stage = "commit-last"
@@ -305,7 +320,10 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 		if err := ctx.Err(); err != nil {
 			return rollback(err)
 		}
-		if err := p.commitFile(item); err != nil {
+		if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+			return rollback(ErrConflict)
+		}
+		if err := p.commitFile(&journal.Files[i], plan.files[i]); err != nil {
 			return rollback(err)
 		}
 	}
@@ -318,6 +336,9 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	if err := p.verifyCurrent(plan.files, true); err != nil {
 		return rollback(err)
 	}
+	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+		return rollback(ErrConflict)
+	}
 	if err := p.fail("cleanup"); err != nil {
 		return rollback(err)
 	}
@@ -326,7 +347,7 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	}
 	// A durable receipt marks commit. Leftover backups/journal are safely cleaned on restart.
 	if err := p.cleanupCommitted(journal); err != nil {
-		return journal.Receipt, nil
+		return journal.Receipt, errors.Join(ErrRecoveryRequired, err)
 	}
 	return journal.Receipt, nil
 }
@@ -350,7 +371,7 @@ func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
 			return ErrConflict
 		}
 		seen[strings.ToLower(edit.Path)] = true
-		data, _, exists, err := p.readTarget(edit.Path)
+		data, _, exists, _, err := p.readTarget(edit.Path)
 		if err != nil || !exists || digest(data) != edit.AfterDigest {
 			return ErrConflict
 		}
@@ -359,7 +380,7 @@ func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
 }
 func (p *Publisher) verifyCurrent(files []preparedFile, after bool) error {
 	for _, file := range files {
-		data, _, exists, err := p.readTarget(file.edit.Path)
+		data, _, exists, identity, err := p.readTarget(file.edit.Path)
 		if err != nil {
 			return ErrConflict
 		}
@@ -367,7 +388,7 @@ func (p *Publisher) verifyCurrent(files []preparedFile, after bool) error {
 			if !exists || digest(data) != file.edit.AfterDigest {
 				return conflictReceipt(file.edit.Path, file.edit.AfterDigest, data, exists)
 			}
-		} else if exists != file.existed || exists && (!bytes.Equal(data, file.before) || digest(data) != file.edit.BeforeDigest) {
+		} else if exists != file.existed || exists && (!bytes.Equal(data, file.before) || digest(data) != file.edit.BeforeDigest || !os.SameFile(identity, file.identity)) {
 			return conflictReceipt(file.edit.Path, file.edit.BeforeDigest, data, exists)
 		}
 	}
@@ -427,9 +448,9 @@ func (p *Publisher) missingDirectories(files []preparedFile) ([]string, error) {
 	sort.Strings(result)
 	return result, nil
 }
-func (p *Publisher) commitFile(item journalFile) error {
-	before, _, exists, err := p.readTarget(item.Path)
-	if err != nil || exists != item.Existed || exists && digest(before) != item.BeforeDigest {
+func (p *Publisher) commitFile(item *journalFile, file preparedFile) error {
+	before, _, exists, identity, err := p.readTarget(item.Path)
+	if err != nil || exists != item.Existed || exists && (digest(before) != item.BeforeDigest || !os.SameFile(identity, file.identity)) {
 		return ErrConflict
 	}
 	parent, err := p.parent(item.Path, false)
@@ -438,21 +459,41 @@ func (p *Publisher) commitFile(item journalFile) error {
 	}
 	defer parent.Close()
 	name := path.Base(item.Path)
+	if _, err := parent.Lstat(item.BackupName); err == nil {
+		return ErrConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrConflict
+	}
+	if p.hooks.beforeRename != nil {
+		p.hooks.beforeRename(item.Path)
+	}
 	if item.Existed {
 		if err := parent.Rename(name, item.BackupName); err != nil {
 			return ErrConflict
 		}
-		backup, err := parent.Open(item.BackupName)
-		if err != nil {
+		backupInfo, err := parent.Lstat(item.BackupName)
+		if err != nil || linked(backupInfo) || !os.SameFile(backupInfo, identity) {
 			return ErrConflict
 		}
-		data, err := io.ReadAll(io.LimitReader(backup, maxEditBytes+1))
-		_ = backup.Close()
+		data, err := p.readRelative(parent, item.BackupName)
 		if err != nil || digest(data) != item.BeforeDigest {
 			return ErrConflict
 		}
+		if p.hooks.afterBackup != nil {
+			p.hooks.afterBackup(item.Path)
+		}
 	}
-	if err := parent.Rename(item.StageName, name); err != nil {
+	stageIdentity, err := parent.Lstat(item.StageName)
+	if err != nil || linked(stageIdentity) || !stageIdentity.Mode().IsRegular() {
+		return ErrConflict
+	}
+	// Link is exclusive: a user-created destination during the rename window is
+	// never replaced by the generated file.
+	if err := parent.Link(item.StageName, name); err != nil {
+		return ErrConflict
+	}
+	item.publishedIdentity = stageIdentity
+	if err := parent.Remove(item.StageName); err != nil {
 		return ErrConflict
 	}
 	return nil
@@ -539,6 +580,7 @@ func (p *Publisher) rollback(j journalRecord) error {
 		name := path.Base(item.Path)
 		current, currentErr := parent.Lstat(name)
 		backup, backupErr := parent.Lstat(item.BackupName)
+		currentPresent := currentErr == nil
 		if currentErr == nil {
 			if linked(current) || !current.Mode().IsRegular() {
 				result = errors.Join(result, ErrConflict)
@@ -552,17 +594,18 @@ func (p *Publisher) rollback(j journalRecord) error {
 				continue
 			}
 			hash := digest(data)
-			if hash != item.BeforeDigest && hash != item.AfterDigest {
-				result = errors.Join(result, ErrConflict)
-				_ = parent.Close()
-				continue
-			}
-			if hash == item.AfterDigest {
+			if hash == item.AfterDigest && sameMode(current.Mode().Perm(), os.FileMode(item.Mode)) && (item.publishedIdentity == nil || os.SameFile(current, item.publishedIdentity)) {
 				if err := parent.Remove(name); err != nil {
 					result = errors.Join(result, ErrConflict)
 					_ = parent.Close()
 					continue
 				}
+				currentPresent = false
+			} else if hash != item.BeforeDigest || backupErr == nil || item.publishedIdentity != nil && os.SameFile(current, item.publishedIdentity) {
+				// A later user replacement is never deleted to make room for rollback.
+				result = errors.Join(result, ErrConflict)
+				_ = parent.Close()
+				continue
 			}
 		} else if !errors.Is(currentErr, os.ErrNotExist) {
 			result = errors.Join(result, ErrConflict)
@@ -573,13 +616,15 @@ func (p *Publisher) rollback(j journalRecord) error {
 			if backupErr == nil {
 				if linked(backup) || !backup.Mode().IsRegular() {
 					result = errors.Join(result, ErrConflict)
-				} else if b, err := p.readRelative(parent, item.BackupName); err != nil || digest(b) != item.BeforeDigest {
+				} else if currentPresent {
 					result = errors.Join(result, ErrConflict)
-				} else if err := parent.Rename(item.BackupName, name); err != nil {
+				} else if err := parent.Link(item.BackupName, name); err != nil {
+					result = errors.Join(result, ErrConflict)
+				} else if err := parent.Remove(item.BackupName); err != nil {
 					result = errors.Join(result, ErrConflict)
 				}
 			} else if errors.Is(backupErr, os.ErrNotExist) {
-				if _, err := parent.Lstat(name); errors.Is(err, os.ErrNotExist) {
+				if !currentPresent {
 					f, err := parent.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(item.Mode))
 					if err == nil {
 						_, err = f.Write(item.Before)
@@ -592,6 +637,8 @@ func (p *Publisher) rollback(j journalRecord) error {
 			} else {
 				result = errors.Join(result, ErrConflict)
 			}
+		} else if currentPresent {
+			result = errors.Join(result, ErrConflict)
 		}
 		if err := parent.Remove(item.StageName); err != nil && !errors.Is(err, os.ErrNotExist) {
 			result = errors.Join(result, ErrConflict)
@@ -625,6 +672,12 @@ func (p *Publisher) cleanupCommitted(j journalRecord) error {
 			return err
 		}
 		for _, name := range []string{item.BackupName, item.StageName} {
+			if p.hooks.cleanupRemove != nil {
+				if err := p.hooks.cleanupRemove(name); err != nil {
+					_ = parent.Close()
+					return ErrConflict
+				}
+			}
 			if err := parent.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 				_ = parent.Close()
 				return ErrConflict

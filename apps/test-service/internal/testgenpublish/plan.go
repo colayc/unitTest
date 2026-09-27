@@ -18,6 +18,7 @@ import (
 
 var ErrInvalidPlan = errors.New("invalid test publication plan")
 var ErrConflict = errors.New("test publication conflict")
+var ErrRecoveryRequired = errors.New("test publication committed; recovery required")
 
 const maxEditBytes = 4 << 20
 const maxTotalEditBytes = 16 << 20
@@ -40,11 +41,12 @@ type PublishPlan struct {
 }
 
 type preparedFile struct {
-	edit    PlannedEdit
-	after   []byte
-	before  []byte
-	mode    os.FileMode
-	existed bool
+	edit     PlannedEdit
+	after    []byte
+	before   []byte
+	mode     os.FileMode
+	existed  bool
+	identity os.FileInfo
 }
 type preparedPlan struct {
 	public PublishPlan
@@ -94,7 +96,7 @@ func cmakePath(s string) bool {
 }
 
 func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, error) {
-	if p == nil || ctx == nil || p.root == nil || p.verify == nil || !validHex(set.RunID, 32) || !validHex(set.SnapshotDigest, 64) || len(set.CaseIDs) == 0 || len(set.CaseIDs) > 1000 || len(set.Files) < 2 || len(set.Files) > maxFiles || !identifier.MatchString(set.TestTarget) || !identifier.MatchString(set.ProductionTarget) || !identifier.MatchString(set.FrameworkTarget) || set.TestTarget == set.ProductionTarget || set.TestTarget == set.FrameworkTarget || set.ProductionTarget == set.FrameworkTarget || (set.FrameworkTarget != "CppUTest" && set.FrameworkTarget != "Unity") || (set.FrameworkTarget == "Unity" && !validHex(set.SymbolID, 64)) {
+	if p == nil || ctx == nil || p.root == nil || p.verify == nil || !validHex(set.RunID, 32) || !validHex(set.SnapshotDigest, 64) || len(set.CaseIDs) == 0 || len(set.CaseIDs) > 1000 || len(set.Files) < 2 || len(set.Files) > maxFiles || !identifier.MatchString(set.TestTarget) || !identifier.MatchString(set.ProductionTarget) || !identifier.MatchString(set.FrameworkTarget) || set.TestTarget == set.ProductionTarget || set.TestTarget == set.FrameworkTarget || set.ProductionTarget == set.FrameworkTarget || (set.FrameworkTarget != "CppUTest" && set.FrameworkTarget != "Unity" && set.FrameworkTarget != "unity") || ((set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !validHex(set.SymbolID, 64)) {
 		return PublishPlan{}, ErrInvalidPlan
 	}
 	if err := ctx.Err(); err != nil {
@@ -138,7 +140,7 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 			}
 			cmakeIndex = len(files)
 		}
-		before, mode, exists, err := p.readTarget(edit.Path)
+		before, mode, exists, identity, err := p.readTarget(edit.Path)
 		if err != nil {
 			return PublishPlan{}, err
 		}
@@ -148,7 +150,10 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 		if exists && digest(before) == edit.AfterDigest {
 			return PublishPlan{}, ErrInvalidPlan
 		}
-		files = append(files, preparedFile{edit: PlannedEdit{Path: edit.Path, BeforeDigest: edit.BeforeDigest, AfterDigest: edit.AfterDigest}, after: append([]byte(nil), edit.Content...), before: before, mode: mode, existed: exists})
+		if !exists {
+			mode = 0600
+		}
+		files = append(files, preparedFile{edit: PlannedEdit{Path: edit.Path, BeforeDigest: edit.BeforeDigest, AfterDigest: edit.AfterDigest}, after: append([]byte(nil), edit.Content...), before: before, mode: mode, existed: exists, identity: identity})
 	}
 	if cmakeIndex < 0 {
 		return PublishPlan{}, ErrInvalidPlan
@@ -162,7 +167,7 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 		if file.existed && file.mode&0222 == 0 {
 			return PublishPlan{}, ErrConflict
 		}
-		if set.FrameworkTarget == "Unity" && !strings.HasSuffix(file.edit.Path, ".c") || set.FrameworkTarget == "CppUTest" && !strings.HasSuffix(file.edit.Path, ".cpp") {
+		if (set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !strings.HasSuffix(file.edit.Path, ".c") || set.FrameworkTarget == "CppUTest" && !strings.HasSuffix(file.edit.Path, ".cpp") {
 			return PublishPlan{}, ErrInvalidPlan
 		}
 		ref, ok := cmakeSourceRef(cmake.edit.Path, file.edit.Path)
@@ -174,7 +179,8 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 	if !validCMakePatch(string(cmake.before), string(cmake.after), set, sources) {
 		return PublishPlan{}, ErrInvalidPlan
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].edit.Path < files[j].edit.Path })
+	// Preserve the renderer's source-first order for the canonical unified diff.
+	// The digest-bound edit identity below is sorted independently.
 	var diff strings.Builder
 	edits := make([]PlannedEdit, 0, len(files))
 	for _, file := range files {
@@ -189,12 +195,14 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 		encoded, _ := json.Marshal(chars)
 		charDigest = digest(encoded)
 	}
+	identityEdits := append([]PlannedEdit(nil), edits...)
+	sort.Slice(identityEdits, func(i, j int) bool { return identityEdits[i].Path < identityEdits[j].Path })
 	identity := struct {
 		RunID, Snapshot, TestTarget, ProductionTarget, FrameworkTarget, SymbolID string
 		CaseIDs                                                                  []string
 		Edits                                                                    []PlannedEdit
 		CharacterizationDigest                                                   string
-	}{set.RunID, set.SnapshotDigest, set.TestTarget, set.ProductionTarget, set.FrameworkTarget, set.SymbolID, append([]string(nil), set.CaseIDs...), edits, charDigest}
+	}{set.RunID, set.SnapshotDigest, set.TestTarget, set.ProductionTarget, set.FrameworkTarget, set.SymbolID, append([]string(nil), set.CaseIDs...), identityEdits, charDigest}
 	sort.Strings(identity.CaseIDs)
 	encoded, _ := json.Marshal(identity)
 	setDigest := digest(encoded)
@@ -215,7 +223,7 @@ func cmakeSourceRef(cmake, test string) (string, bool) {
 	return strings.TrimPrefix(test, base+"/"), true
 }
 func validCMakePatch(before, after string, set CandidateSet, sources []string) bool {
-	if set.FrameworkTarget == "Unity" && len(sources) != 1 {
+	if (set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && len(sources) != 1 {
 		return false
 	}
 	if len(before) > 1<<20 || len(after) > 1<<20 || !strings.Contains(before, "add_executable("+set.TestTarget+" ") || !strings.Contains(before, "target_link_libraries("+set.TestTarget+" ") || !strings.Contains(before, set.ProductionTarget) || !strings.Contains(before, set.FrameworkTarget) {
@@ -238,7 +246,7 @@ func validCMakePatch(before, after string, set CandidateSet, sources []string) b
 	}
 	allowed := map[string]int{}
 	for _, source := range sources {
-		if set.FrameworkTarget == "Unity" {
+		if set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity" {
 			generated := set.TestTarget + "_generated_" + set.SymbolID[:12]
 			allowed[fmt.Sprintf("add_executable(%s \"%s\")", generated, source)]++
 			allowed[fmt.Sprintf("target_link_libraries(%s PRIVATE %s %s)", generated, set.ProductionTarget, set.FrameworkTarget)]++
