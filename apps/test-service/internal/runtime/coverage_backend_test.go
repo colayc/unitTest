@@ -224,16 +224,17 @@ func TestRuntimeCoverageBackendDelegatesCanonicalReads(t *testing.T) {
 
 func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 	valid := []struct {
-		name     string
-		platform string
-		family   toolchain.Family
-		compiler coveragedomain.CompilerFamily
-		driver   coveragedomain.DriverName
-		collect  coveragedomain.CollectorName
+		name        string
+		platform    string
+		family      toolchain.Family
+		compiler    coveragedomain.CompilerFamily
+		driver      coveragedomain.DriverName
+		collect     coveragedomain.CollectorName
+		unavailable bool
 	}{
-		{"windows clang-cl", "windows", toolchain.FamilyClangCL, coveragedomain.CompilerFamilyClangCL, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov},
-		{"linux gcc", "linux", toolchain.FamilyGCC, coveragedomain.CompilerFamilyGCC, coveragedomain.DriverGCov, coveragedomain.CollectorGCovr},
-		{"linux clang", "linux", toolchain.FamilyClang, coveragedomain.CompilerFamilyClang, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov},
+		{"windows clang-cl", "windows", toolchain.FamilyClangCL, coveragedomain.CompilerFamilyClangCL, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov, false},
+		{"linux gcc", "linux", toolchain.FamilyGCC, coveragedomain.CompilerFamilyGCC, coveragedomain.DriverGCov, coveragedomain.CollectorGCovr, false},
+		{"linux clang", "linux", toolchain.FamilyClang, coveragedomain.CompilerFamilyClang, coveragedomain.DriverLLVMCov, coveragedomain.CollectorLLVMCov, true},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -263,6 +264,12 @@ func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 				instance.Coverage = toolchain.CoverageCapability{LLVMProfdata: paths[2], LLVMCov: paths[3], CompilerEvidence: evidence[0], CXXCompilerEvidence: evidence[1], ProfdataEvidence: evidence[2], CovEvidence: evidence[3], ToolsetIdentity: identity}
 			}
 			got, err := coverageToolchainSnapshot(instance, test.platform)
+			if test.unavailable {
+				if !errors.Is(err, coveragedomain.ErrInvalidToolchain) || got.InstrumentationFingerprint != "" {
+					t.Fatalf("Linux Clang advertised Windows-only instrumentation: snapshot = %#v, error = %v", got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("coverageToolchainSnapshot() error = %v", err)
 			}

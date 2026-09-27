@@ -3,6 +3,7 @@
 package coveragellvm
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
@@ -85,6 +88,28 @@ func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 	}
 	if err := result.Verify(); err != nil {
 		return fail(err)
+	}
+	// A recomputed identity alone cannot attest to the claimed version. Probe
+	// each retained executable under a bound, revalidating the pins around it.
+	runner := probe.NewRunner()
+	for index, path := range paths {
+		if err := result.Verify(); err != nil {
+			return fail(err)
+		}
+		output, runErr := runner.Run(context.Background(), probe.Spec{
+			Executable: path, Args: []string{"--version"}, Env: []string{},
+			Timeout: 5 * time.Second, MaxOutput: 64 * 1024,
+		})
+		if err := result.Verify(); err != nil {
+			return fail(err)
+		}
+		if runErr != nil || output.ExitCode != 0 || len(output.Stderr) != 0 {
+			return fail(errors.New("LLVM version probe failed"))
+		}
+		version, err := toolchain.LLVMVersionFromBanner(roles[index], output.Stdout)
+		if err != nil || version != instance.Version {
+			return fail(errors.New("LLVM tool version mismatch"))
+		}
 	}
 	return result, nil
 }

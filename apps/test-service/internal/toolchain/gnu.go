@@ -45,7 +45,6 @@ var (
 	gccVersionPattern   = regexp.MustCompile(`(?i)(?:\bgcc\b|(?:^|[^A-Za-z0-9_])g\+\+(?:$|[^A-Za-z0-9_])|\bgnu compiler collection\b)[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	gcovVersionPattern  = regexp.MustCompile(`(?i)\bgcov\b[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	clangVersionPattern = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
-	llvmVersionPattern  = regexp.MustCompile(`(?i)\b(?:llvm-profdata|llvm) version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	versionPattern      = regexp.MustCompile(`^[0-9]+\.[0-9]+(?:\.[0-9]+)?$`)
 	triplePattern       = regexp.MustCompile(`^[A-Za-z0-9_+.]+(?:-[A-Za-z0-9_+.]+)+$`)
 )
@@ -407,12 +406,8 @@ func (adapter *gnuAdapter) probeLLVMCoverage(ctx context.Context, instance Insta
 		if err != nil {
 			return CoverageCapability{}, err
 		}
-		line, err := parseFirstLine(output, 4096)
-		if err != nil {
-			return CoverageCapability{}, err
-		}
-		match := llvmVersionPattern.FindStringSubmatch(line)
-		if len(match) != 2 || match[1] != instance.Version {
+		version, err := LLVMVersionFromBanner(roles[index], output)
+		if err != nil || version != instance.Version {
 			return CoverageCapability{}, ErrInvalidToolchain
 		}
 	}

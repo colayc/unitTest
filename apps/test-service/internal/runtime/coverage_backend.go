@@ -289,20 +289,9 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"}
 		result.InstrumentationFingerprint = coveragegcc.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyClang:
-		tools := []toolchain.LLVMToolEvidence{
-			{Role: "clang", Path: instance.CCompiler, Evidence: instance.Coverage.CompilerEvidence},
-			{Role: "clang++", Path: instance.CXXCompiler, Evidence: instance.Coverage.CXXCompilerEvidence},
-			{Role: "llvm-profdata", Path: instance.Coverage.LLVMProfdata, Evidence: instance.Coverage.ProfdataEvidence},
-			{Role: "llvm-cov", Path: instance.Coverage.LLVMCov, Evidence: instance.Coverage.CovEvidence},
-		}
-		identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
-		if err != nil || identity != instance.Coverage.ToolsetIdentity {
-			return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
-		}
-		result.Compiler.Family = coveragedomain.CompilerFamilyClang
-		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: instance.Version}
-		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: instance.Version}
-		result.InstrumentationFingerprint = coveragellvm.InstrumentationFingerprint()
+		// Tool pinning is available, but the retained instrumentation producer
+		// still targets clang-cl. Do not advertise it as Linux Clang coverage.
+		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
 	default:
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
 	}

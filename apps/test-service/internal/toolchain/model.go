@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Family string
@@ -43,6 +45,33 @@ type LLVMToolEvidence struct {
 	Role     string
 	Path     string
 	Evidence ExecutableEvidence
+}
+
+var (
+	llvmCompilerBannerVersion = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+	llvmUtilityBannerVersion  = regexp.MustCompile(`(?i)\b(?:llvm|llvm-profdata|llvm-cov) version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+)
+
+// LLVMVersionFromBanner accepts one unambiguous version anywhere in a bounded
+// tool banner; llvm-profdata commonly prints its version on a later line.
+func LLVMVersionFromBanner(role string, output []byte) (string, error) {
+	if len(output) == 0 || len(output) > 64*1024 || !utf8.Valid(output) || strings.IndexByte(string(output), 0) >= 0 {
+		return "", errors.New("invalid LLVM version banner")
+	}
+	var pattern *regexp.Regexp
+	switch role {
+	case "clang", "clang++":
+		pattern = llvmCompilerBannerVersion
+	case "llvm-profdata", "llvm-cov":
+		pattern = llvmUtilityBannerVersion
+	default:
+		return "", errors.New("unknown LLVM tool role")
+	}
+	matches := pattern.FindAllSubmatch(output, 2)
+	if len(matches) != 1 {
+		return "", errors.New("ambiguous LLVM version banner")
+	}
+	return string(matches[0][1]), nil
 }
 
 // LLVMToolsetIdentityForTools constructs the Linux four-tool identity. Paths

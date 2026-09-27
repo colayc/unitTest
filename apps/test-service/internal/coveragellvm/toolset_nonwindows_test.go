@@ -11,8 +11,20 @@ import (
 	"syscall"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--probe-supervisor" {
+		status := os.NewFile(3, "probe-supervisor-status")
+		if status == nil {
+			os.Exit(2)
+		}
+		os.Exit(probe.RunSupervisor(os.Stdin, status, os.Stdout, os.Stderr))
+	}
+	os.Exit(m.Run())
+}
 
 func TestLinuxPinToolsetKeepsDistinctCompilersAndRejectsReplacement(t *testing.T) {
 	instance := linuxLLVMFixture(t)
@@ -57,6 +69,45 @@ func TestLinuxPinToolsetRejectsMissingMixedAndSyntheticEvidence(t *testing.T) {
 	}
 }
 
+func TestLinuxPinToolsetRejectsSelfConsistentFalseAndMixedVersionClaims(t *testing.T) {
+	for _, variant := range []string{"false-claim", "mixed-tool"} {
+		t.Run(variant, func(t *testing.T) {
+			instance := linuxLLVMFixture(t)
+			if variant == "false-claim" {
+				instance.Version = "19.0.0"
+			} else {
+				content := []byte("#!/bin/sh\nprintf 'LLVM version 19.0.0\\n'\n")
+				if err := os.WriteFile(instance.Coverage.LLVMCov, content, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				sum := sha256.Sum256(content)
+				instance.Coverage.CovEvidence.SHA256 = hex.EncodeToString(sum[:])
+			}
+			instance.Coverage.ToolsetIdentity = linuxLLVMIdentity(t, instance)
+			if pinned, err := PinToolset(instance); err == nil {
+				pinned.Close()
+				t.Fatal("accepted a self-consistent false LLVM version claim")
+			}
+		})
+	}
+}
+
+func linuxLLVMIdentity(t *testing.T, instance toolchain.Instance) string {
+	t.Helper()
+	paths := []string{instance.CCompiler, instance.CXXCompiler, instance.Coverage.LLVMProfdata, instance.Coverage.LLVMCov}
+	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+	evidence := []toolchain.ExecutableEvidence{instance.Coverage.CompilerEvidence, instance.Coverage.CXXCompilerEvidence, instance.Coverage.ProfdataEvidence, instance.Coverage.CovEvidence}
+	tools := make([]toolchain.LLVMToolEvidence, len(paths))
+	for index := range tools {
+		tools[index] = toolchain.LLVMToolEvidence{Role: roles[index], Path: paths[index], Evidence: evidence[index]}
+	}
+	identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
 func linuxLLVMFixture(t *testing.T) toolchain.Instance {
 	t.Helper()
 	root := t.TempDir()
@@ -65,7 +116,11 @@ func linuxLLVMFixture(t *testing.T) toolchain.Instance {
 	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
 	tools := make([]toolchain.LLVMToolEvidence, len(paths))
 	for index, path := range paths {
-		content := []byte(roles[index])
+		banner := "clang version 18.1.3\\n"
+		if index >= 2 {
+			banner = "LLVM version 18.1.3\\n"
+		}
+		content := []byte("#!/bin/sh\nprintf '" + banner + "'\n")
 		if err := os.WriteFile(path, content, 0o755); err != nil {
 			t.Fatal(err)
 		}

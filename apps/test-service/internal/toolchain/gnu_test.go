@@ -516,8 +516,8 @@ func TestLinuxClangProbeRetainsFourVerifiedCoverageTools(t *testing.T) {
 		}
 	}
 	runner := newGNUFakeRunner(t, fixture)
-	runner.outputs[probeKey(profdata, "--version")] = successfulOutput("llvm-profdata version 18.1.3\n")
-	runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 18.1.3\n")
+	runner.outputs[probeKey(profdata, "--version")] = successfulOutput("llvm-profdata\r\nLLVM version 18.1.3\r\n")
+	runner.outputs[probeKey(cov, "--version")] = successfulOutput("llvm-cov\r\nLLVM version 18.1.3\r\n")
 	adapter, err := newGNUAdapter(runner, FamilyClang, nil, "arm64")
 	if err != nil {
 		t.Fatal(err)
@@ -568,7 +568,7 @@ func TestLinuxClangProbeClosesCoverageOnMissingOrMismatchedTool(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux executable identity")
 	}
-	for _, variant := range []string{"missing", "mismatched", "different-root"} {
+	for _, variant := range []string{"missing", "mismatched", "ambiguous", "different-root"} {
 		t.Run(variant, func(t *testing.T) {
 			fixture := newGNUFixture(t)
 			profdata := filepath.Join(filepath.Dir(fixture.clang), "llvm-profdata")
@@ -586,6 +586,8 @@ func TestLinuxClangProbeClosesCoverageOnMissingOrMismatchedTool(t *testing.T) {
 				os.Remove(fixture.clangxx)
 			case "mismatched":
 				runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 19.0.0\n")
+			case "ambiguous":
+				runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 18.1.3\nLLVM version 19.0.0\n")
 			case "different-root":
 				other := filepath.Join(t.TempDir(), "llvm-cov")
 				if err := os.WriteFile(other, []byte("cov"), 0o755); err != nil {
