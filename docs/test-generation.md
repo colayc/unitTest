@@ -16,13 +16,13 @@ Protocol v1.5 提供以下 scope：
 
 | scope | 输入 | 典型入口 |
 | --- | --- | --- |
-| `symbol` | 已发现的 symbol ID | 函数/方法编辑器上下文 |
+| `symbol` | 已发现的 symbol ID | 函数/方法编辑器上下文（需要权威 picker 提供 ID） |
 | `file` | workspace-relative file URI | 当前文件 |
-| `target` | 已发现的 CMake target ID | target 上下文 |
-| `workspace` | 已信任的 workspace generation | 全工作区（按 target 分批） |
-| `coverage-gap` | 已知 function/line/branch location ID | coverage viewer 的缺口 |
+| `target` | 已发现的 CMake target ID | target 上下文（需要权威 picker 提供 ID） |
+| `workspace` | 已信任的 workspace generation | 全工作区（按 target 分批，需有效 workspace context） |
+| `coverage-gap` | `coverageReportId` | coverage viewer 的缺口（由服务从报告解析具体缺口） |
 
-扩展命令包括 `unitTestIde.generateTests`、`generateTestsForSymbol`、`generateTestsForFile`、`generateTestsForTarget`、`generateTestsForCoverageGap`、`reviewGeneratedTests`、`acceptGeneratedTests` 和 `cancelTestGeneration`。服务端方法为 `testGeneration/targets/list`、`testGeneration/start`、`testGeneration/runs/get`、`testGeneration/candidates/list` 和 `testGeneration/accept`；取消复用任务取消方法。
+扩展命令已注册：`unitTestIde.generateTests`、`generateTestsForSymbol`、`generateTestsForFile`、`generateTestsForTarget`、`generateTestsForCoverageGap`、`reviewGeneratedTests`、`acceptGeneratedTests` 和 `cancelTestGeneration`。当前 Code-OSS host 只有文件上下文可以从活动编辑器得到；`symbol`、`target` 和 `coverage-gap` 没有权威的 service-backed picker 时必须 fail-closed，不能猜测或让用户手填 ID，因此当前不是可用的一键入口。workspace 也必须带有效的受信任 workspace context。服务端方法为 `testGeneration/targets/list`、`testGeneration/start`、`testGeneration/runs/get`、`testGeneration/candidates/list` 和 `testGeneration/accept`；取消使用专用的 `testGeneration/runs/cancel`，不是旧版 `tasks/cancel`。
 
 生成请求只包含 workspace URI/generation、已发现的目标标识、框架偏好、覆盖率目标、资源预算和幂等 key。客户端不能提交 shell 字符串、可执行文件、argv/environment、原生工作目录、任意编译/链接选项、输出路径、网络位置或 Mock/Stub 配置。
 
@@ -76,13 +76,13 @@ queued -> baseline -> analyzing -> solving -> rendering
 
 结果面板显示基线/最终函数、行、分支覆盖率及 delta；每个候选的 kind、断言来源、独立覆盖贡献、诊断、资源使用、拒绝原因和 exact generated-test/CMake diff。生成期间以及 `awaiting-confirmation` 之前，正式 workspace 保持只读。
 
-接受请求必须带有 task ID、candidate set digest、workspace generation、source snapshot digest、每个目标文件的 expected-before digest、exact diff digest 和必需的 `confirmationDigest`。服务在写入前重新读取并验证当前 preview、候选、覆盖率/断言证据和所有 preimage；任一摘要、workspace generation 或文件内容变化都会返回 stale/conflict，要求重新生成，绝不套用旧 patch。
+Protocol v1.5 的 Accept wire request 严格只有 `runId`、`candidateId`、`confirmationDigest` 和 `confirmCharacterization` 四个字段。task/candidate-set、workspace generation、source snapshot、每个目标文件的 expected-before digest、exact diff、候选代码和覆盖率/断言证据均属于服务端持久化的权威 run/preview 状态，不由客户端重复提交。服务在写入前重新读取并验证这些状态；任一摘要、workspace generation 或文件内容变化都会返回 stale/conflict，要求重新生成，绝不套用旧 patch。
 
 唯一允许写入的路径是服务验证过的 generated test 文件及其所需测试目标 CMake 条目。测试源和 CMake patch 在一次确认交易中原子提交；写入、flush、rename 或回读失败时完整回滚。重复接受相同摘要是幂等的；不同 preimage 产生冲突而不覆盖用户内容。
 
 ## 取消、重启和恢复
 
-取消会关闭 generation task，按拥有关系终止 analyzer/solver/compiler/test/coverage 的完整进程树，等待 stage/process-owner close attestation 后才进入 `cancelled`，清理服务临时根目录并保持正式 workspace 字节不变。服务重启后只恢复有持久摘要和 owner identity 的阶段：已完成阶段可重放，不重新接管无 owner 的外部进程；摘要或身份漂移会终止为 stale/failed，未确认候选不会自动发布。
+客户端通过 Protocol v1.5 的 `testGeneration/runs/cancel` 关闭 generation run，按拥有关系终止 analyzer/solver/compiler/test/coverage 的完整进程树，等待 stage/process-owner close attestation 后才进入 `cancelled`，清理服务临时根目录并保持正式 workspace 字节不变。服务重启后只恢复有持久摘要和 owner identity 的阶段：已完成阶段可重放，不重新接管无 owner 的外部进程；摘要或身份漂移会终止为 stale/failed，未确认候选不会自动发布。
 
 进度读取是 owner-scoped、分页/有界 replay；其他 session 不能读取、取消或接受本次 run。任何取消、崩溃、超时、候选失败或覆盖率下降都必须可解释地显示，而不是报告为成功。
 
@@ -96,7 +96,7 @@ queued -> baseline -> analyzing -> solving -> rendering
 
 首次部署/升级时，在允许联网的准备环境下载并锁定产品审查过的 Clang/analyzer bundle、逐文件 SHA-256、版本、资源目录、完整 inventory 和 license notice；进入运行环境后只执行离线 `check:testgen-bundle`/等价校验，不访问网络、不从 `PATH` 或用户命令回退。bundle 缺失、替换、额外文件、摘要/许可证不匹配时能力不可用。
 
-用户在 Code-OSS 中选择范围后执行“生成测试并提高覆盖率”：启动、查看阶段进度、等待预览、逐项/批量确认、原子接受，然后可一键运行全部测试并查看覆盖率。整个旅程不需要终端命令；接受后的首次运行仍使用既有测试发现、执行和 coverage report 管道。
+在提供有效上下文（当前 host 可直接解析文件，或未来接入权威 symbol/target/coverage-gap picker）后，用户可在 Code-OSS 中执行“生成测试并提高覆盖率”：启动、查看阶段进度、等待预览、逐项/批量确认、原子接受，然后一键运行全部测试并查看覆盖率。缺少权威 picker 时相关命令保持 fail-closed，而不是伪造 selection。整个可用旅程不需要终端命令；接受后的首次运行仍使用既有测试发现、执行和 coverage report 管道。
 
 ## 证据与发布状态
 
