@@ -9,7 +9,7 @@ const commit = "b".repeat(40);
 
 function report(mutation) {
   return {
-    schemaVersion: 1, candidateCommit: commit, platform: "linux", toolchainFamily: "gcc", framework: "cpputest",
+    schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", producerReceiptSha256: null, platform: "linux", toolchainFamily: "gcc", framework: "cpputest",
     compiler: { family: "gcc", version: "14.2.0", sha256: digest("gcc") },
     frameworkIdentity: { version: "4.0", sha256: digest("cpputest"), treeSha256: digest("cpputest-tree") },
     cmake: { version: "3.30.0", sha256: digest("cmake") },
@@ -27,4 +27,3 @@ test("mutation gate requires the declared retained suite to kill enough mutation
   assert.throws(() => buildToolchainReport(report({ total: 4, killed: 2, requiredKilled: 3 })), /mutation gate/u);
   assert.throws(() => buildToolchainReport(report({ total: 4, killed: 5, requiredKilled: 3 })), /mutation gate/u);
 });
-

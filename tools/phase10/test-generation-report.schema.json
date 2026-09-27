@@ -4,10 +4,12 @@
   "title": "Phase 10 native test-generation report",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "candidateCommit", "platform", "toolchainFamily", "framework", "compiler", "frameworkIdentity", "cmake", "coverage", "candidates", "tests", "faultScenarios", "inputArtifactSha256", "outputArtifactSha256", "performance", "mutation"],
+  "required": ["schemaVersion", "candidateCommit", "evidenceKind", "producerReceiptSha256", "platform", "toolchainFamily", "framework", "compiler", "frameworkIdentity", "cmake", "coverage", "candidates", "tests", "faultScenarios", "inputArtifactSha256", "outputArtifactSha256", "performance", "mutation"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "candidateCommit": { "$ref": "#/$defs/commit" },
+    "evidenceKind": { "enum": ["local-static", "external-native-receipt"] },
+    "producerReceiptSha256": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
     "platform": { "enum": ["linux", "win32"] },
     "toolchainFamily": { "enum": ["gcc", "clang", "msvc", "clang-cl"] },
     "framework": { "enum": ["cpputest", "unity"] },

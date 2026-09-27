@@ -20,6 +20,8 @@ function block(platform, family, framework, index) {
   return {
     schemaVersion: 1,
     candidateCommit: commit,
+    evidenceKind: "local-static",
+    producerReceiptSha256: null,
     platform,
     toolchainFamily: family,
     framework,
@@ -64,29 +66,37 @@ test("toolchain report is closed, coverage-improving, and detached", () => {
 });
 
 test("matrix report requires every toolchain/framework exactly once", () => {
-  const result = buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, blocks: matrixBlocks() });
-  assert.equal(result.overallStatus, "passed");
+  const result = buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", blocks: matrixBlocks() });
+  assert.equal(result.overallStatus, "rejected");
   assert.equal(result.blocks.length, 8);
   assert.deepEqual(result.blocks.map(({ platform, toolchainFamily, framework }) => `${platform}:${toolchainFamily}:${framework}`), [
     "linux:gcc:cpputest", "linux:gcc:unity", "linux:clang:cpputest", "linux:clang:unity",
     "win32:msvc:cpputest", "win32:msvc:unity", "win32:clang-cl:cpputest", "win32:clang-cl:unity",
   ]);
   const missing = matrixBlocks().slice(1);
-  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, blocks: missing }), /complete|toolchain/u);
+  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", blocks: missing }), /complete|toolchain/u);
   const duplicate = matrixBlocks(); duplicate[1] = { ...duplicate[0] };
-  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, blocks: duplicate }), /duplicate|toolchain/u);
+  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", blocks: duplicate }), /duplicate|toolchain/u);
 });
 
 test("matrix rejects artifact substitution and paths", () => {
   const blocks = matrixBlocks();
   blocks[1] = { ...blocks[1], outputArtifactSha256: blocks[0].outputArtifactSha256 };
-  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, blocks }), /artifact.*digest|duplicate/u);
+  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", blocks }), /artifact.*digest|duplicate/u);
   const unsafe = matrixBlocks(); unsafe[0] = { ...unsafe[0], compiler: { ...unsafe[0].compiler, version: "/usr/bin/gcc" } };
-  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, blocks: unsafe }), /path|compiler/u);
+  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", blocks: unsafe }), /path|compiler/u);
 });
 
 test("checked-in JSON schema accepts a validated toolchain report", () => {
   const ajv = new Ajv2020({ strict: true });
   const validate = ajv.compile(schema);
   assert.equal(validate(block("linux", "gcc", "cpputest", 0)), true);
+});
+
+test("local-static evidence is rejected as native evidence and coverage may not regress", () => {
+  const input = block("linux", "gcc", "cpputest", 0);
+  assert.throws(() => buildToolchainReport({ ...input, evidenceKind: "external-native-receipt", producerReceiptSha256: null }), /external native producer receipt/u);
+  const regressed = { ...input, coverage: { ...input.coverage, final: { ...input.coverage.final, branches: { covered: 0, total: 30 } } } };
+  assert.throws(() => buildToolchainReport(regressed), /coverage metrics cannot regress/u);
+  assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "external-native-receipt", blocks: [input] }), /external producer receipt/u);
 });

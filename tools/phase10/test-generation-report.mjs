@@ -12,7 +12,7 @@ const FRAMEWORKS = Object.freeze(["cpputest", "unity"]);
 const REQUIRED_FAULTS = Object.freeze(["cancel-before-build", "compile-failure", "service-restart"]);
 const METRICS = Object.freeze(["functions", "lines", "branches"]);
 const TOP_KEYS = Object.freeze([
-  "schemaVersion", "candidateCommit", "platform", "toolchainFamily", "framework", "compiler",
+  "schemaVersion", "candidateCommit", "evidenceKind", "producerReceiptSha256", "platform", "toolchainFamily", "framework", "compiler",
   "frameworkIdentity", "cmake", "coverage", "candidates", "tests", "faultScenarios",
   "inputArtifactSha256", "outputArtifactSha256", "performance", "mutation",
 ]);
@@ -68,6 +68,9 @@ function validateCoverage(value) {
   if (!METRICS.some((metric) => coverage.final[metric].covered > coverage.baseline[metric].covered)) {
     fail("coverage must increase for at least one metric");
   }
+  if (METRICS.some((metric) => coverage.final[metric].covered < coverage.baseline[metric].covered)) {
+    fail("coverage metrics cannot regress");
+  }
   for (const metric of METRICS) if (coverage.final[metric].total !== coverage.baseline[metric].total) {
     fail(`${metric} totals changed between baseline and final`);
   }
@@ -77,6 +80,9 @@ function validateToolchainReport(input) {
   const report = exactObject(input, TOP_KEYS, "toolchain report");
   if (report.schemaVersion !== 1) fail("schema version is invalid");
   commit(report.candidateCommit, "candidate commit");
+  if (report.evidenceKind !== "local-static" && report.evidenceKind !== "external-native-receipt") fail("evidence kind is invalid");
+  if (report.evidenceKind === "external-native-receipt") digest(report.producerReceiptSha256, "external native producer receipt");
+  if (report.evidenceKind === "local-static" && report.producerReceiptSha256 !== null) fail("local-static evidence cannot carry an external producer receipt");
   if (!TOOLCHAINS.some(([platform, family]) => platform === report.platform && family === report.toolchainFamily)) {
     fail("platform/toolchain family is invalid");
   }
@@ -125,9 +131,10 @@ export function buildToolchainReport(input) {
 }
 
 export function buildMatrixReport(input) {
-  const matrix = exactObject(input, ["schemaVersion", "candidateCommit", "blocks"], "matrix input");
+  const matrix = exactObject(input, ["schemaVersion", "candidateCommit", "evidenceKind", "blocks"], "matrix input");
   if (matrix.schemaVersion !== 1) fail("matrix schema version is invalid");
   commit(matrix.candidateCommit, "matrix candidate commit");
+  if (matrix.evidenceKind !== "local-static") fail("matrix native evidence requires an external producer receipt");
   if (!Array.isArray(matrix.blocks) || matrix.blocks.length !== TOOLCHAINS.length * FRAMEWORKS.length) fail("matrix toolchain blocks are incomplete");
   const seen = new Set();
   const artifactDigests = new Set();
@@ -147,7 +154,7 @@ export function buildMatrixReport(input) {
   }
   const expected = TOOLCHAINS.flatMap(([platform, family]) => FRAMEWORKS.map((framework) => `${platform}:${family}:${framework}`));
   if (expected.some((key) => !seen.has(key))) fail("matrix toolchain blocks are incomplete");
-  return { schemaVersion: 1, candidateCommit: matrix.candidateCommit, blocks, overallStatus: "passed" };
+  return { schemaVersion: 1, candidateCommit: matrix.candidateCommit, evidenceKind: "local-static", nativeEvidenceEligible: false, blocks, overallStatus: "rejected" };
 }
 
 function canonicalClone(value) {
@@ -167,7 +174,7 @@ async function main(argv) {
   const inputInfo = await lstat(inputPath).catch(() => undefined);
   if (inputInfo === undefined || !inputInfo.isFile() || inputInfo.isSymbolicLink() || inputInfo.size < 2 || inputInfo.size > 8 * 1024 * 1024) fail("report input is unsafe");
   const reports = JSON.parse(await readFile(inputPath, "utf8"));
-  const matrix = buildMatrixReport({ schemaVersion: 1, candidateCommit: argv[3], blocks: reports });
+  const matrix = buildMatrixReport({ schemaVersion: 1, candidateCommit: argv[3], evidenceKind: "local-static", blocks: reports });
   await writeFile(outputPath, `${JSON.stringify(matrix)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
 }
 

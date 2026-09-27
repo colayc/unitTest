@@ -9,7 +9,7 @@ const commit = "c".repeat(40);
 
 function report(performance) {
   return {
-    schemaVersion: 1, candidateCommit: commit, platform: "win32", toolchainFamily: "clang-cl", framework: "unity",
+    schemaVersion: 1, candidateCommit: commit, evidenceKind: "local-static", producerReceiptSha256: null, platform: "win32", toolchainFamily: "clang-cl", framework: "unity",
     compiler: { family: "clang-cl", version: "19.1.0", sha256: digest("clang-cl") },
     frameworkIdentity: { version: "2.6.1", sha256: digest("unity"), treeSha256: digest("unity-tree") },
     cmake: { version: "3.30.0", sha256: digest("cmake") },
@@ -27,4 +27,3 @@ test("performance evidence is deterministic and must stay within both budgets", 
   assert.throws(() => buildToolchainReport(report({ durationMs: 2001, budgetMs: 2000, peakMemoryBytes: 4096, memoryBudgetBytes: 8192 })), /performance budget/u);
   assert.throws(() => buildToolchainReport(report({ durationMs: 1000, budgetMs: 2000, peakMemoryBytes: 8193, memoryBudgetBytes: 8192 })), /performance budget/u);
 });
-
