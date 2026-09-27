@@ -24,6 +24,7 @@ func decodeCoverage(data []byte) (coverage.CoverageDocumentV1, error) {
 func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roots, original, staged map[string]string, target ResolvedCandidate) (ValidationResult, error) {
 	result := ValidationResult{Receipts: make([]StageReceipt, 0, len(stageOrder))}
 	for _, stage := range stageOrder {
+		proofDigest := ""
 		if ctx.Err() != nil {
 			result.Diagnostic = DiagnosticStageFailed
 			return result, nil
@@ -62,7 +63,17 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 				result.Diagnostic = DiagnosticCoverage
 				return result, nil
 			}
-			delta, diagnostic := compareCoverage(baseline, candidate, r.Metrics, target)
+			var proof *TargetCoverageProof
+			if (r.Metrics.Functions || r.Metrics.Branches) && v.Config.ResolveCoverage != nil {
+				resolvedProof, proofErr := v.Config.ResolveCoverage(ctx, target, r.BaselineCoverage, evidence.CoverageJSON)
+				if proofErr != nil {
+					result.Diagnostic = DiagnosticCoverage
+					return result, nil
+				}
+				proof = &resolvedProof
+				proofDigest = resolvedProof.EvidenceDigest
+			}
+			delta, diagnostic := compareCoverage(baseline, candidate, r.Metrics, target, proof, digestBytes(r.BaselineCoverage), digestBytes(evidence.CoverageJSON))
 			if diagnostic != DiagnosticNone {
 				result.Diagnostic = diagnostic
 				return result, nil
@@ -70,17 +81,18 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 			result.Delta = delta
 		}
 		receipt := struct {
-			Stage          Stage
-			CandidateID    string
-			TargetSymbol   string
-			TargetFileURI  string
-			TargetLines    []int64
-			BaselineDigest string
-			SnapshotDigest string
-			OutputDigest   string
-			CoverageDigest string
-			Discovery      []string
-		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.TargetLines, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), evidence.DiscoveredCaseIDs}
+			Stage               Stage
+			CandidateID         string
+			TargetSymbol        string
+			TargetFileURI       string
+			TargetLines         []int64
+			BaselineDigest      string
+			SnapshotDigest      string
+			OutputDigest        string
+			CoverageDigest      string
+			IdentityProofDigest string
+			Discovery           []string
+		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.TargetLines, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), proofDigest, evidence.DiscoveredCaseIDs}
 		encoded, _ := json.Marshal(receipt)
 		result.Receipts = append(result.Receipts, StageReceipt{Stage: stage, Digest: digestBytes(encoded), OutputDigest: receipt.OutputDigest, CoverageDigest: receipt.CoverageDigest})
 	}
@@ -88,7 +100,7 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 	return result, nil
 }
 
-func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate) (CoverageDelta, Diagnostic) {
+func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate, proof *TargetCoverageProof, baselineDigest, candidateDigest string) (CoverageDelta, Diagnostic) {
 	if !reflect.DeepEqual(before.Provenance, after.Provenance) || len(before.Files) != len(after.Files) {
 		return CoverageDelta{}, DiagnosticCoverage
 	}
@@ -136,10 +148,13 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 	if a.Functions.Covered < b.Functions.Covered || a.Lines.Covered < b.Lines.Covered || a.Branches.Covered < b.Branches.Covered {
 		return CoverageDelta{}, DiagnosticRegression
 	}
-	// Coverage JSON v1 contains no stable function or branch IDs. File-level
-	// increases cannot be attributed to TargetSymbol, so those metrics fail
-	// closed until a richer trusted collector identity contract is available.
-	if !selected.Lines || targetDelta.Lines == 0 {
+	identityDelta, diagnostic := proofDelta(before, after, target, proof, baselineDigest, candidateDigest)
+	if diagnostic != DiagnosticNone {
+		return CoverageDelta{}, diagnostic
+	}
+	targetDelta.Functions = identityDelta.Functions
+	targetDelta.Branches = identityDelta.Branches
+	if (!selected.Functions || targetDelta.Functions == 0) && (!selected.Lines || targetDelta.Lines == 0) && (!selected.Branches || targetDelta.Branches == 0) {
 		return CoverageDelta{}, DiagnosticNoDelta
 	}
 	return targetDelta, DiagnosticNone

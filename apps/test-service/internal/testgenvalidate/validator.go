@@ -49,11 +49,17 @@ type ResolvedCandidate struct {
 	// TargetLines is the authoritative source-line set for TargetSymbol.
 	// Coverage JSON v1 has line IDs but no function or branch IDs.
 	TargetLines          []int64
+	TargetFunctionIDs    []string
+	TargetBranchIDs      []string
 	BaselineSHA256       string
 	SourceSnapshotDigest string
 	AssertionDigest      string
 }
 type CandidateResolver func(context.Context, string) (ResolvedCandidate, error)
+
+// TargetCoverageResolver is service-owned and must derive stable identities
+// from trusted raw collector evidence, not from request fields or file totals.
+type TargetCoverageResolver func(context.Context, ResolvedCandidate, []byte, []byte) (TargetCoverageProof, error)
 
 type Config struct {
 	SourceRoot       string
@@ -61,6 +67,7 @@ type Config struct {
 	Planner          StageExecutor
 	VerifyEvidence   EvidenceVerifier
 	ResolveCandidate CandidateResolver
+	ResolveCoverage  TargetCoverageResolver
 }
 
 type Validator struct{ Config Config }
@@ -96,7 +103,7 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 		return result, ErrInvalidRequest
 	}
 	resolved, resolveErr := v.Config.ResolveCandidate(ctx, r.CandidateID)
-	if resolveErr != nil || resolved.ID != r.CandidateID || (resolved.Kind != Verified && resolved.Kind != Characterization) || resolved.Kind != r.Assertion.Kind || resolved.TargetSymbol == "" || !safeRelative(resolved.TargetFileURI) || !validTargetLines(resolved.TargetLines) || !validDigest(resolved.BaselineSHA256) || resolved.BaselineSHA256 != digestBytes(r.BaselineCoverage) || !validDigest(resolved.AssertionDigest) || resolved.AssertionDigest != assertionDigest(r.Assertion) {
+	if resolveErr != nil || resolved.ID != r.CandidateID || (resolved.Kind != Verified && resolved.Kind != Characterization) || resolved.Kind != r.Assertion.Kind || resolved.TargetSymbol == "" || !safeRelative(resolved.TargetFileURI) || !validTargetLines(resolved.TargetLines) || !validStableIDs(resolved.TargetFunctionIDs) || !validStableIDs(resolved.TargetBranchIDs) || !validDigest(resolved.BaselineSHA256) || resolved.BaselineSHA256 != digestBytes(r.BaselineCoverage) || !validDigest(resolved.AssertionDigest) || resolved.AssertionDigest != assertionDigest(r.Assertion) {
 		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
 	if _, err := decodeCoverage(r.BaselineCoverage); err != nil {
