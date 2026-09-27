@@ -28,7 +28,7 @@ function setup(trust: "trusted" | "blocked-untrusted" = "trusted") {
   const status: CommandStatus = { trustState: trust, isActive: () => true, refreshTrust: () => trust, projectService() {} };
   const output: OutputChannelLike = { appendLine() {}, dispose() {} };
   registerTestGenerationCommands({ subscriptions: [] } satisfies CommandContext, controller, status, host, output);
-  return { handlers, errors, info, calls, confirmations, controller };
+  return { handlers, errors, info, calls, confirmations, controller, host };
 }
 
 test("all generation commands are registered exactly once and map to explicit scopes", async () => {
@@ -61,6 +61,21 @@ test("URI-shaped context arguments become safe relative files and symbols use an
   assert.deepEqual(fixture.calls[0], ["start", { scope: "file", file: "src/main.cpp" }]);
   await fixture.handlers.get("unitTestIde.generateTestsForSymbol")!({ fsPath: "C:\\workspace\\src\\main.cpp", path: "/workspace/src/main.cpp" });
   assert.deepEqual(fixture.calls[1], ["start", { scope: "symbol", symbolId: "opaque-symbol" }]);
+});
+
+test("invalid URI contexts are rejected without falling back to another editor target", async () => {
+  const fixture = setup();
+  await fixture.handlers.get("unitTestIde.generateTestsForFile")!({ fsPath: "C:\\other-workspace\\wrong.cpp" });
+  assert.equal(fixture.calls.length, 0);
+  assert.match(fixture.errors[0]!, /invalid|outside the workspace/i);
+});
+
+test("unsupported opaque scopes fail closed when no service-backed picker exists", async () => {
+  const fixture = setup();
+  fixture.host.pickGenerationSelection = async () => undefined;
+  await fixture.handlers.get("unitTestIde.generateTestsForTarget")!();
+  assert.equal(fixture.calls.length, 0);
+  assert.match(fixture.errors[0]!, /picker is available/i);
 });
 
 test("accept command picks a candidate, binds the displayed preview, and double-confirms characterization", async () => {

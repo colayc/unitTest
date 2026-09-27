@@ -564,16 +564,11 @@ function createVSCodeHost(
       if (scope === TestGenerationScopeV15.File && editor) {
         return { file: vscode.workspace.asRelativePath(editor.document.uri, false) };
       }
-      const prompt = scope === TestGenerationScopeV15.Symbol
-        ? "Enter the opaque symbol identifier"
-        : scope === TestGenerationScopeV15.Target
-          ? "Enter the opaque build target identifier"
-          : "Enter the opaque coverage-gap identifier";
-      const value = await vscode.window.showInputBox({ prompt, ignoreFocusOut: true });
-      if (!value) return undefined;
-      if (scope === TestGenerationScopeV15.Symbol) return { symbolId: value };
-      if (scope === TestGenerationScopeV15.Target) return { targetId: value };
-      return { coverageReportId: value };
+      // These opaque identifiers must come from a service-backed picker, not
+      // from hand-entered text. Until the corresponding service picker is
+      // wired, fail closed instead of guessing an ID or another target.
+      void editor;
+      return undefined;
     },
     workspaceRoot: () => vscode.workspace.workspaceFolders?.length === 1
       ? vscode.workspace.workspaceFolders[0]!.uri.fsPath

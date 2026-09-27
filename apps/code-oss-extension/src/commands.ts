@@ -366,6 +366,20 @@ export function registerTestGenerationCommands(
   const startForScope = async (value: unknown, scope: GenerationSelection["scope"]): Promise<void> => {
     const requiresInput = scope !== TestGenerationScopeV15.Workspace;
     let selection = value === undefined && requiresInput ? undefined : generationSelection(value, scope, host.workspaceRoot?.());
+    if (value !== undefined && !selection) {
+      const record = typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+      const uriPath = typeof record?.fsPath === "string" ? record.fsPath : typeof record?.path === "string" ? record.path : undefined;
+      const insideWorkspace = uriPath !== undefined && safeRelativePath(uriPath, host.workspaceRoot?.()) !== undefined;
+      if (insideWorkspace && scope !== TestGenerationScopeV15.File) {
+        // A URI identifies a source context, not an opaque symbol/target ID;
+        // route it to the picker for that same scope.
+        value = undefined;
+        selection = undefined;
+      } else {
+        await host.showErrorMessage("Unit Test: The selected generation context is invalid or outside the workspace.");
+        return;
+      }
+    }
     if (!selection && scope === TestGenerationScopeV15.Workspace) {
       await host.showErrorMessage("Unit Test: A valid workspace selection is required.");
       return;
@@ -376,7 +390,10 @@ export function registerTestGenerationCommands(
         return;
       }
       value = await host.pickGenerationSelection(scope);
-      if (value === undefined) return;
+      if (value === undefined) {
+        await host.showErrorMessage(`Unit Test: No usable ${scope} picker is available in this workspace.`);
+        return;
+      }
       selection = generationSelection(value, scope, host.workspaceRoot?.());
       if (!selection) {
         await host.showErrorMessage("Unit Test: The selected generation target is invalid or outside the workspace.");
