@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -343,6 +346,8 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	if event.Type == task.EventTaskOutput && bytes.Equal(event.Payload, []byte(`{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}`)) {
 		event.TaskID = "00000000000000000000000000000000"
 		event.At = time.Unix(0, 0).UTC()
+		synthetic := sha256.Sum256([]byte("unit-test-ide:legacy-cursor-tombstone:v1:" + strconv.FormatInt(event.Sequence, 10)))
+		event.ID = hex.EncodeToString(synthetic[:16])
 	}
 	eventType := event.Type
 	payload := event.Payload

@@ -195,6 +195,8 @@ func strictGenerationJSON(data []byte, out any) error {
 	return nil
 }
 
+const maxGenerationRecordBytes = 384 << 10 // Matches migration 014's record_json CHECK.
+
 func generationRecordBytes(r testgendomain.GenerationRecord) ([]byte, string, error) {
 	var raw []byte
 	var err error
@@ -203,7 +205,7 @@ func generationRecordBytes(r testgendomain.GenerationRecord) ([]byte, string, er
 	} else {
 		raw, err = json.Marshal(r)
 	}
-	if err != nil || len(raw) > 65536 {
+	if err != nil || len(raw) > maxGenerationRecordBytes {
 		return nil, "", task.ErrInvalidArgument
 	}
 	sum := sha256.Sum256(raw)

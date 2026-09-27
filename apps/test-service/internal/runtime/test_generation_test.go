@@ -255,6 +255,7 @@ type generationPublisherFixture struct {
 	mu                         sync.Mutex
 	recoveries, plans, accepts int
 	complete                   bool
+	diff                       string
 	acceptErr                  error
 }
 
@@ -272,8 +273,12 @@ func (p *generationPublisherFixture) Plan(ctx context.Context, set testgenpublis
 		return testgenpublish.PublishPlan{}, err
 	}
 	if p.complete {
-		sum := sha256.Sum256([]byte(fixtureGenerationDiff))
-		return testgenpublish.PublishPlan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, CandidateSetDigest: strings.Repeat("b", 64), Diff: fixtureGenerationDiff, DiffDigest: hex.EncodeToString(sum[:]), ConfirmationDigest: strings.Repeat("d", 64)}, nil
+		diff := p.diff
+		if diff == "" {
+			diff = fixtureGenerationDiff
+		}
+		sum := sha256.Sum256([]byte(diff))
+		return testgenpublish.PublishPlan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, CandidateSetDigest: strings.Repeat("b", 64), Diff: diff, DiffDigest: hex.EncodeToString(sum[:]), ConfirmationDigest: strings.Repeat("d", 64)}, nil
 	}
 	return testgenpublish.PublishPlan{}, task.ErrInvalidArgument
 }
@@ -726,5 +731,85 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	stored, err := store.GetGeneration(context.Background(), run.RunID)
 	if err != nil || stored.State != testgendomain.StateAccepted || stored.Record.Preview == nil {
 		t.Fatalf("accepted durable state = %+v, %v", stored, err)
+	}
+}
+
+func TestLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.sqlite")
+	store, err := taskstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff := fixtureGenerationDiff + strings.Repeat("+TEST_CASE(generated_branch) { ASSERT_TRUE(1); }\n", 2500)
+	if len(diff) <= 65536 || len(diff) >= 262144 {
+		t.Fatalf("test diff size = %d", len(diff))
+	}
+	driver := &generationDriverFixture{complete: true}
+	publisher := &generationPublisherFixture{complete: true, diff: diff}
+	config := GenerationServiceConfig{
+		Store: store, Driver: driver, Publisher: publisher, Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return r.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+		VerifyProcess:  func(context.Context, string, string) error { return nil },
+	}
+	service, err := newGenerationService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := strings.Repeat("e", 64)
+	started, err := service.StartTestGeneration(context.Background(), owner, generationv15.TestGenerationStartRequestV15{
+		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64), ProjectID: "core",
+		Scope: generationv15.Workspace, Framework: generationv15.Auto,
+		Goals:   generationv15.TestGenerationGoalsV15{FunctionPercent: 70, LinePercent: 80, BranchPercent: 60},
+		Budgets: generationv15.TestGenerationBudgetsV15{WallTimeMS: 60000, CandidateCount: 4, MemoryMiB: 64, Concurrency: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var run generationv15.TestGenerationRunV15
+	for time.Now().Before(deadline) {
+		run, err = service.GetTestGenerationRun(context.Background(), owner, started.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State == generationv15.AwaitingConfirmation || run.State == generationv15.Failed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if run.State != generationv15.AwaitingConfirmation || run.Preview == nil || run.Preview.Diff == nil || *run.Preview.Diff != diff {
+		t.Fatalf("large checkpoint preview = %+v", run)
+	}
+	service.Close()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = taskstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	config.Store = store
+	config.Publisher = &generationPublisherFixture{complete: true, diff: diff}
+	restarted, err := newGenerationService(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if err := restarted.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := restarted.GetTestGenerationRun(context.Background(), owner, started.RunID)
+	if err != nil || resumed.Preview == nil || resumed.Preview.Diff == nil || *resumed.Preview.Diff != diff {
+		t.Fatalf("large restarted preview = %+v, %v", resumed.Preview, err)
+	}
+	accepted, err := restarted.AcceptTestGeneration(context.Background(), owner, generationv15.TestGenerationAcceptRequestV15{
+		RunID: started.RunID, CandidateID: strings.Repeat("5", 32), ConfirmationDigest: resumed.Preview.ConfirmationDigest,
+	})
+	if err != nil || accepted.State != generationv15.Accepted {
+		t.Fatalf("large preview accept = %+v, %v", accepted, err)
 	}
 }

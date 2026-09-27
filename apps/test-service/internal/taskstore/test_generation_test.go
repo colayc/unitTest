@@ -375,6 +375,73 @@ func TestGenerationMigrationPreservesInterleavedLegacyCursorReplay(t *testing.T)
 	}
 }
 
+func TestGenerationRecordCapacityMigrationPreservesCandidateReferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{db: db, newID: task.NewID}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationsThrough(t, context.Background(), store, migrations[:13])
+	run, err := store.CreateGeneration(context.Background(), generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify",
+		Assertions:           []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}},
+		StagedSourceArtifact: testgendomain.ArtifactRef{ID: strings.Repeat("4", 32), Digest: strings.Repeat("e", 64)}, CodeDigest: strings.Repeat("7", 64),
+		PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/classify_test.cpp", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}},
+	}
+	raw, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO test_generation_candidates(run_id,case_id,candidate_json) VALUES(?,?,?)`, run.ID, candidate.CaseID, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE test_generation_runs SET candidate_count=1 WHERE run_id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if _, err := upgraded.GetGeneration(context.Background(), run.ID); err != nil {
+		t.Fatalf("run after capacity migration = %v", err)
+	}
+	candidates, err := upgraded.ListGenerationCandidates(context.Background(), run.ID)
+	if err != nil || len(candidates) != 1 || candidates[0].CaseID != candidate.CaseID {
+		t.Fatalf("candidate after capacity migration = %+v, %v", candidates, err)
+	}
+	var violations int
+	rows, err := upgraded.db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		violations++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if violations != 0 {
+		t.Fatalf("capacity migration broke %d foreign keys", violations)
+	}
+}
+
 func seedGenerationV10(t *testing.T, path string, legacy bool) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
