@@ -40,6 +40,7 @@
     "test:go:race": "go test -race ./apps/test-service/...",
     "test": "pnpm run test:release-producer && pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:coverage-bundle && pnpm run test:testgen-bundle && pnpm run test:framework-bundle && pnpm run test:phase9-gates && pnpm run test:native-framework-matrix && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
     "test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e",
+    "test:phase10:test-generation": "node --test tools/phase10/test-generation-report.test.mjs tools/phase10/mutation.test.mjs tools/phase10/performance.test.mjs tools/phase10/security.test.mjs && pnpm --filter @unit-test-ide/service-probe test:e2e:test-generation",
     "test:e2e:native": "pnpm --filter @unit-test-ide/service-probe test:e2e:native",
     "verify": "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm check:phase9-gates && pnpm check:framework-bundle && pnpm check:testgen-bundle && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
   },

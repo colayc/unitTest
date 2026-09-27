@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.local/schema/phase10/test-generation-report.v1.json",
+  "title": "Phase 10 native test-generation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "candidateCommit", "platform", "toolchainFamily", "framework", "compiler", "frameworkIdentity", "cmake", "coverage", "candidates", "tests", "faultScenarios", "inputArtifactSha256", "outputArtifactSha256", "performance", "mutation"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "candidateCommit": { "$ref": "#/$defs/commit" },
+    "platform": { "enum": ["linux", "win32"] },
+    "toolchainFamily": { "enum": ["gcc", "clang", "msvc", "clang-cl"] },
+    "framework": { "enum": ["cpputest", "unity"] },
+    "compiler": { "$ref": "#/$defs/compiler" },
+    "frameworkIdentity": { "$ref": "#/$defs/frameworkIdentity" },
+    "cmake": { "$ref": "#/$defs/cmake" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "candidates": { "$ref": "#/$defs/candidates" },
+    "tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/generatedTest" } },
+    "faultScenarios": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/faultScenario" } },
+    "inputArtifactSha256": { "$ref": "#/$defs/digest" },
+    "outputArtifactSha256": { "$ref": "#/$defs/digest" },
+    "performance": { "$ref": "#/$defs/performance" },
+    "mutation": { "$ref": "#/$defs/mutation" }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "safeToken": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+\\-]{0,127}$" },
+    "compiler": {
+      "type": "object", "additionalProperties": false,
+      "required": ["family", "version", "sha256"],
+      "properties": { "family": { "enum": ["gcc", "clang", "msvc", "clang-cl"] }, "version": { "$ref": "#/$defs/safeToken" }, "sha256": { "$ref": "#/$defs/digest" } }
+    },
+    "frameworkIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256", "treeSha256"],
+      "properties": { "version": { "enum": ["4.0", "2.6.1"] }, "sha256": { "$ref": "#/$defs/digest" }, "treeSha256": { "$ref": "#/$defs/digest" } }
+    },
+    "cmake": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": { "version": { "$ref": "#/$defs/safeToken" }, "sha256": { "$ref": "#/$defs/digest" } }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["covered", "total"],
+      "properties": { "covered": { "type": "integer", "minimum": 0 }, "total": { "type": "integer", "minimum": 1 } }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["baseline", "final"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/coverageTotals" },
+        "final": { "$ref": "#/$defs/coverageTotals" }
+      }
+    },
+    "coverageTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functions", "lines", "branches"],
+      "properties": { "functions": { "$ref": "#/$defs/metric" }, "lines": { "$ref": "#/$defs/metric" }, "branches": { "$ref": "#/$defs/metric" } }
+    },
+    "candidates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["generated", "retained", "rejected"],
+      "properties": { "generated": { "type": "integer", "minimum": 1 }, "retained": { "type": "integer", "minimum": 0 }, "rejected": { "type": "integer", "minimum": 0 } }
+    },
+    "generatedTest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "candidateKind", "assertionCount", "sourceArtifactSha256", "outputArtifactSha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9\\-]{0,127}$" },
+        "candidateKind": { "enum": ["verified", "characterization"] },
+        "assertionCount": { "type": "integer", "minimum": 1 },
+        "sourceArtifactSha256": { "$ref": "#/$defs/digest" },
+        "outputArtifactSha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "faultScenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "artifactSha256"],
+      "properties": { "id": { "enum": ["cancel-before-build", "compile-failure", "service-restart"] }, "status": { "const": "passed" }, "artifactSha256": { "$ref": "#/$defs/digest" } }
+    },
+    "performance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["durationMs", "budgetMs", "peakMemoryBytes", "memoryBudgetBytes"],
+      "properties": { "durationMs": { "type": "integer", "minimum": 1 }, "budgetMs": { "type": "integer", "minimum": 1 }, "peakMemoryBytes": { "type": "integer", "minimum": 1 }, "memoryBudgetBytes": { "type": "integer", "minimum": 1 } }
+    },
+    "mutation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "killed", "requiredKilled"],
+      "properties": { "total": { "type": "integer", "minimum": 1 }, "killed": { "type": "integer", "minimum": 0 }, "requiredKilled": { "type": "integer", "minimum": 1 } }
+    }
+  }
+}

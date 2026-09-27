@@ -28,6 +28,7 @@
     "test:wfp-integration": "pnpm run build && node --test dist/wfp-offline-boundary.e2e.test.js",
     "test:coverage-bundle": "pnpm run build && node dist/coverage-bundle.js",
     "test:e2e": "node build-service.mjs && pnpm run build && node --test dist/probe.test.js",
+    "test:e2e:test-generation": "node build-service.mjs && pnpm run build && node --test dist/test-generation-e2e.test.js",
     "test:e2e:native": "node build-service.mjs && pnpm run build && node dist/native-run.js",
     "test:e2e:native:linux": "node build-service.mjs && pnpm run build && node dist/native-run.js --platform linux",
     "test:e2e:native:windows": "node build-service.mjs && pnpm run build && node dist/native-run.js --platform win32"
