@@ -1,6 +1,7 @@
 package testgensolver
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"sort"
@@ -31,13 +32,37 @@ type Value struct {
 }
 
 var errUnsafeDomain = errors.New("unproven finite domain")
+var errDomainBudget = errors.New("domain memory budget exceeded")
 
-func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, error) {
+type domainMeter struct {
+	ctx   context.Context
+	limit int64
+	used  int64
+}
+
+func (m *domainMeter) reserve(size int64) error {
+	if err := m.ctx.Err(); err != nil {
+		return err
+	}
+	if size < 0 || size > m.limit-m.used {
+		return errDomainBudget
+	}
+	m.used += size
+	return nil
+}
+
+func finiteDomain(m *domainMeter, typ analysis.Type, thresholds []string, depth int) ([]Value, error) {
+	if err := m.reserve(0); err != nil {
+		return nil, err
+	}
 	if depth > 4 {
 		return nil, errUnsafeDomain
 	}
 	switch typ.Kind {
 	case analysis.TypeBoolean:
+		if err := m.reserve(2 * 96); err != nil {
+			return nil, err
+		}
 		return []Value{{Kind: typ.Kind}, {Kind: typ.Kind, Boolean: true}}, nil
 	case analysis.TypeInteger:
 		if typ.BitWidth != 8 && typ.BitWidth != 16 && typ.BitWidth != 32 && typ.BitWidth != 64 {
@@ -69,6 +94,9 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 			}
 		}
 		sort.Slice(values, func(i, j int) bool { return values[i].Cmp(values[j]) < 0 })
+		if err := m.reserve(int64(len(values)) * 128); err != nil {
+			return nil, err
+		}
 		result := make([]Value, len(values))
 		for i, n := range values {
 			result[i] = Value{Kind: typ.Kind, Integer: n.String()}
@@ -77,6 +105,9 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 	case analysis.TypeFloating:
 		if typ.BitWidth != 32 && typ.BitWidth != 64 {
 			return nil, errUnsafeDomain
+		}
+		if err := m.reserve(6 * 128); err != nil {
+			return nil, err
 		}
 		values := []Value{{Kind: typ.Kind, Float: "-1"}, {Kind: typ.Kind, Float: "0"}, {Kind: typ.Kind, Float: "1"}}
 		for _, raw := range thresholds {
@@ -111,6 +142,9 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 			values = append(values, member)
 		}
 		sort.Strings(values)
+		if err := m.reserve(int64(len(values)) * 128); err != nil {
+			return nil, err
+		}
 		result := make([]Value, len(values))
 		for i, member := range values {
 			result[i] = Value{Kind: typ.Kind, Enum: member}
@@ -120,7 +154,10 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 		if !typ.Owned || typ.Element == nil || depth >= 4 {
 			return nil, errUnsafeDomain
 		}
-		pointee, err := finiteDomain(*typ.Element, nil, depth+1)
+		if err := m.reserve(2 * 128); err != nil {
+			return nil, err
+		}
+		pointee, err := finiteDomain(m, *typ.Element, nil, depth+1)
 		if err != nil || len(pointee) == 0 {
 			return nil, errUnsafeDomain
 		}
@@ -130,13 +167,22 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 		if typ.MaxLength < 1 || typ.MaxLength > 256 {
 			return nil, errUnsafeDomain
 		}
+		if err := m.reserve(3*128 + int64(typ.MaxLength)); err != nil {
+			return nil, err
+		}
 		return []Value{{Kind: typ.Kind}, {Kind: typ.Kind, String: "a"}, {Kind: typ.Kind, String: strings.Repeat("a", typ.MaxLength)}}, nil
 	case analysis.TypeArray:
 		if typ.Bound < 1 || typ.Bound > 16 || typ.Element == nil {
 			return nil, errUnsafeDomain
 		}
-		element, err := finiteDomain(*typ.Element, nil, depth+1)
-		if err != nil || len(element) == 0 {
+		if err := m.reserve(int64(typ.Bound) * 2 * 128); err != nil {
+			return nil, err
+		}
+		element, err := finiteDomain(m, *typ.Element, nil, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if len(element) == 0 {
 			return nil, errUnsafeDomain
 		}
 		values := make([]Value, typ.Bound)
@@ -154,6 +200,9 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 		if !typ.Proven || len(typ.Fields) == 0 || len(typ.Fields) > 16 {
 			return nil, errUnsafeDomain
 		}
+		if err := m.reserve(int64(len(typ.Fields)) * 160); err != nil {
+			return nil, err
+		}
 		fields := append([]analysis.Field(nil), typ.Fields...)
 		sort.Slice(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
 		values := make([]FieldValue, len(fields))
@@ -161,8 +210,11 @@ func finiteDomain(typ analysis.Type, thresholds []string, depth int) ([]Value, e
 			if !identifier(field.Name) || i > 0 && field.Name == fields[i-1].Name {
 				return nil, errUnsafeDomain
 			}
-			domain, err := finiteDomain(field.Type, nil, depth+1)
-			if err != nil || len(domain) == 0 {
+			domain, err := finiteDomain(m, field.Type, nil, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			if len(domain) == 0 {
 				return nil, errUnsafeDomain
 			}
 			values[i] = FieldValue{Name: field.Name, Value: domain[0]}

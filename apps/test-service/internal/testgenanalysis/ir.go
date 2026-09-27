@@ -67,11 +67,13 @@ type Predicate struct {
 	Right    string `json:"right,omitempty"`
 }
 type Branch struct {
-	Kind           BranchKind `json:"kind"`
-	Predicate      Predicate  `json:"predicate"`
-	OwnerSwitchID  string     `json:"ownerSwitchId,omitempty"`
-	BoundVerified  bool       `json:"boundVerified,omitempty"`
-	LocationDigest string     `json:"locationDigest"`
+	Kind           BranchKind  `json:"kind"`
+	Predicate      Predicate   `json:"predicate"`
+	OwnerSwitchID  string      `json:"ownerSwitchId,omitempty"`
+	BoundVerified  bool        `json:"boundVerified,omitempty"`
+	PathVerified   bool        `json:"pathVerified,omitempty"`
+	PathPredicates []Predicate `json:"pathPredicates,omitempty"`
+	LocationDigest string      `json:"locationDigest"`
 }
 type DecisionKind string
 

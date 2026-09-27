@@ -20,7 +20,7 @@ func baseProgram(t analysis.Type, p analysis.Predicate) analysis.Program {
 		Functions: []analysis.Function{{
 			SymbolID: identity, Name: "choose", Parameters: []analysis.Parameter{{Name: "x", Type: t}},
 			Decision: analysis.Decision{Kind: analysis.DecisionSupported, Reason: analysis.ReasonNone},
-			Branches: []analysis.Branch{{Kind: analysis.BranchIf, Predicate: p, LocationDigest: branchID}},
+			Branches: []analysis.Branch{{Kind: analysis.BranchIf, Predicate: p, LocationDigest: branchID, PathVerified: true}},
 		}},
 	}
 }
@@ -119,6 +119,60 @@ func TestMemoryBudgetCountsActualSerializedCandidate(t *testing.T) {
 	}
 }
 
+func TestDomainPreflightRejectsRecursiveExpansionAtTinyBudget(t *testing.T) {
+	typ := analysis.Type{Kind: analysis.TypeString, MaxLength: 256}
+	for i := 0; i < 4; i++ {
+		typ = analysis.Type{Kind: analysis.TypeRecord, Proven: true, Fields: []analysis.Field{{Name: "a", Type: typ}, {Name: "b", Type: typ}, {Name: "c", Type: typ}, {Name: "d", Type: typ}}}
+	}
+	budget := standardBudget()
+	budget.MemoryBytes = 1024
+	v, d, err := (Solver{}).Solve(context.Background(), entryProgram(typ), entryGap(), budget)
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticBudgetExceeded {
+		t.Fatalf("recursive expansion ignored memory budget: %v %v %v", v, d, err)
+	}
+}
+
+func TestSignedUnsignedConversionFailsClosed(t *testing.T) {
+	p := baseProgram(analysis.Type{Kind: analysis.TypeInteger, BitWidth: 32}, analysis.Predicate{Operator: ">", Left: "x", Right: "-1"})
+	v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsupported {
+		t.Fatalf("uint32 > -1 cannot use mathematical integers: %v %v %v", v, d, err)
+	}
+}
+
+func TestUnprovenPathAndContradictoryPathFailClosed(t *testing.T) {
+	p := baseProgram(intType(), analysis.Predicate{Operator: ">", Left: "x", Right: "0"})
+	p.Functions[0].Branches[0].PathVerified = false
+	v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsupported {
+		t.Fatalf("unproven reachability accepted: %v %v %v", v, d, err)
+	}
+	p.Functions[0].Branches[0].PathVerified = true
+	p.Functions[0].Branches[0].PathPredicates = []analysis.Predicate{{Operator: "<", Left: "x", Right: "0"}}
+	v, d, err = (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsatisfiable {
+		t.Fatalf("contradictory nested path accepted: %v %v %v", v, d, err)
+	}
+}
+
+func TestFloatEnumAndAggregateBranchContractsFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		typ analysis.Type
+		p   analysis.Predicate
+	}{
+		{analysis.Type{Kind: analysis.TypeFloating, BitWidth: 64}, analysis.Predicate{Operator: "==", Left: "x", Right: "0.5"}},
+		{analysis.Type{Kind: analysis.TypeEnum, EnumValues: []string{"Z", "A"}}, analysis.Predicate{Operator: "<", Left: "x", Right: "A"}},
+		{analysis.Type{Kind: analysis.TypePointer, Owned: true, Element: &analysis.Type{Kind: analysis.TypeBoolean}}, analysis.Predicate{Operator: "==", Left: "x", Right: "0"}},
+		{analysis.Type{Kind: analysis.TypeString, MaxLength: 3}, analysis.Predicate{Operator: "==", Left: "x", Right: "a"}},
+	} {
+		p := baseProgram(tc.typ, tc.p)
+		v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
+		if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsupported {
+			t.Fatalf("unproven branch relation accepted: %v %v %v", v, d, err)
+		}
+	}
+}
+
 func TestSolveBudgetsCancellationAndNoProgress(t *testing.T) {
 	p := baseProgram(intType(), analysis.Predicate{Operator: "==", Left: "x", Right: "1"})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,7 +194,7 @@ func TestSolveBudgetsCancellationAndNoProgress(t *testing.T) {
 	}
 	p.Functions[0].Branches[0].Predicate = analysis.Predicate{Operator: "==", Left: "x", Right: "9999999999999999999999999999"}
 	v, d, err = (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
-	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsatisfiable {
-		t.Fatalf("unreachable value must stop: %v %v %v", v, d, err)
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsupported {
+		t.Fatalf("unproven literal ABI must stop: %v %v %v", v, d, err)
 	}
 }

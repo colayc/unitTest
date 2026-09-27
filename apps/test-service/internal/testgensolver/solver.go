@@ -132,14 +132,24 @@ func (Solver) Solve(parent context.Context, program analysis.Program, gap Covera
 		}
 		seenNames[p.Name] = true
 	}
-	if !goal.validReferences(parameters) {
+	if !goal.validReferences(parameters) || !goal.validArithmetic(parameters) {
 		return nil, []Diagnostic{{DiagnosticUnsupported}}, nil
 	}
 	// ABI and ownership proof come from structured IR, never spelling guesses.
 	domains := make([][]Value, len(parameters))
+	meter := &domainMeter{ctx: ctx, limit: budget.MemoryBytes}
 	for i, p := range parameters {
-		values, err := finiteDomain(p.Type, goal.constants(p.Name), 0)
-		if err != nil || len(values) == 0 {
+		values, err := finiteDomain(meter, p.Type, goal.constants(p.Name), 0)
+		if err != nil {
+			if parent.Err() != nil {
+				return nil, []Diagnostic{{DiagnosticCancelled}}, parent.Err()
+			}
+			if errors.Is(err, errDomainBudget) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, []Diagnostic{{DiagnosticBudgetExceeded}}, nil
+			}
+			return nil, []Diagnostic{{DiagnosticUnsupported}}, nil
+		}
+		if len(values) == 0 {
 			return nil, []Diagnostic{{DiagnosticUnsupported}}, nil
 		}
 		domains[i] = values
@@ -153,7 +163,7 @@ func (Solver) Solve(parent context.Context, program analysis.Program, gap Covera
 		}
 		product *= len(values)
 	}
-	if int64(product)*512 > budget.MemoryBytes {
+	if int64(product)*512 > budget.MemoryBytes-meter.used {
 		return nil, []Diagnostic{{DiagnosticBudgetExceeded}}, nil
 	}
 	selected := make([]Input, len(parameters))
@@ -185,7 +195,7 @@ func (Solver) Solve(parent context.Context, program analysis.Program, gap Covera
 			}
 			inputs := append([]Input(nil), selected...)
 			encoded, err := json.Marshal(inputs)
-			if err != nil || int64(len(encoded)) > budget.MemoryBytes-retainedBytes {
+			if err != nil || int64(len(encoded)) > budget.MemoryBytes-meter.used-retainedBytes {
 				stopCode = DiagnosticBudgetExceeded
 				return
 			}

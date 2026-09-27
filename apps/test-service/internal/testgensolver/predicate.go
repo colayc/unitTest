@@ -22,6 +22,9 @@ type goalPredicate struct {
 }
 
 func normalizeGoal(branch analysis.Branch, all []analysis.Branch, outcome Outcome) (goalPredicate, error) {
+	if !branch.PathVerified || len(branch.PathPredicates) > 16 {
+		return goalPredicate{}, errPredicate
+	}
 	p := branch.Predicate
 	switch branch.Kind {
 	case analysis.BranchIf, analysis.BranchShortCircuit:
@@ -29,9 +32,9 @@ func normalizeGoal(branch analysis.Branch, all []analysis.Branch, outcome Outcom
 			return goalPredicate{}, errPredicate
 		}
 	case analysis.BranchLoop:
-		if !branch.BoundVerified || outcome != OutcomeLoopEntry && outcome != OutcomeLoopExit {
-			return goalPredicate{}, errPredicate
-		}
+		// A bound proves termination, not the iteration count or reachability
+		// of an outcome. Task 7 has no iteration-state proof in its IR.
+		return goalPredicate{}, errPredicate
 	case analysis.BranchCase:
 		if outcome != OutcomeCase || !hasSwitch(all, branch.OwnerSwitchID) {
 			return goalPredicate{}, errPredicate
@@ -67,7 +70,7 @@ func normalizeGoal(branch analysis.Branch, all []analysis.Branch, outcome Outcom
 		if root == nil {
 			return goalPredicate{}, errPredicate
 		}
-		return goalPredicate{expr: root, wanted: true}, nil
+		return withPath(root, branch)
 	default:
 		return goalPredicate{}, errPredicate
 	}
@@ -78,8 +81,22 @@ func normalizeGoal(branch analysis.Branch, all []analysis.Branch, outcome Outcom
 	if err != nil {
 		return goalPredicate{}, err
 	}
-	wanted := outcome == OutcomeTrue || outcome == OutcomeCase || outcome == OutcomeLoopEntry
-	return goalPredicate{expr: expr, wanted: wanted}, nil
+	wanted := outcome == OutcomeTrue || outcome == OutcomeCase
+	if !wanted {
+		expr = &exprNode{op: "!", left: expr}
+	}
+	return withPath(expr, branch)
+}
+
+func withPath(goal *exprNode, branch analysis.Branch) (goalPredicate, error) {
+	for _, predicate := range branch.PathPredicates {
+		constraint, err := predicateFromIR(predicate)
+		if err != nil {
+			return goalPredicate{}, errPredicate
+		}
+		goal = &exprNode{op: "&&", left: goal, right: constraint}
+	}
+	return goalPredicate{expr: goal, wanted: true}, nil
 }
 
 func (g goalPredicate) validReferences(parameters []analysis.Parameter) bool {
@@ -103,6 +120,103 @@ func (g goalPredicate) validReferences(parameters []analysis.Parameter) bool {
 		return walk(n.left) && walk(n.right)
 	}
 	return walk(g.expr)
+}
+
+// The IR does not prove literal types/ranks or ABI promotions. Accept only
+// comparisons whose result is invariant under the known C/C++ conversions.
+func (g goalPredicate) validArithmetic(parameters []analysis.Parameter) bool {
+	types := make(map[string]analysis.Type, len(parameters))
+	for _, parameter := range parameters {
+		types[parameter.Name] = parameter.Type
+	}
+	var walk func(*exprNode) bool
+	walk = func(n *exprNode) bool {
+		if n == nil {
+			return true
+		}
+		switch n.op {
+		case "&&", "||":
+			return walk(n.left) && walk(n.right)
+		case "!":
+			return walk(n.left)
+		case "atom":
+			if typ, exists := types[n.value]; exists {
+				return typ.Kind == analysis.TypeBoolean
+			}
+			return false
+		case "==", "!=", "<", "<=", ">", ">=":
+			if n.left == nil || n.right == nil || n.left.op != "atom" || n.right.op != "atom" {
+				return false
+			}
+			a, aParam := types[n.left.value]
+			b, bParam := types[n.right.value]
+			if aParam && !branchScalar(a.Kind) || bParam && !branchScalar(b.Kind) {
+				return false
+			}
+			if aParam && a.Kind == analysis.TypeFloating || bParam && b.Kind == analysis.TypeFloating {
+				return false // target precision and adjacent values are not proven
+			}
+			if aParam && a.Kind == analysis.TypeEnum || bParam && b.Kind == analysis.TypeEnum {
+				if n.op != "==" && n.op != "!=" {
+					return false // enum numeric ordinals are absent from this IR
+				}
+				if aParam && bParam {
+					return false // distinct enum type/value identity is unproven
+				}
+				if aParam {
+					return enumMember(a, n.right.value)
+				}
+				return enumMember(b, n.left.value)
+			}
+			if aParam && bParam {
+				if a.Kind != b.Kind {
+					return false
+				}
+				if a.Kind == analysis.TypeInteger && a.Signed != b.Signed {
+					return false
+				}
+				return a.Kind == analysis.TypeInteger || a.Kind == analysis.TypeBoolean && (n.op == "==" || n.op == "!=")
+			}
+			if aParam {
+				return safeLiteralComparison(a, n.right.value, n.op)
+			}
+			if bParam {
+				return safeLiteralComparison(b, n.left.value, n.op)
+			}
+			// A constant-only expression has no input-derived reachability.
+			return false
+		default:
+			return false
+		}
+	}
+	return walk(g.expr)
+}
+
+func branchScalar(kind analysis.TypeKind) bool {
+	return kind == analysis.TypeBoolean || kind == analysis.TypeInteger || kind == analysis.TypeEnum
+}
+
+func enumMember(typ analysis.Type, member string) bool {
+	for _, value := range typ.EnumValues {
+		if value == member {
+			return true
+		}
+	}
+	return false
+}
+
+func safeLiteralComparison(typ analysis.Type, literal, operator string) bool {
+	if typ.Kind != analysis.TypeInteger {
+		return false
+	}
+	n, ok := new(big.Int).SetString(literal, 10)
+	if !ok || n.Cmp(big.NewInt(-1<<31)) < 0 || n.Cmp(big.NewInt(1<<31-1)) > 0 {
+		return false
+	}
+	if !typ.Signed && n.Sign() < 0 {
+		return false
+	}
+	return true
 }
 
 func hasSwitch(all []analysis.Branch, id string) bool {

@@ -23,9 +23,9 @@ func TestSolveNestedBooleanLogicAndSwitchDefault(t *testing.T) {
 	}
 	p.Functions[0].Branches = []analysis.Branch{
 		{Kind: analysis.BranchSwitch, Predicate: analysis.Predicate{Operator: "switch", Left: "x"}, LocationDigest: branchID},
-		{Kind: analysis.BranchCase, Predicate: analysis.Predicate{Operator: "==", Left: "x", Right: "1"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("c", 64)},
-		{Kind: analysis.BranchCase, Predicate: analysis.Predicate{Operator: "==", Left: "x", Right: "2"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("d", 64)},
-		{Kind: analysis.BranchDefault, Predicate: analysis.Predicate{Operator: "default", Left: "x"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("e", 64)},
+		{Kind: analysis.BranchCase, Predicate: analysis.Predicate{Operator: "==", Left: "x", Right: "1"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("c", 64), PathVerified: true},
+		{Kind: analysis.BranchCase, Predicate: analysis.Predicate{Operator: "==", Left: "x", Right: "2"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("d", 64), PathVerified: true},
+		{Kind: analysis.BranchDefault, Predicate: analysis.Predicate{Operator: "default", Left: "x"}, OwnerSwitchID: branchID, LocationDigest: strings.Repeat("e", 64), PathVerified: true},
 	}
 	gap := standardGap(OutcomeCase)
 	gap.BranchID = strings.Repeat("d", 64)
@@ -51,22 +51,10 @@ func TestSolveVerifiedLoopEntryAndExit(t *testing.T) {
 	p := baseProgram(intType(), analysis.Predicate{Operator: "<", Left: "x", Right: "3"})
 	p.Functions[0].Branches[0].Kind = analysis.BranchLoop
 	p.Functions[0].Branches[0].BoundVerified = true
-	for _, tc := range []struct {
-		outcome Outcome
-		want    string
-	}{
-		{OutcomeLoopEntry, "2"}, {OutcomeLoopExit, "3"},
-	} {
-		v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(tc.outcome), standardBudget())
-		if err != nil || len(d) != 0 || len(v) == 0 {
-			t.Fatalf("loop %s: %v %v %v", tc.outcome, v, d, err)
-		}
-		found := false
-		for _, candidate := range v {
-			found = found || candidate.Inputs[0].Value.Integer == tc.want
-		}
-		if !found {
-			t.Fatalf("loop %s missing %s: %+v", tc.outcome, tc.want, v)
+	for _, outcome := range []Outcome{OutcomeLoopEntry, OutcomeLoopExit} {
+		v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(outcome), standardBudget())
+		if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticUnsupported {
+			t.Fatalf("loop %s lacks iteration proof: %v %v %v", outcome, v, d, err)
 		}
 	}
 	p.Functions[0].Branches[0].BoundVerified = false
