@@ -264,3 +264,56 @@ func TestRestartRevalidatesStoredArtifactBytes(t *testing.T) {
 		t.Fatalf("tampered artifact: %v", err)
 	}
 }
+
+func TestCheckpointRejectsExistingArtifactChangedBetweenStages(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(string, int64) error
+	}{
+		{"modified", func(path string, size int64) error {
+			return os.WriteFile(path, []byte(strings.Repeat("x", int(size))), 0600)
+		}},
+		{"deleted", func(path string, _ int64) error { return os.Remove(path) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			s, err := taskstore.Open(filepath.Join(root, "tasks.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			files, err := artifactstore.New(filepath.Join(root, "artifacts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer files.Close()
+			c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+				return coordRequest().SnapshotIdentity(), nil
+			}, files.VerifyGenerationSource)
+			r, err := c.Start(ctx, coordRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := files.CommitGenerationSource(ctx, r.TaskID, strings.Repeat("4", 32), r.CreatedAt, []byte("TEST(Classify, Positive){}\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err = c.Checkpoint(ctx, r.ID, r.Revision, testgendomain.StateBaseline, nil, []task.Artifact{a})
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifactPath := filepath.Join(root, "artifacts", filepath.FromSlash(a.RelativePath))
+			if err := tc.change(artifactPath, a.Size); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Checkpoint(ctx, r.ID, r.Revision, testgendomain.StateAnalyzing, nil, nil); !errors.Is(err, ErrStaleSnapshot) {
+				t.Fatalf("advanced using stale artifact: %v", err)
+			}
+			persisted, err := c.Get(ctx, r.ID)
+			if err != nil || persisted.State != testgendomain.StateBaseline || persisted.Revision != r.Revision || persisted.LastSequence != r.LastSequence {
+				t.Fatalf("checkpoint changed after rejection: %+v, %v", persisted, err)
+			}
+		})
+	}
+}

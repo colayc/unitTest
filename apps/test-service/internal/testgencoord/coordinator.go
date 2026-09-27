@@ -90,6 +90,9 @@ func (c *Coordinator) Checkpoint(ctx context.Context, runID string, expectedRevi
 	if err := c.check(ctx, current.Request); err != nil {
 		return testgendomain.Run{}, err
 	}
+	if err := c.verifyOwnedArtifacts(ctx, current); err != nil {
+		return testgendomain.Run{}, err
+	}
 	next := testgendomain.CloneRun(current)
 	next.State = nextState
 	next.Revision++
@@ -152,14 +155,21 @@ func (c *Coordinator) Resume(ctx context.Context, taskID string) (testgendomain.
 	if err := c.check(ctx, r.Request); err != nil {
 		return testgendomain.Run{}, err
 	}
+	if err := c.verifyOwnedArtifacts(ctx, r); err != nil {
+		return testgendomain.Run{}, err
+	}
+	return r, nil
+}
+
+func (c *Coordinator) verifyOwnedArtifacts(ctx context.Context, r testgendomain.Run) error {
 	for _, ref := range r.ArtifactDigests {
 		a, err := c.store.GetArtifact(ctx, ref.ID)
 		if err != nil || a.TaskID != r.TaskID || a.SHA256 != ref.Digest || c.verifyArtifact == nil {
-			return testgendomain.Run{}, ErrStaleSnapshot
+			return ErrStaleSnapshot
 		}
 		if err := c.verifyArtifact(ctx, a); err != nil {
-			return testgendomain.Run{}, ErrStaleSnapshot
+			return ErrStaleSnapshot
 		}
 	}
-	return r, nil
+	return nil
 }
