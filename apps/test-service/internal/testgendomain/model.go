@@ -233,6 +233,10 @@ func CloneCandidate(c Candidate) Candidate {
 func CloneRun(r Run) Run {
 	r.ArtifactDigests = append([]ArtifactRef(nil), r.ArtifactDigests...)
 	r.Record.MinimizedCaseIDs = append([]string(nil), r.Record.MinimizedCaseIDs...)
+	if r.Record.Preview != nil {
+		preview := *r.Record.Preview
+		r.Record.Preview = &preview
+	}
 	if r.FinishedAt != nil {
 		t := *r.FinishedAt
 		r.FinishedAt = &t

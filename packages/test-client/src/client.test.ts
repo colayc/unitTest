@@ -351,7 +351,7 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   assert.equal(candidates.items[0]?.codeDigest, "a".repeat(64));
   assert.equal(candidates.items[0]?.diagnostics[0]?.reason, "uncovered-branch");
   assert.equal((await fixture.client.acceptTestGeneration({
-    runId: RUN_ID, candidateId: ARTIFACT_ID, confirmCharacterization: true
+    runId: RUN_ID, candidateId: ARTIFACT_ID, confirmationDigest: "e".repeat(64), confirmCharacterization: true
   })).runId, RUN_ID);
   assert.equal("candidateKind" in (fixture.requests.at(-1)?.payload as JsonObject), false);
   assert.equal(fixture.requests.filter((request) => String(request.method).startsWith("testGeneration/")).length, 5);
@@ -400,9 +400,12 @@ test("protocol 1.5 generation input fails closed before writing", async () => {
   await assert.rejects(() => fixture.client.startTestGeneration(withPath), /invalid protocol request/);
   const spoofedKind = {
     runId: RUN_ID, candidateId: ARTIFACT_ID,
-    candidateKind: "verified", confirmCharacterization: false
+    candidateKind: "verified", confirmationDigest: "e".repeat(64), confirmCharacterization: false
   };
   await assert.rejects(() => fixture.client.acceptTestGeneration(spoofedKind), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.acceptTestGeneration({
+    runId: RUN_ID, candidateId: ARTIFACT_ID, confirmCharacterization: false
+  } as never), /invalid protocol request/);
   assert.equal(fixture.requests.length, 1);
   fixture.client.close();
 });

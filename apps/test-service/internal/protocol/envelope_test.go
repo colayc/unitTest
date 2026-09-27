@@ -21,6 +21,12 @@ func TestSupportedVersionRecognizesEveryShippedVersion(t *testing.T) {
 	}
 }
 
+func TestProtocolV15RequestEnvelopeIsSupported(t *testing.T) {
+	if !protocol.SupportedVersion("1.5") {
+		t.Fatal("protocol 1.5 generation requests are not supported")
+	}
+}
+
 func TestResponseConstructorsUseExplicitSupportedVersion(t *testing.T) {
 	request := protocol.Request{MessageID: "0123456789abcdef0123456789abcdef", Method: "capabilities/get"}
 	success := protocol.Success(protocol.Version11, request, map[string]bool{"accepted": true})

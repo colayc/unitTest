@@ -164,10 +164,11 @@
     },
     "acceptRequest": {
       "title": "TestGenerationAcceptRequestV15", "type": "object", "additionalProperties": false,
-      "description": "The service MUST resolve the authoritative stored candidate kind from runId and candidateId, and MUST reject a characterization candidate unless confirmCharacterization is true. Caller-supplied candidate classification is forbidden.",
-      "required": ["runId", "candidateId", "confirmCharacterization"],
+      "description": "The service MUST resolve the authoritative stored candidate kind from runId and candidateId, verify confirmationDigest against the current preview, and MUST reject a characterization candidate unless confirmCharacterization is true. Caller-supplied candidate classification is forbidden.",
+      "required": ["runId", "candidateId", "confirmationDigest", "confirmCharacterization"],
       "properties": {
         "runId": { "$ref": "#/$defs/id" }, "candidateId": { "$ref": "#/$defs/id" },
+        "confirmationDigest": { "$ref": "#/$defs/digest" },
         "confirmCharacterization": { "type": "boolean", "description": "Explicit consent for a characterization candidate. The service checks this against the stored kind resolved by runId and candidateId." }
       }
     }

@@ -11,11 +11,13 @@ export interface TestGenerationContractV15 {
 
 /**
  * The service MUST resolve the authoritative stored candidate kind from runId and
- * candidateId, and MUST reject a characterization candidate unless confirmCharacterization
- * is true. Caller-supplied candidate classification is forbidden.
+ * candidateId, verify confirmationDigest against the current preview, and MUST reject a
+ * characterization candidate unless confirmCharacterization is true. Caller-supplied
+ * candidate classification is forbidden.
  */
 export interface TestGenerationAcceptRequestV15 {
-    candidateId: string;
+    candidateId:        string;
+    confirmationDigest: string;
     /**
      * Explicit consent for a characterization candidate. The service checks this against the
      * stored kind resolved by runId and candidateId.

@@ -114,12 +114,13 @@ test("protocol 1.5 generated models expose typed generation contracts", () => {
     lastSequence: 0
   };
   const page: TestGenerationCandidatePageV15 = { items: [] };
-  const accept: TestGenerationAcceptRequestV15 = { runId: run.runId, candidateId: "e".repeat(32), confirmCharacterization: true };
+  const accept: TestGenerationAcceptRequestV15 = { runId: run.runId, candidateId: "e".repeat(32), confirmationDigest: "a".repeat(64), confirmCharacterization: true };
   const target: TestGenerationTargetV15 = { kind: TestGenerationTargetKindV15.BuildTarget, targetId: "f".repeat(64), frameworks: [TestGenerationTargetFrameworkV15.Cpputest] };
   const diagnostic: TestGenerationDiagnosticV15 = { code: TestGenerationDiagnosticCodeV15.CoverageGap, severity: TestGenerationDiagnosticSeverityV15.Warning, reason: TestGenerationDiagnosticReasonV15.UncoveredBranch };
   assert.equal(run.projectId, "core");
   assert.equal(page.items.length, 0);
   assert.equal(accept.confirmCharacterization, true);
+  assert.equal(accept.confirmationDigest.length, 64);
   assert.equal(target.targetId.length, 64);
   assert.equal(diagnostic.code, "COVERAGE_GAP");
 });

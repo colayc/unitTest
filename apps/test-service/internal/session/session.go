@@ -119,6 +119,7 @@ type Session struct {
 	negotiatedVersion          string
 	backend                    Backend
 	coverageBackend            CoverageBackend
+	generationBackend          GenerationBackend
 	shutdown                   chan struct{}
 	shutdownOnce               sync.Once
 }
@@ -265,6 +266,15 @@ func NewWithCoverage(token, platform, transport string, backend Backend, coverag
 	return &Session{token: token, platform: platform, transport: transport, backend: backend, coverageBackend: coverage, shutdown: make(chan struct{})}
 }
 
+// NewWithGeneration only advertises v1.5 when both coverage and the fully
+// initialized generation provider are available. Legacy constructors keep
+// their existing negotiation ceiling.
+func NewWithGeneration(token, platform, transport string, backend Backend, coverage CoverageBackend, generation GenerationBackend) *Session {
+	s := NewWithCoverage(token, platform, transport, backend, coverage)
+	s.generationBackend = generation
+	return s
+}
+
 func (s *Session) ShutdownRequested() <-chan struct{} { return s.shutdown }
 
 func (s *Session) Authenticated() bool {
@@ -303,7 +313,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "invalid handshake payload", false))
 		}
-		negotiatedVersion, ok := negotiateForBackend(request.ProtocolVersion, payload.SupportedProtocolVersions, s.coverageBackend)
+		negotiatedVersion, ok := negotiateForGeneration(request.ProtocolVersion, payload.SupportedProtocolVersions, s.coverageBackend, s.generationBackend)
 		if !ok {
 			return handled(protocol.Failure(responseVersion, request, "UNSUPPORTED_PROTOCOL", "protocol version is not supported", false))
 		}
@@ -316,6 +326,9 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	case "capabilities/get":
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
+		}
+		if s.negotiatedVersion == protocol.Version15 {
+			return handled(protocol.Success(responseVersion, request, capabilitiesV15()))
 		}
 		if s.negotiatedVersion == protocol.Version14 {
 			return handled(protocol.Success(responseVersion, request, capabilitiesV14()))
@@ -356,8 +369,17 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
 	}
+	if generationMethod(request.Method) {
+		if s.negotiatedVersion != protocol.Version15 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.5", false))
+		}
+		if s.generationBackend == nil || !s.generationBackend.TestGenerationReady() {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "test generation service is unavailable", true))
+		}
+		return s.handleGeneration(ctx, responseVersion, request, s.generationBackend)
+	}
 	if coverageMethod(request.Method) {
-		if s.negotiatedVersion != protocol.Version14 {
+		if s.negotiatedVersion != protocol.Version14 && s.negotiatedVersion != protocol.Version15 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.4", false))
 		}
 		if s.coverageBackend == nil {
@@ -369,7 +391,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	if phase3Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version12 &&
 			s.negotiatedVersion != protocol.Version13 &&
-			s.negotiatedVersion != protocol.Version14 {
+			s.negotiatedVersion != protocol.Version14 &&
+			s.negotiatedVersion != protocol.Version15 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
 		}
 		if s.backend == nil {
@@ -379,7 +402,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	}
 	if phase4Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version13 &&
-			s.negotiatedVersion != protocol.Version14 {
+			s.negotiatedVersion != protocol.Version14 &&
+			s.negotiatedVersion != protocol.Version15 {
 			return handled(protocol.Failure(
 				responseVersion,
 				request,

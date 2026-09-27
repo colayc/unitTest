@@ -17,10 +17,21 @@ type BudgetUsage struct {
 }
 
 type GenerationRecord struct {
-	Version          int         `json:"version"`
-	SnapshotDigest   string      `json:"snapshotDigest"`
-	BudgetUsed       BudgetUsage `json:"budgetUsed"`
-	MinimizedCaseIDs []string    `json:"minimizedCaseIds"`
+	Version          int              `json:"version"`
+	SnapshotDigest   string           `json:"snapshotDigest"`
+	BudgetUsed       BudgetUsage      `json:"budgetUsed"`
+	MinimizedCaseIDs []string         `json:"minimizedCaseIds"`
+	Preview          *PreviewIdentity `json:"preview,omitempty"`
+}
+
+// PreviewIdentity is written before any workspace publication. The publisher
+// can replay a committed receipt using these digests after a service restart,
+// without trying to re-plan files that have already been changed.
+type PreviewIdentity struct {
+	CandidateSetDigest     string `json:"candidateSetDigest"`
+	DiffDigest             string `json:"diffDigest"`
+	ConfirmationDigest     string `json:"confirmationDigest"`
+	CharacterizationDigest string `json:"characterizationDigest,omitempty"`
 }
 
 func NewGenerationRecord(request Request) GenerationRecord {
@@ -30,7 +41,7 @@ func NewGenerationRecord(request Request) GenerationRecord {
 }
 
 func (r GenerationRecord) IsZero() bool {
-	return r.Version == 0 && r.SnapshotDigest == "" && r.BudgetUsed == (BudgetUsage{}) && len(r.MinimizedCaseIDs) == 0
+	return r.Version == 0 && r.SnapshotDigest == "" && r.BudgetUsed == (BudgetUsage{}) && len(r.MinimizedCaseIDs) == 0 && r.Preview == nil
 }
 
 func (r GenerationRecord) ValidFor(request Request, candidateCount int) bool {
@@ -44,9 +55,12 @@ func (r GenerationRecord) ValidFor(request Request, candidateCount int) bool {
 		}
 		previous = id
 	}
+	if r.Preview != nil && (len(r.MinimizedCaseIDs) == 0 || !validDigest(r.Preview.CandidateSetDigest) || !validDigest(r.Preview.DiffDigest) || !validDigest(r.Preview.ConfirmationDigest) || r.Preview.CharacterizationDigest != "" && !validDigest(r.Preview.CharacterizationDigest)) {
+		return false
+	}
 	return true
 }
 
 func (r GenerationRecord) MonotonicAfter(previous GenerationRecord) bool {
-	return r.Version == previous.Version && r.SnapshotDigest == previous.SnapshotDigest && r.BudgetUsed.Candidates >= previous.BudgetUsed.Candidates && r.BudgetUsed.OutputBytes >= previous.BudgetUsed.OutputBytes && r.BudgetUsed.Events >= previous.BudgetUsed.Events && r.BudgetUsed.Artifacts >= previous.BudgetUsed.Artifacts && (len(previous.MinimizedCaseIDs) == 0 || slices.Equal(r.MinimizedCaseIDs, previous.MinimizedCaseIDs))
+	return r.Version == previous.Version && r.SnapshotDigest == previous.SnapshotDigest && r.BudgetUsed.Candidates >= previous.BudgetUsed.Candidates && r.BudgetUsed.OutputBytes >= previous.BudgetUsed.OutputBytes && r.BudgetUsed.Events >= previous.BudgetUsed.Events && r.BudgetUsed.Artifacts >= previous.BudgetUsed.Artifacts && (len(previous.MinimizedCaseIDs) == 0 || slices.Equal(r.MinimizedCaseIDs, previous.MinimizedCaseIDs)) && (previous.Preview == nil || r.Preview != nil && *r.Preview == *previous.Preview)
 }

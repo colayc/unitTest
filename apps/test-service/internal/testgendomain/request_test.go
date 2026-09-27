@@ -59,3 +59,15 @@ func TestRequestSnapshotIdentityMustMatch(t *testing.T) {
 		t.Fatal("accepted stale compile snapshot")
 	}
 }
+
+func TestRequestRejectsMalformedPersistedSessionOwner(t *testing.T) {
+	r := validRequest()
+	r.SessionOwnerDigest = "foreign-session"
+	if ValidateRequest(r) == nil {
+		t.Fatal("accepted malformed session owner digest")
+	}
+	r.SessionOwnerDigest = strings.Repeat("e", 64)
+	if err := ValidateRequest(r); err != nil {
+		t.Fatalf("valid session owner rejected: %v", err)
+	}
+}

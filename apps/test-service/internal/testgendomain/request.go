@@ -72,6 +72,9 @@ type Request struct {
 	AnalyzerBundleDigest   string    `json:"analyzerBundleDigest"`
 	BaselineReportDigest   string    `json:"baselineReportDigest"`
 	ProcessOwnerDigest     string    `json:"processOwnerDigest,omitempty"`
+	// Bound to the authenticated service credential at creation. Legacy rows
+	// without an owner remain readable internally but are not route-accessible.
+	SessionOwnerDigest string `json:"sessionOwnerDigest,omitempty"`
 }
 
 func (r Request) SnapshotIdentity() SnapshotIdentity {
@@ -99,7 +102,7 @@ func (r Request) SnapshotMatches(now SnapshotIdentity) error {
 }
 
 func ValidateRequest(r Request) error {
-	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validDigest(r.SourceDigest) || !validDigest(r.CMakeTargetDigest) || !validDigest(r.FrameworkBundleDigest) || !validDigest(r.AnalyzerBundleDigest) || !validDigest(r.BaselineReportDigest) || !validDigest(r.ProcessOwnerDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
+	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validDigest(r.SourceDigest) || !validDigest(r.CMakeTargetDigest) || !validDigest(r.FrameworkBundleDigest) || !validDigest(r.AnalyzerBundleDigest) || !validDigest(r.BaselineReportDigest) || !validDigest(r.ProcessOwnerDigest) || r.SessionOwnerDigest != "" && !validDigest(r.SessionOwnerDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
 		return ErrInvalid
 	}
 	switch r.Framework {

@@ -11,7 +11,9 @@ test("protocol 1.5 generation boundaries reject caller classification, leaked te
   addFormats(ajv);
   const generation = await load("../schema/v1.5/test-generation.schema.json");
   const accept = ajv.compile({ ...generation.$defs.acceptRequest, $defs: generation.$defs });
-  const request = { runId: "a".repeat(32), candidateId: "b".repeat(32), confirmCharacterization: true };
+  assert.equal(accept({ runId: "a".repeat(32), candidateId: "b".repeat(32), confirmCharacterization: false }), false,
+    "acceptance without the preview confirmation digest must be rejected");
+  const request = { runId: "a".repeat(32), candidateId: "b".repeat(32), confirmationDigest: "c".repeat(64), confirmCharacterization: true };
   assert.equal(accept(request), true, "candidate kind must be resolved by the service, not supplied by the caller");
   assert.equal(accept({ ...request, candidateKind: "verified", confirmCharacterization: false }), false);
 
@@ -91,7 +93,7 @@ test("protocol 1.5 validates test-generation methods and rejects unsafe payloads
     ["testGeneration/targets/list", { workspaceGeneration: "c".repeat(64), projectId: "core" }],
     ["testGeneration/runs/get", { runId: "d".repeat(32) }],
     ["testGeneration/candidates/list", { runId: "d".repeat(32) }],
-    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), confirmCharacterization: true }]
+    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), confirmationDigest: "f".repeat(64), confirmCharacterization: true }]
   ]) assert.equal(validate({ ...base, method, payload }), true, `${method}: ${JSON.stringify(validate.errors)}`);
   for (const [name, payload] of [
     ["unknown", { ...start.payload, command: "rm -rf /" }],
