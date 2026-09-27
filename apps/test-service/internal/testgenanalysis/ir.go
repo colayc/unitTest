@@ -53,6 +53,7 @@ type Predicate struct {
 type Branch struct {
 	Kind           BranchKind `json:"kind"`
 	Predicate      Predicate  `json:"predicate"`
+	OwnerSwitchID  string     `json:"ownerSwitchId,omitempty"`
 	BoundVerified  bool       `json:"boundVerified,omitempty"`
 	LocationDigest string     `json:"locationDigest"`
 }
@@ -114,6 +115,7 @@ type Function struct {
 	Excerpt        SourceExcerpt `json:"excerpt"`
 	Effect         EffectKind    `json:"effect"`
 	Decision       Decision      `json:"decision"`
+	originVerified bool
 }
 type TranslationUnit struct {
 	ID           string   `json:"id"`
@@ -132,7 +134,7 @@ func digestBytes(data []byte) string { sum := sha256.Sum256(data); return hex.En
 func bindSourceExcerpts(program *Program, source []byte) error {
 	for i := range program.Functions {
 		ref := &program.Functions[i].Excerpt
-		if ref.StartByte < 0 || ref.EndByte <= ref.StartByte || ref.EndByte > len(source) || ref.LocationDigest != program.Functions[i].LocationDigest {
+		if !program.Functions[i].originVerified || ref.StartByte < 0 || ref.EndByte <= ref.StartByte || ref.EndByte > len(source) || ref.LocationDigest != program.Functions[i].LocationDigest {
 			return errors.New("invalid source excerpt")
 		}
 		ref.Digest = digestBytes(source[ref.StartByte:ref.EndByte])

@@ -36,7 +36,16 @@ func (SafetyClassifier) Classify(f Function) Decision {
 			return unsupported(ReasonUnsupportedSyntax)
 		}
 	}
+	switches := map[string]bool{}
 	for _, branch := range f.Branches {
+		if branch.Kind == BranchSwitch {
+			switches[branch.LocationDigest] = true
+		}
+	}
+	for _, branch := range f.Branches {
+		if (branch.Kind == BranchCase || branch.Kind == BranchDefault) && (!switches[branch.OwnerSwitchID] || branch.OwnerSwitchID == "") {
+			return unsupported(ReasonIncompleteAST)
+		}
 		if branch.Kind == BranchLoop && !branch.BoundVerified {
 			return unsupported(ReasonUnboundedLoop)
 		}
@@ -54,10 +63,10 @@ func (SafetyClassifier) Classify(f Function) Decision {
 		if branch.Kind == BranchSwitch {
 			cases, defaults := 0, 0
 			for _, edge := range f.Branches {
-				if edge.Kind == BranchCase {
+				if edge.Kind == BranchCase && edge.OwnerSwitchID == branch.LocationDigest {
 					cases++
 				}
-				if edge.Kind == BranchDefault {
+				if edge.Kind == BranchDefault && edge.OwnerSwitchID == branch.LocationDigest {
 					defaults++
 				}
 			}
@@ -90,7 +99,7 @@ func safeType(t Type) bool {
 	case TypeArray:
 		return t.Bound > 0 && t.Bound <= 1024
 	case TypePointer:
-		return t.Spelling == "char *" || t.Spelling == "const char *" || t.Spelling == "void *"
+		return false // No caller-owned pointer or alias proof exists in Task 7.
 	default:
 		return false
 	}

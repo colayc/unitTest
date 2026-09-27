@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ const maxFunctions = 4096
 const maxBranches = 16384
 
 type astLocation struct {
+	File         string       `json:"file"`
 	Offset       int          `json:"offset"`
 	TokLen       int          `json:"tokLen"`
 	Line         int          `json:"line"`
@@ -35,9 +38,12 @@ type astDefinition struct {
 	IsPOD     bool `json:"isPOD"`
 }
 type astReference struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
 	Name string `json:"name"`
 }
 type astNode struct {
+	ID                 string        `json:"id"`
 	Kind               string        `json:"kind"`
 	Name               string        `json:"name"`
 	Type               astType       `json:"type"`
@@ -52,6 +58,9 @@ type astNode struct {
 }
 
 func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, error) {
+	return decodeASTWithSourcePath(reader, limit, sourceDigest, "", "")
+}
+func decodeASTWithSourcePath(reader io.Reader, limit int64, sourceDigest, sourcePath, workspaceRoot string) (Program, error) {
 	if !validSHA(sourceDigest) || limit <= 0 || limit > 32<<20 {
 		return Program{}, errors.New("invalid AST decode budget or source identity")
 	}
@@ -122,7 +131,7 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 				if len(program.Functions) >= maxFunctions {
 					return errors.New("AST function budget exceeded")
 				}
-				f, err := functionFromAST(n, body, sourceDigest, declared)
+				f, err := functionFromAST(n, body, sourceDigest, declared, sourcePath, workspaceRoot)
 				if err != nil {
 					return err
 				}
@@ -180,12 +189,12 @@ func findDirectBody(n *astNode) *astNode {
 	}
 	return nil
 }
-func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]TypeKind) (Function, error) {
+func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]TypeKind, sourcePath, workspaceRoot string) (Function, error) {
 	if !safeIdentifier(n.Name) || n.Loc.Line < 0 || n.Loc.Col < 0 {
 		return Function{}, errors.New("unusable function identity")
 	}
 	location := locationDigest(sourceDigest, effectiveLocation(n))
-	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location, Excerpt: SourceExcerpt{LocationDigest: location, StartByte: n.Range.Begin.Offset, EndByte: n.Range.End.Offset + n.Range.End.TokLen}}
+	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location, Excerpt: SourceExcerpt{LocationDigest: location, StartByte: n.Range.Begin.Offset, EndByte: n.Range.End.Offset + n.Range.End.TokLen}, originVerified: sourcePath == "" || matchesSourceOrigin(n, sourcePath, workspaceRoot)}
 	for _, child := range n.Inner {
 		if child.Kind == "ParmVarDecl" {
 			if !safeIdentifier(child.Name) {
@@ -194,9 +203,42 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 			f.Parameters = append(f.Parameters, Parameter{child.Name, parseType(child.Type.QualType, declared)})
 		}
 	}
+	knownIDs := map[string]bool{}
+	localIDs := map[string]bool{}
+	localArrays := map[string]int{}
+	for _, child := range n.Inner {
+		if child != nil && child.Kind == "ParmVarDecl" && child.ID != "" {
+			knownIDs[child.ID] = true
+		}
+	}
+	var collectLocals func(*astNode)
+	collectLocals = func(node *astNode) {
+		if node == nil {
+			return
+		}
+		if node.Kind == "VarDecl" && node.ID != "" {
+			localIDs[node.ID] = true
+			knownIDs[node.ID] = true
+			t := parseType(node.Type.QualType, declared)
+			if t.Kind == TypeArray {
+				localArrays[node.ID] = t.Bound
+			}
+		}
+		for _, child := range node.Inner {
+			collectLocals(child)
+		}
+	}
+	collectLocals(body)
 	seenKinds := map[string]bool{}
-	var walk func(*astNode, int) error
-	walk = func(node *astNode, depth int) error {
+	unsafe := func(kind string) {
+		if !seenKinds[kind] {
+			f.BodyKinds = append(f.BodyKinds, kind)
+			seenKinds[kind] = true
+		}
+	}
+	allowedSteps := map[*astNode]bool{}
+	var walk func(*astNode, int, map[string]int) error
+	walk = func(node *astNode, depth int, loopBounds map[string]int) error {
 		if depth > maxASTDepth {
 			return errors.New("function AST too deep")
 		}
@@ -207,11 +249,33 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		if node.Kind == "VarDecl" {
 			f.LocalTypes = append(f.LocalTypes, parseType(node.Type.QualType, declared))
 		}
-		if node.Kind == "UnaryOperator" && (node.Opcode == "&" || node.Opcode == "*" || node.Opcode == "--") {
-			if !seenKinds["UnsafeUnary"] {
-				f.BodyKinds = append(f.BodyKinds, "UnsafeUnary")
-				seenKinds["UnsafeUnary"] = true
+		if node.Kind == "DeclRefExpr" {
+			r := node.ReferencedDecl
+			if r == nil || r.Kind != "EnumConstantDecl" && !knownIDs[r.ID] {
+				unsafe("UnsafeReference")
 			}
+		}
+		if node.Kind == "UnaryOperator" {
+			switch node.Opcode {
+			case "++":
+				if !allowedSteps[node] || !localIDs[referenceID(node.Inner, 0)] {
+					unsafe("UnsafeUnary")
+				}
+			case "!", "+", "-":
+				if expression(node.Inner, 0) == "" {
+					unsafe("UnsafeUnary")
+				}
+			default:
+				unsafe("UnsafeUnary")
+			}
+		}
+		if node.Kind == "BinaryOperator" && node.Opcode == "=" || node.Kind == "CompoundAssignOperator" {
+			if len(node.Inner) < 1 || !localIDs[referenceID(node.Inner, 0)] {
+				unsafe("UnsafeWrite")
+			}
+		}
+		if node.Kind == "ArraySubscriptExpr" && !arrayReadProven(node, localArrays, loopBounds) {
+			unsafe("UnsafeArray")
 		}
 		if hasMacroLocation(node.Loc) || hasMacroLocation(node.Range.Begin) || hasMacroLocation(node.Range.End) {
 			if !seenKinds["MacroExpansion"] {
@@ -238,9 +302,13 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 			}
 			pred := extractBranchPredicate(node, kind)
 			bound := kind == BranchLoop && verifiedForLoop(node, pred)
-			f.Branches = append(f.Branches, Branch{kind, pred, bound, locationDigest(sourceDigest, effectiveLocation(node))})
+			if bound && len(node.Inner) > 3 {
+				allowedSteps[node.Inner[3]] = true
+			}
+			id := locationDigest(sourceDigest, effectiveLocation(node))
+			f.Branches = append(f.Branches, Branch{Kind: kind, Predicate: pred, BoundVerified: bound, LocationDigest: id})
 			if kind == BranchSwitch {
-				f.Branches = append(f.Branches, switchEdges(node, sourceDigest, pred.Left)...)
+				f.Branches = append(f.Branches, switchEdges(node, sourceDigest, pred.Left, id)...)
 			}
 			if pred.Operator == "unknown" && kind != BranchSwitch {
 				if !seenKinds["UnknownPredicate"] {
@@ -256,22 +324,50 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 			}
 			f.Calls = append(f.Calls, name)
 		}
-		for _, child := range node.Inner {
+		for index, child := range node.Inner {
 			if node.Kind == "ForStmt" && (child == nil || child.Kind == "") {
 				continue
 			}
-			if err := walk(child, depth+1); err != nil {
+			childBounds := loopBounds
+			if node.Kind == "ForStmt" && index == len(node.Inner)-1 && verifiedForLoop(node, extractBranchPredicate(node, BranchLoop)) {
+				childBounds = make(map[string]int, len(loopBounds)+1)
+				for key, value := range loopBounds {
+					childBounds[key] = value
+				}
+				p := extractBranchPredicate(node, BranchLoop)
+				limit, _ := strconv.Atoi(p.Right)
+				if len(node.Inner) > 0 && node.Inner[0] != nil && len(node.Inner[0].Inner) == 1 && node.Inner[0].Inner[0].ID != "" {
+					childBounds[node.Inner[0].Inner[0].ID] = limit
+				}
+			}
+			if err := walk(child, depth+1, childBounds); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := walk(body, 0); err != nil {
+	if err := walk(body, 0, map[string]int{}); err != nil {
 		return Function{}, err
 	}
 	f.Decision = (SafetyClassifier{}).Classify(f)
 	setEffect(&f)
 	return f, nil
+}
+func matchesSourceOrigin(n *astNode, sourcePath, root string) bool {
+	origin := n.Loc.File
+	if origin == "" {
+		origin = n.Range.Begin.File
+	}
+	if origin == "" {
+		return true
+	}
+	path := origin
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	a, errA := os.Stat(sourcePath)
+	b, errB := os.Stat(path)
+	return errA == nil && errB == nil && os.SameFile(a, b)
 }
 func setEffect(f *Function) {
 	switch f.Decision.Kind {
@@ -438,23 +534,54 @@ func expression(nodes []*astNode, index int) string {
 	}
 	return ""
 }
-func switchEdges(node *astNode, sourceDigest, selector string) []Branch {
+func referenceID(nodes []*astNode, index int) string {
+	if index >= len(nodes) || nodes[index] == nil {
+		return ""
+	}
+	n := nodes[index]
+	if n.Kind == "DeclRefExpr" && n.ReferencedDecl != nil {
+		return n.ReferencedDecl.ID
+	}
+	if n.Kind == "ImplicitCastExpr" || n.Kind == "ParenExpr" {
+		return referenceID(n.Inner, 0)
+	}
+	return ""
+}
+func arrayReadProven(node *astNode, arrays map[string]int, loopBounds map[string]int) bool {
+	if len(node.Inner) != 2 {
+		return false
+	}
+	bound, ok := arrays[referenceID(node.Inner, 0)]
+	if !ok || bound < 1 {
+		return false
+	}
+	index := expression(node.Inner, 1)
+	if value, err := strconv.Atoi(index); err == nil {
+		return value >= 0 && value < bound
+	}
+	limit, ok := loopBounds[referenceID(node.Inner, 1)]
+	return ok && limit > 0 && limit <= bound
+}
+func switchEdges(node *astNode, sourceDigest, selector, ownerID string) []Branch {
 	edges := []Branch{}
 	var visit func(*astNode)
 	visit = func(n *astNode) {
 		if n == nil {
 			return
 		}
+		if n.Kind == "SwitchStmt" {
+			return
+		} // The nested switch owns its own labels.
 		if n.Kind == "CaseStmt" {
 			label := expression(n.Inner, 0)
 			op := "=="
 			if label == "" || selector == "" {
 				op = "unknown"
 			}
-			edges = append(edges, Branch{Kind: BranchCase, Predicate: Predicate{Operator: op, Left: selector, Right: label}, LocationDigest: digestBytes([]byte("case:" + locationDigest(sourceDigest, effectiveLocation(n)) + ":" + label))})
+			edges = append(edges, Branch{Kind: BranchCase, Predicate: Predicate{Operator: op, Left: selector, Right: label}, OwnerSwitchID: ownerID, LocationDigest: digestBytes([]byte("case:" + locationDigest(sourceDigest, effectiveLocation(n)) + ":" + label))})
 		}
 		if n.Kind == "DefaultStmt" {
-			edges = append(edges, Branch{Kind: BranchDefault, Predicate: Predicate{Operator: "default", Left: selector}, LocationDigest: digestBytes([]byte("default:" + locationDigest(sourceDigest, effectiveLocation(n))))})
+			edges = append(edges, Branch{Kind: BranchDefault, Predicate: Predicate{Operator: "default", Left: selector}, OwnerSwitchID: ownerID, LocationDigest: digestBytes([]byte("default:" + locationDigest(sourceDigest, effectiveLocation(n))))})
 		}
 		for _, child := range n.Inner {
 			visit(child)

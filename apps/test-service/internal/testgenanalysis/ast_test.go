@@ -13,7 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/probe"
 )
 
-const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
+const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","id":"param-x","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"param-x","kind":"ParmVarDecl","name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
 
 func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	first, err := decodeAST(strings.NewReader(scalarAST), 1<<20, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -190,5 +190,43 @@ func TestDecodeASTRejectsConstructorAndUnsafeMethodReceiver(t *testing.T) {
 				t.Fatalf("unmodeled receiver/constructor accepted: %#v", p.Functions)
 			}
 		})
+	}
+}
+
+func TestDecodeASTRejectsGlobalAndUnprovenArrayWrites(t *testing.T) {
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for name, statement := range map[string]string{
+		"global increment": `{"kind":"ReturnStmt","inner":[{"kind":"UnaryOperator","opcode":"++","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"global-g","kind":"VarDecl","name":"g"}}]}]}`,
+		"array write":      `{"kind":"BinaryOperator","opcode":"=","inner":[{"kind":"ArraySubscriptExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"local-a","kind":"VarDecl","name":"a"}},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"IntegerLiteral","value":"1"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := `{"kind":"TranslationUnitDecl","inner":[{"kind":"VarDecl","id":"global-g","name":"g","type":{"qualType":"int"}},{"kind":"FunctionDecl","name":"f","type":{"qualType":"int ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt","inner":[{"kind":"DeclStmt","inner":[{"kind":"VarDecl","id":"local-a","name":"a","type":{"qualType":"int[2]"}}]},` + statement + `]}]}]}`
+			p, err := decodeAST(strings.NewReader(input), 1<<20, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Functions[0].Decision.Kind == DecisionSupported || p.Functions[0].Effect == EffectLocalMemory {
+				t.Fatalf("unproven effect accepted: %#v", p.Functions[0])
+			}
+		})
+	}
+}
+
+func TestDecodeASTKeepsNestedSwitchEdgesSeparate(t *testing.T) {
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	input := `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"f","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"inner":[{"kind":"ParmVarDecl","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"SwitchStmt","range":{"begin":{"line":2,"col":1}},"inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}},{"kind":"CompoundStmt","inner":[{"kind":"CaseStmt","range":{"begin":{"line":3,"col":1}},"inner":[{"kind":"IntegerLiteral","value":"1"},{"kind":"SwitchStmt","range":{"begin":{"line":4,"col":1}},"inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}},{"kind":"CompoundStmt","inner":[{"kind":"CaseStmt","range":{"begin":{"line":5,"col":1}},"inner":[{"kind":"IntegerLiteral","value":"2"},{"kind":"ReturnStmt"}]}]}]}]},{"kind":"DefaultStmt","range":{"begin":{"line":6,"col":1}},"inner":[{"kind":"ReturnStmt"}]}]}]}]}]}]}`
+	p, err := decodeAST(strings.NewReader(input), 1<<20, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Functions[0].Decision.Kind == DecisionSupported {
+		t.Fatalf("inner switch with no default accepted: %#v", p.Functions[0].Branches)
+	}
+}
+
+func TestArrayReadRejectsShadowedLoopIndexIdentity(t *testing.T) {
+	node := &astNode{Kind: "ArraySubscriptExpr", Inner: []*astNode{{Kind: "DeclRefExpr", ReferencedDecl: &astReference{ID: "local-array", Kind: "VarDecl", Name: "values"}}, {Kind: "DeclRefExpr", ReferencedDecl: &astReference{ID: "shadow-index", Kind: "VarDecl", Name: "i"}}}}
+	if arrayReadProven(node, map[string]int{"local-array": 4}, map[string]int{"i": 4}) {
+		t.Fatal("name-only loop proof accepted a shadowed index")
 	}
 }

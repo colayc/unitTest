@@ -17,6 +17,7 @@ func TestSafetyClassifierFailsClosed(t *testing.T) {
 		{"inline assembly", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"CompoundStmt", "GCCAsmStmt"}}, DecisionUnsupported, ReasonUnsupportedSyntax},
 		{"volatile", Function{Name: "f", ReturnType: Type{Kind: TypeUnknown, Spelling: "volatile int"}}, DecisionUnsupported, ReasonUnsupportedType},
 		{"function pointer", Function{Name: "f", Parameters: []Parameter{{Name: "cb", Type: Type{Kind: TypeUnknown, Spelling: "int (*)(int)"}}}}, DecisionUnsupported, ReasonUnsupportedType},
+		{"writable pointer argument", Function{Name: "f", ReturnType: Type{Kind: TypeVoid}, Parameters: []Parameter{{Name: "p", Type: Type{Kind: TypePointer, Spelling: "char *"}}}}, DecisionUnsupported, ReasonUnsupportedType},
 		{"template", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"FunctionTemplateDecl"}}, DecisionUnsupported, ReasonUnsupportedSyntax},
 		{"unbounded loop", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"CompoundStmt", "WhileStmt"}}, DecisionUnsupported, ReasonUnboundedLoop},
 		{"recursion", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, Calls: []string{"f"}}, DecisionUnsupported, ReasonRecursion},

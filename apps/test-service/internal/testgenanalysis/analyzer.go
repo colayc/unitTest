@@ -73,6 +73,9 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if err != nil {
 		return Program{}, err
 	}
+	if hasSourceDirective(sourceBytes) {
+		return Program{}, errors.New("source-directed includes or macros are not supported by fixed analysis")
+	}
 	args = append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include")}, args...)
 	args = append(args, "-resource-dir", a.bundle.ResourceDir(), sourcePath)
 	result, err := a.runner.Run(ctx, probe.Spec{Executable: a.bundle.ClangPath(), Args: args, Dir: request.WorkspaceRoot, Env: []string{}, Timeout: request.Timeout, MaxOutput: maxASTBytes})
@@ -95,7 +98,7 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if !bytes.Equal(sourceBytes, afterBytes) {
 		return Program{}, errors.New("source snapshot changed during analysis")
 	}
-	program, err := decodeAST(strings.NewReader(string(result.Stdout)), maxASTBytes, request.SourceDigest)
+	program, err := decodeASTWithSourcePath(strings.NewReader(string(result.Stdout)), maxASTBytes, request.SourceDigest, sourcePath, request.WorkspaceRoot)
 	if err != nil {
 		return Program{}, errors.New("fixed Clang emitted unsupported AST")
 	}
@@ -103,6 +106,9 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 		return Program{}, errors.New("fixed Clang source range is incomplete")
 	}
 	return program, nil
+}
+func hasSourceDirective(source []byte) bool {
+	return bytes.Contains(source, []byte{'#'}) || bytes.Contains(source, []byte("%:")) || bytes.Contains(source, []byte("??="))
 }
 
 func safeRelativeSource(v string) bool {

@@ -128,3 +128,22 @@ func TestAnalyzeRedactsCompilerFailure(t *testing.T) {
 		t.Fatalf("leaked compiler output: %v", err)
 	}
 }
+
+func TestAnalyzeRejectsIncludedHeaderAndForeignASTExcerpt(t *testing.T) {
+	a, req, runner, _ := fixtureAnalysis(t)
+	foreign := strings.Replace(scalarAST, `"line":1,"col":1`, `"line":1,"col":1,"file":"header.h"`, 1)
+	runner.result.Stdout = []byte(foreign)
+	if _, err := a.Analyze(context.Background(), req); err == nil {
+		t.Fatal("foreign header range was bound to main source bytes")
+	}
+	a, req, runner, _ = fixtureAnalysis(t)
+	source := []byte("#include \"header.h\"\nint choose(int x){return x>0 ? 1 : 0;}\n")
+	if err := os.WriteFile(filepath.Join(req.WorkspaceRoot, req.SourceRelative), source, 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(source)
+	req.SourceDigest = hex.EncodeToString(sum[:])
+	if _, err := a.Analyze(context.Background(), req); err == nil || runner.calls != 0 {
+		t.Fatalf("source-directed include reached Clang: %v, calls=%d", err, runner.calls)
+	}
+}
