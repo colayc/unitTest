@@ -467,3 +467,67 @@ func TestUserCreationAfterBackupRenameIsNotOverwritten(t *testing.T) {
 		t.Fatalf("earlier generated file not rolled back: %v", err)
 	}
 }
+
+func TestRollbackPreservesUserReplacementAtRemoveBoundary(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "cleanup" {
+			return errors.New("force rollback")
+		}
+		return nil
+	}
+	f.p.hooks.beforeRollbackMove = func(relative string) {
+		if relative != "tests/generated/choose_test.cpp" {
+			return
+		}
+		target := filepath.Join(f.root, "tests", "generated", "choose_test.cpp")
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("user replacement\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("want recovery-required conflict: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "generated", "choose_test.cpp"))
+	if err != nil || string(data) != "user replacement\n" {
+		t.Fatalf("rollback deleted user replacement: %q %v", data, err)
+	}
+}
+
+func TestSymlinkReplacementBeforeRenameIsRestoredWithoutFollowing(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := filepath.Join(f.root, "tests", "CMakeLists.txt")
+	f.p.hooks.beforeRename = func(relative string) {
+		if relative != "tests/CMakeLists.txt" {
+			return
+		}
+		if err := os.Remove(linkTarget); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, linkTarget); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("link race accepted: %v", err)
+	}
+	info, err := os.Lstat(linkTarget)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link stranded after rollback: %v %v", info, err)
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil || string(data) != "outside\n" {
+		t.Fatalf("link target changed: %q %v", data, err)
+	}
+}

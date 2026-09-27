@@ -20,10 +20,11 @@ import (
 type SnapshotVerifier func(context.Context, string) error
 type AcceptRequest struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string }
 type publisherHooks struct {
-	fail          func(string) error
-	beforeRename  func(string)
-	afterBackup   func(string)
-	cleanupRemove func(string) error
+	fail               func(string) error
+	beforeRename       func(string)
+	beforeRollbackMove func(string)
+	afterBackup        func(string)
+	cleanupRemove      func(string) error
 }
 type Publisher struct {
 	root, journal *os.Root
@@ -34,11 +35,11 @@ type Publisher struct {
 }
 
 type journalFile struct {
-	Path, BeforeDigest, AfterDigest, StageName, BackupName string
-	Before                                                 []byte
-	Mode                                                   uint32
-	Existed                                                bool
-	publishedIdentity                                      os.FileInfo `json:"-"`
+	Path, BeforeDigest, AfterDigest, StageName, BackupName, HoldName string
+	Before                                                           []byte
+	Mode                                                             uint32
+	Existed                                                          bool
+	publishedIdentity                                                os.FileInfo `json:"-"`
 }
 type journalRecord struct {
 	Version            int
@@ -272,7 +273,7 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	journal.CreatedDirs = created
 	for index, file := range plan.files {
 		suffix := req.ConfirmationDigest[:16] + "-" + string(rune('a'+index))
-		journal.Files = append(journal.Files, journalFile{Path: file.edit.Path, BeforeDigest: file.edit.BeforeDigest, AfterDigest: file.edit.AfterDigest, Before: append([]byte(nil), file.before...), Mode: uint32(file.mode), Existed: file.existed, StageName: ".testgen-" + suffix + ".stage", BackupName: ".testgen-" + suffix + ".backup"})
+		journal.Files = append(journal.Files, journalFile{Path: file.edit.Path, BeforeDigest: file.edit.BeforeDigest, AfterDigest: file.edit.AfterDigest, Before: append([]byte(nil), file.before...), Mode: uint32(file.mode), Existed: file.existed, StageName: ".testgen-" + suffix + ".stage", BackupName: ".testgen-" + suffix + ".backup", HoldName: ".testgen-" + suffix + ".hold"})
 	}
 	if err := p.fail("journal"); err != nil {
 		return Receipt{}, err
@@ -565,6 +566,57 @@ func (p *Publisher) readReceipt(d string) (Receipt, bool, error) {
 	return r, true, nil
 }
 
+// restoreExclusive recreates the original pathname only when it is vacant.
+// Link preserves an existing symlink object rather than following its target.
+func restoreExclusive(parent *os.Root, from, to string) error {
+	if err := parent.Link(from, to); err != nil {
+		info, statErr := parent.Lstat(from)
+		if statErr != nil || !linked(info) {
+			return ErrConflict
+		}
+		target, linkErr := parent.Readlink(from)
+		if linkErr != nil || parent.Symlink(target, to) != nil {
+			return ErrConflict
+		}
+	}
+	if err := parent.Remove(from); err != nil {
+		return ErrConflict
+	}
+	return nil
+}
+
+// movePublished moves the current pathname into a journal-known hold before
+// any deletion. A raced replacement is restored exclusively, never removed.
+func (p *Publisher) movePublished(parent *os.Root, item journalFile, current os.FileInfo) error {
+	name := path.Base(item.Path)
+	if _, err := parent.Lstat(item.HoldName); err == nil {
+		return ErrConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrConflict
+	}
+	if p.hooks.beforeRollbackMove != nil {
+		p.hooks.beforeRollbackMove(item.Path)
+	}
+	if err := parent.Rename(name, item.HoldName); err != nil {
+		return ErrConflict
+	}
+	moved, err := parent.Lstat(item.HoldName)
+	if err != nil {
+		return ErrConflict
+	}
+	if !os.SameFile(moved, current) || linked(moved) || !moved.Mode().IsRegular() || !sameMode(moved.Mode().Perm(), os.FileMode(item.Mode)) {
+		return errors.Join(ErrConflict, restoreExclusive(parent, item.HoldName, name))
+	}
+	data, err := p.readRelative(parent, item.HoldName)
+	if err != nil || digest(data) != item.AfterDigest {
+		return errors.Join(ErrConflict, restoreExclusive(parent, item.HoldName, name))
+	}
+	if err := parent.Remove(item.HoldName); err != nil {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (p *Publisher) rollback(j journalRecord) error {
 	var result error
 	for i := len(j.Files) - 1; i >= 0; i-- {
@@ -581,6 +633,35 @@ func (p *Publisher) rollback(j journalRecord) error {
 		current, currentErr := parent.Lstat(name)
 		backup, backupErr := parent.Lstat(item.BackupName)
 		currentPresent := currentErr == nil
+		if hold, holdErr := parent.Lstat(item.HoldName); holdErr == nil {
+			if currentPresent {
+				result = errors.Join(result, ErrConflict)
+				_ = parent.Close()
+				continue
+			}
+			if !linked(hold) && hold.Mode().IsRegular() && sameMode(hold.Mode().Perm(), os.FileMode(item.Mode)) {
+				data, readErr := p.readRelative(parent, item.HoldName)
+				if readErr == nil && digest(data) == item.AfterDigest && (item.publishedIdentity == nil || os.SameFile(hold, item.publishedIdentity)) {
+					if err := parent.Remove(item.HoldName); err != nil {
+						result = errors.Join(result, ErrConflict)
+						_ = parent.Close()
+						continue
+					}
+				} else {
+					result = errors.Join(result, ErrConflict, restoreExclusive(parent, item.HoldName, name))
+					_ = parent.Close()
+					continue
+				}
+			} else {
+				result = errors.Join(result, ErrConflict, restoreExclusive(parent, item.HoldName, name))
+				_ = parent.Close()
+				continue
+			}
+		} else if !errors.Is(holdErr, os.ErrNotExist) {
+			result = errors.Join(result, ErrConflict)
+			_ = parent.Close()
+			continue
+		}
 		if currentErr == nil {
 			if linked(current) || !current.Mode().IsRegular() {
 				result = errors.Join(result, ErrConflict)
@@ -595,8 +676,8 @@ func (p *Publisher) rollback(j journalRecord) error {
 			}
 			hash := digest(data)
 			if hash == item.AfterDigest && sameMode(current.Mode().Perm(), os.FileMode(item.Mode)) && (item.publishedIdentity == nil || os.SameFile(current, item.publishedIdentity)) {
-				if err := parent.Remove(name); err != nil {
-					result = errors.Join(result, ErrConflict)
+				if err := p.movePublished(parent, item, current); err != nil {
+					result = errors.Join(result, err)
 					_ = parent.Close()
 					continue
 				}
@@ -614,13 +695,11 @@ func (p *Publisher) rollback(j journalRecord) error {
 		}
 		if item.Existed {
 			if backupErr == nil {
-				if linked(backup) || !backup.Mode().IsRegular() {
+				if backup == nil {
 					result = errors.Join(result, ErrConflict)
 				} else if currentPresent {
 					result = errors.Join(result, ErrConflict)
-				} else if err := parent.Link(item.BackupName, name); err != nil {
-					result = errors.Join(result, ErrConflict)
-				} else if err := parent.Remove(item.BackupName); err != nil {
+				} else if err := restoreExclusive(parent, item.BackupName, name); err != nil {
 					result = errors.Join(result, ErrConflict)
 				}
 			} else if errors.Is(backupErr, os.ErrNotExist) {
@@ -760,7 +839,7 @@ func validJournal(j journalRecord) bool {
 	}
 	seen := map[string]bool{}
 	for _, f := range j.Files {
-		if !generatedTestPath(f.Path) && !cmakePath(f.Path) || seen[strings.ToLower(f.Path)] || !validHex(f.AfterDigest, 64) || f.Existed && (!validHex(f.BeforeDigest, 64) || digest(f.Before) != f.BeforeDigest) || !f.Existed && (f.BeforeDigest != "" || len(f.Before) > 0) || len(f.Before) > maxEditBytes || !strings.HasPrefix(f.StageName, ".testgen-") || !strings.HasSuffix(f.StageName, ".stage") || !strings.HasPrefix(f.BackupName, ".testgen-") || !strings.HasSuffix(f.BackupName, ".backup") {
+		if !generatedTestPath(f.Path) && !cmakePath(f.Path) || seen[strings.ToLower(f.Path)] || !validHex(f.AfterDigest, 64) || f.Existed && (!validHex(f.BeforeDigest, 64) || digest(f.Before) != f.BeforeDigest) || !f.Existed && (f.BeforeDigest != "" || len(f.Before) > 0) || len(f.Before) > maxEditBytes || !strings.HasPrefix(f.StageName, ".testgen-") || !strings.HasSuffix(f.StageName, ".stage") || !strings.HasPrefix(f.BackupName, ".testgen-") || !strings.HasSuffix(f.BackupName, ".backup") || !strings.HasPrefix(f.HoldName, ".testgen-") || !strings.HasSuffix(f.HoldName, ".hold") {
 			return false
 		}
 		seen[strings.ToLower(f.Path)] = true
