@@ -120,6 +120,19 @@ type Diagnostic struct {
 	SymbolID string     `json:"symbolId"`
 	Reason   ReasonCode `json:"reason"`
 }
+
+// OracleProof is a closed, source-bound fact emitted only by a trusted
+// analyzer/contract importer. The current analyzer emits none; absence keeps
+// verified assertion generation closed rather than trusting runtime output.
+type OracleProof struct {
+	Kind           string `json:"kind"`
+	CandidateID    string `json:"candidateId"`
+	TargetDigest   string `json:"targetDigest"`
+	SourceDigest   string `json:"sourceDigest"`
+	ExpectedDigest string `json:"expectedDigest"`
+	Rule           string `json:"rule"`
+	Tolerance      string `json:"tolerance,omitempty"`
+}
 type Function struct {
 	SymbolID       string        `json:"symbolId"`
 	Name           string        `json:"name"`
@@ -133,6 +146,7 @@ type Function struct {
 	Excerpt        SourceExcerpt `json:"excerpt"`
 	Effect         EffectKind    `json:"effect"`
 	Decision       Decision      `json:"decision"`
+	OracleProofs   []OracleProof `json:"oracleProofs,omitempty"`
 	originVerified bool
 }
 type TranslationUnit struct {
