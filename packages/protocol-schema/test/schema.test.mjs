@@ -17,14 +17,18 @@ test("protocol 1.5 generation boundaries reject caller classification, leaked te
 
   const target = ajv.compile({ ...generation.$defs.target, $defs: generation.$defs });
   const diagnostic = ajv.compile({ ...generation.$defs.diagnostic, $defs: generation.$defs });
-  assert.equal(target({ targetId: "c".repeat(64), displayName: "core.tests", frameworks: ["cpputest"] }), true);
-  assert.equal(diagnostic({ code: "COVERAGE_GAP", severity: "warning", message: "branch 12 remains uncovered" }), true);
-  for (const displayName of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp"]) {
-    assert.equal(target({ targetId: "c".repeat(64), displayName, frameworks: ["cpputest"] }), false, displayName);
+  const stableTarget = { kind: "build-target", targetId: "c".repeat(64), frameworks: ["cpputest"] };
+  const structuredDiagnostic = { code: "COVERAGE_GAP", severity: "warning", reason: "uncovered-branch" };
+  assert.equal(target(stableTarget), true);
+  assert.equal(diagnostic(structuredDiagnostic), true);
+  for (const displayName of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp", "API KEY secretvalue123", "Bearer sk123456789", "int secret 42"]) {
+    assert.equal(target({ ...stableTarget, displayName }), false, displayName);
   }
-  for (const message of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp"]) {
-    assert.equal(diagnostic({ code: "COVERAGE_GAP", severity: "warning", message }), false, message);
+  for (const message of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp", "API KEY secretvalue123", "Bearer sk123456789", "int secret 42"]) {
+    assert.equal(diagnostic({ ...structuredDiagnostic, message }), false, message);
   }
+  assert.equal(diagnostic({ ...structuredDiagnostic, reason: "Bearer sk123456789" }), false);
+  assert.equal(diagnostic({ ...structuredDiagnostic, code: "SECRET_VALUE_123" }), false);
   const artifact = ajv.compile(await load("../schema/v1.5/artifact.schema.json"));
   const metadata = { artifactId: "a".repeat(32), taskId: "b".repeat(32), kind: "task-summary", mimeType: "application/json", sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-09-27T00:00:00Z", uri: "unit-test-ide://artifact/" + "a".repeat(32) };
   assert.equal(artifact(metadata), true);

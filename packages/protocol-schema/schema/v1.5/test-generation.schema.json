@@ -18,10 +18,7 @@
   "$defs": {
     "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
-    "safeDisplayText": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._,:;()#%+-]*$", "description": "Path-free, secret-free display text; use targetId for identity." },
-    "safeDiagnosticText": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._,:;()#%+-]*$", "description": "Path-free, secret-free summary; use diagnostic code and plannedEdit.path for structured identifiers." },
     "symbol": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\\\:]*:[^/\\\\]*$" },
     "relativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$" },
     "scope": { "title": "TestGenerationScopeV15", "enum": ["symbol", "file", "target", "workspace", "coverage-gap"] },
@@ -55,9 +52,10 @@
     },
     "target": {
       "title": "TestGenerationTargetV15", "type": "object", "additionalProperties": false,
-      "required": ["targetId", "displayName", "frameworks"],
+      "required": ["kind", "targetId", "frameworks"],
       "properties": {
-        "targetId": { "$ref": "#/$defs/digest" }, "displayName": { "$ref": "#/$defs/safeDisplayText" },
+        "kind": { "title": "TestGenerationTargetKindV15", "const": "build-target" },
+        "targetId": { "$ref": "#/$defs/digest", "description": "Stable opaque target digest; no display label or source text is carried." },
         "frameworks": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["cpputest", "unity"] } }
       }
     },
@@ -102,10 +100,11 @@
     },
     "diagnostic": {
       "title": "TestGenerationDiagnosticV15", "type": "object", "additionalProperties": false,
-      "required": ["code", "severity", "message"],
+      "required": ["code", "severity"],
       "properties": {
-        "code": { "$ref": "#/$defs/name" }, "severity": { "enum": ["info", "warning", "error"] },
-        "message": { "$ref": "#/$defs/safeDiagnosticText" }
+        "code": { "title": "TestGenerationDiagnosticCodeV15", "enum": ["COVERAGE_GAP", "TARGET_UNSUPPORTED", "ORACLE_UNAVAILABLE", "BUDGET_EXCEEDED", "VALIDATION_FAILED", "NO_CANDIDATE"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "reason": { "title": "TestGenerationDiagnosticReasonV15", "enum": ["uncovered-branch", "uncovered-line", "uncovered-function", "budget-limit", "unsupported-target", "oracle-unavailable", "validation-failed"] }
       }
     },
     "plannedEdit": {

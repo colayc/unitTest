@@ -305,18 +305,22 @@ export type {
   TestGenerationRunIDRequestV15,
   TestGenerationStartRequestV15,
   TestGenerationTargetListV15,
+  TestGenerationTargetV15,
   TestGenerationTargetListRequestV15,
   TestGenerationCandidateListRequestV15
 } from "./generated/test-generation-v1-5.js";
 export {
   TestGenerationCandidateKindV15,
+  TestGenerationDiagnosticCodeV15,
+  TestGenerationDiagnosticReasonV15,
   TestGenerationFrameworkV15,
   TestGenerationScopeV15,
   TestGenerationStateV15,
   Kind as TestGenerationAssertionKindV15,
   Severity as TestGenerationDiagnosticSeverityV15,
   Operation as TestGenerationEditOperationV15,
-  Framework as TestGenerationTargetFrameworkV15
+  Framework as TestGenerationTargetFrameworkV15,
+  TestGenerationTargetKindV15
 } from "./generated/test-generation-v1-5.js";
 export type {
   TaskSnapshotV15,

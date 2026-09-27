@@ -327,16 +327,18 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
     baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
     deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
     plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
-    diagnostics: [], characterizationConfirmed: false
+    diagnostics: [{ code: "COVERAGE_GAP", severity: "warning", reason: "uncovered-branch" }], characterizationConfirmed: false
   };
   const fixture = scriptedClient((request) => {
     if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5");
-    if (request.method === "testGeneration/targets/list") return response(request, { items: [] }, "1.5");
+    if (request.method === "testGeneration/targets/list") return response(request, { items: [{ kind: "build-target", targetId: TARGET_ID, frameworks: ["cpputest"] }] }, "1.5");
     if (request.method === "testGeneration/candidates/list") return response(request, { items: [candidate] }, "1.5");
     return response(request, run, "1.5");
   });
   await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
-  assert.equal((await fixture.client.listTestGenerationTargets({ workspaceGeneration: WORKSPACE_GENERATION, projectId: "core" })).items.length, 0);
+  const targets = await fixture.client.listTestGenerationTargets({ workspaceGeneration: WORKSPACE_GENERATION, projectId: "core" });
+  assert.equal(targets.items[0]?.targetId, TARGET_ID);
+  assert.equal(targets.items[0]?.kind, "build-target");
   const startInput = {
     idempotencyKey: "b".repeat(32), workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
     scope: TestGenerationScopeV15.Symbol, symbolId: "target:foo", framework: TestGenerationFrameworkV15.Cpputest,
@@ -345,7 +347,9 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   };
   assert.equal((await fixture.client.startTestGeneration(startInput)).runId, RUN_ID);
   assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).createdAt.getTime(), new Date(SENT_AT).getTime());
-  assert.equal((await fixture.client.listTestGenerationCandidates({ runId: RUN_ID })).items[0]?.codeDigest, "a".repeat(64));
+  const candidates = await fixture.client.listTestGenerationCandidates({ runId: RUN_ID });
+  assert.equal(candidates.items[0]?.codeDigest, "a".repeat(64));
+  assert.equal(candidates.items[0]?.diagnostics[0]?.reason, "uncovered-branch");
   assert.equal((await fixture.client.acceptTestGeneration({
     runId: RUN_ID, candidateId: ARTIFACT_ID, confirmCharacterization: true
   })).runId, RUN_ID);
@@ -423,6 +427,13 @@ test("protocol 1.5 candidate responses reject source and bad digests", async () 
       deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
       plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
       diagnostics: [{ code: "COVERAGE_GAP", severity: "warning", message: "C:\\private\\source.cpp: API_KEY=secret" }],
+      characterizationConfirmed: false },
+    { candidateId: ARTIFACT_ID, kind: "verified", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
+      assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) },
+      baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
+      deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+      plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+      diagnostics: [{ code: "COVERAGE_GAP", severity: "warning", message: "Bearer sk123456789" }],
       characterizationConfirmed: false }
   ]) {
     const fixture = scriptedClient((request) => request.method === "handshake"
@@ -436,7 +447,7 @@ test("protocol 1.5 candidate responses reject source and bad digests", async () 
 
 test("protocol 1.5 client rejects unsafe target names and filesystem artifact URIs", async () => {
   for (const [method, payload] of [
-    ["testGeneration/targets/list", { items: [{ targetId: TARGET_ID, displayName: "C:/private/source.cpp", frameworks: ["cpputest"] }] }],
+    ["testGeneration/targets/list", { items: [{ kind: "build-target", targetId: TARGET_ID, displayName: "API KEY secretvalue123", frameworks: ["cpputest"] }] }],
     ["artifacts/list", { items: [{ artifactId: ARTIFACT_ID, taskId: TASK_ID, kind: "task-summary", mimeType: "application/json", sizeBytes: 1, sha256: "a".repeat(64), createdAt: SENT_AT, uri: "file:///C:/private/source.cpp" }] }]
   ] as const) {
     const fixture = scriptedClient((request) => request.method === "handshake"

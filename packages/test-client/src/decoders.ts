@@ -54,8 +54,11 @@ import {
   TestGenerationStateV15,
   TestGenerationAssertionKindV15,
   TestGenerationDiagnosticSeverityV15,
+  TestGenerationDiagnosticCodeV15,
+  TestGenerationDiagnosticReasonV15,
   TestGenerationEditOperationV15,
-  TestGenerationTargetFrameworkV15
+  TestGenerationTargetFrameworkV15,
+  TestGenerationTargetKindV15
 } from "@unit-test-ide/protocol-models";
 import type { ProtocolTaskEvent } from "./envelopes.js";
 
@@ -251,8 +254,8 @@ export function decodeTestGenerationTargetList(value: unknown): TestGenerationTa
   const items = wireArray(wire.items, "test generation targets").map((entry) => {
     const target = record(entry, "test generation target");
     return {
+      kind: wireEnum(target.kind, Object.values(TestGenerationTargetKindV15), "target kind"),
       targetId: wireString(target.targetId, "target id"),
-      displayName: wireString(target.displayName, "target display name"),
       frameworks: wireArray(target.frameworks, "target frameworks").map((framework) =>
         wireEnum(framework, Object.values(TestGenerationTargetFrameworkV15), "target framework"))
     };
@@ -306,9 +309,9 @@ export function decodeTestGenerationCandidatePage(value: unknown): TestGeneratio
       diagnostics: wireArray(candidate.diagnostics, "generation diagnostics").map((entry) => {
         const diagnostic = record(entry, "generation diagnostic");
         return {
-          code: wireString(diagnostic.code, "diagnostic code"),
-          message: wireString(diagnostic.message, "diagnostic message"),
-          severity: wireEnum(diagnostic.severity, Object.values(TestGenerationDiagnosticSeverityV15), "diagnostic severity")
+          code: wireEnum(diagnostic.code, Object.values(TestGenerationDiagnosticCodeV15), "diagnostic code"),
+          severity: wireEnum(diagnostic.severity, Object.values(TestGenerationDiagnosticSeverityV15), "diagnostic severity"),
+          ...(diagnostic.reason === undefined ? {} : { reason: wireEnum(diagnostic.reason, Object.values(TestGenerationDiagnosticReasonV15), "diagnostic reason") })
         };
       }),
       characterizationConfirmed: wireBoolean(candidate.characterizationConfirmed, "characterization confirmation")

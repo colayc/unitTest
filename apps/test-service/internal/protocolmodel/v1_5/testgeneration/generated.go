@@ -60,9 +60,9 @@ type TestGenerationCoverageV15 struct {
 }
 
 type TestGenerationDiagnosticV15 struct {
-	Code     string   `json:"code"`
-	Message  string   `json:"message"`
-	Severity Severity `json:"severity"`
+	Code     TestGenerationDiagnosticCodeV15    `json:"code"`
+	Reason   *TestGenerationDiagnosticReasonV15 `json:"reason,omitempty"`
+	Severity Severity                           `json:"severity"`
 }
 
 type TestGenerationPlannedEditV15 struct {
@@ -121,9 +121,10 @@ type TestGenerationTargetListV15 struct {
 }
 
 type TestGenerationTargetV15 struct {
-	DisplayName string      `json:"displayName"`
-	Frameworks  []Framework `json:"frameworks"`
-	TargetID    string      `json:"targetId"`
+	Frameworks []Framework                 `json:"frameworks"`
+	Kind       TestGenerationTargetKindV15 `json:"kind"`
+	// Stable opaque target digest; no display label or source text is carried.
+	TargetID string `json:"targetId"`
 }
 
 type TestGenerationTargetListRequestV15 struct {
@@ -138,6 +139,29 @@ type Kind string
 const (
 	IndependentOracle Kind = "independent-oracle"
 	ObservedOutput    Kind = "observed-output"
+)
+
+type TestGenerationDiagnosticCodeV15 string
+
+const (
+	BudgetExceeded    TestGenerationDiagnosticCodeV15 = "BUDGET_EXCEEDED"
+	CoverageGap       TestGenerationDiagnosticCodeV15 = "COVERAGE_GAP"
+	NoCandidate       TestGenerationDiagnosticCodeV15 = "NO_CANDIDATE"
+	OracleUnavailable TestGenerationDiagnosticCodeV15 = "ORACLE_UNAVAILABLE"
+	TargetUnsupported TestGenerationDiagnosticCodeV15 = "TARGET_UNSUPPORTED"
+	ValidationFailed  TestGenerationDiagnosticCodeV15 = "VALIDATION_FAILED"
+)
+
+type TestGenerationDiagnosticReasonV15 string
+
+const (
+	BudgetLimit                                        TestGenerationDiagnosticReasonV15 = "budget-limit"
+	TestGenerationDiagnosticReasonV15OracleUnavailable TestGenerationDiagnosticReasonV15 = "oracle-unavailable"
+	TestGenerationDiagnosticReasonV15ValidationFailed  TestGenerationDiagnosticReasonV15 = "validation-failed"
+	UncoveredBranch                                    TestGenerationDiagnosticReasonV15 = "uncovered-branch"
+	UncoveredFunction                                  TestGenerationDiagnosticReasonV15 = "uncovered-function"
+	UncoveredLine                                      TestGenerationDiagnosticReasonV15 = "uncovered-line"
+	UnsupportedTarget                                  TestGenerationDiagnosticReasonV15 = "unsupported-target"
 )
 
 type Severity string
@@ -190,11 +214,11 @@ const (
 type TestGenerationScopeV15 string
 
 const (
-	CoverageGap TestGenerationScopeV15 = "coverage-gap"
-	File        TestGenerationScopeV15 = "file"
-	Symbol      TestGenerationScopeV15 = "symbol"
-	Target      TestGenerationScopeV15 = "target"
-	Workspace   TestGenerationScopeV15 = "workspace"
+	File                              TestGenerationScopeV15 = "file"
+	Symbol                            TestGenerationScopeV15 = "symbol"
+	Target                            TestGenerationScopeV15 = "target"
+	TestGenerationScopeV15CoverageGap TestGenerationScopeV15 = "coverage-gap"
+	Workspace                         TestGenerationScopeV15 = "workspace"
 )
 
 type Framework string
@@ -202,4 +226,10 @@ type Framework string
 const (
 	FrameworkCpputest Framework = "cpputest"
 	FrameworkUnity    Framework = "unity"
+)
+
+type TestGenerationTargetKindV15 string
+
+const (
+	BuildTarget TestGenerationTargetKindV15 = "build-target"
 )

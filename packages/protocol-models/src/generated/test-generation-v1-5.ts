@@ -65,9 +65,28 @@ export interface TestGenerationCoverageV15 {
 }
 
 export interface TestGenerationDiagnosticV15 {
-    code:     string;
-    message:  string;
+    code:     TestGenerationDiagnosticCodeV15;
+    reason?:  TestGenerationDiagnosticReasonV15;
     severity: Severity;
+}
+
+export enum TestGenerationDiagnosticCodeV15 {
+    BudgetExceeded = "BUDGET_EXCEEDED",
+    CoverageGap = "COVERAGE_GAP",
+    NoCandidate = "NO_CANDIDATE",
+    OracleUnavailable = "ORACLE_UNAVAILABLE",
+    TargetUnsupported = "TARGET_UNSUPPORTED",
+    ValidationFailed = "VALIDATION_FAILED",
+}
+
+export enum TestGenerationDiagnosticReasonV15 {
+    BudgetLimit = "budget-limit",
+    OracleUnavailable = "oracle-unavailable",
+    UncoveredBranch = "uncovered-branch",
+    UncoveredFunction = "uncovered-function",
+    UncoveredLine = "uncovered-line",
+    UnsupportedTarget = "unsupported-target",
+    ValidationFailed = "validation-failed",
 }
 
 export enum Severity {
@@ -171,14 +190,21 @@ export interface TestGenerationTargetListV15 {
 }
 
 export interface TestGenerationTargetV15 {
-    displayName: string;
-    frameworks:  Framework[];
-    targetId:    string;
+    frameworks: Framework[];
+    kind:       TestGenerationTargetKindV15;
+    /**
+     * Stable opaque target digest; no display label or source text is carried.
+     */
+    targetId: string;
 }
 
 export enum Framework {
     Cpputest = "cpputest",
     Unity = "unity",
+}
+
+export enum TestGenerationTargetKindV15 {
+    BuildTarget = "build-target",
 }
 
 export interface TestGenerationTargetListRequestV15 {
