@@ -1,0 +1,336 @@
+package testgenpublish
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"unit-test-ide.local/test-service/internal/testgenrender"
+)
+
+const (
+	testRun      = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testCase     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testSnapshot = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+)
+
+type fixture struct {
+	root    string
+	journal string
+	p       *Publisher
+	set     CandidateSet
+	before  string
+	mode    os.FileMode
+}
+
+func newFixture(t *testing.T) fixture {
+	t.Helper()
+	base := t.TempDir()
+	root := filepath.Join(base, "source")
+	journal := filepath.Join(base, "journal")
+	if err := os.MkdirAll(filepath.Join(root, "tests", "generated"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmakeFixture, err := os.ReadFile(filepath.Join("testdata", "CMakeLists.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := string(cmakeFixture)
+	if err := os.WriteFile(filepath.Join(root, "tests", "CMakeLists.txt"), []byte(before), 0640); err != nil {
+		t.Fatal(err)
+	}
+	testFixture, err := os.ReadFile(filepath.Join("testdata", "existing_test.cpp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tests", "existing_test.cpp"), testFixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, "tests", "CMakeLists.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(journal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(root, journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	const source = "#include \"CppUTest/TestHarness.h\"\nTEST_GROUP(Generated_choose) {};\nTEST(Generated_choose, case_bbbbbbbbbbbbbbbb) { CHECK_EQUAL(7, choose(2)); }\n"
+	after := before + "target_sources(unit_tests PRIVATE \"generated/choose_test.cpp\")\n"
+	set := CandidateSet{RunID: testRun, SnapshotDigest: testSnapshot, CaseIDs: []string{testCase}, TestTarget: "unit_tests", ProductionTarget: "core", FrameworkTarget: "CppUTest", Files: []testgenrender.StagedFile{
+		{Path: "tests/generated/choose_test.cpp", Content: []byte(source), AfterDigest: digest([]byte(source))},
+		{Path: "tests/CMakeLists.txt", Content: []byte(after), BeforeDigest: digest([]byte(before)), AfterDigest: digest([]byte(after))},
+	}}
+	return fixture{root: root, journal: journal, p: p, set: set, before: before, mode: info.Mode().Perm()}
+}
+
+func (f fixture) close(t *testing.T) {
+	t.Helper()
+	if err := f.p.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+func (f fixture) plan(t *testing.T) PublishPlan {
+	t.Helper()
+	plan, err := f.p.Plan(context.Background(), f.set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+func (f fixture) request(plan PublishPlan) AcceptRequest {
+	return AcceptRequest{RunID: plan.RunID, CandidateSetDigest: plan.CandidateSetDigest, SnapshotDigest: plan.SnapshotDigest, DiffDigest: plan.DiffDigest, ConfirmationDigest: plan.ConfirmationDigest, CharacterizationDigest: plan.CharacterizationDigest}
+}
+func readFixture(t *testing.T, f fixture) (string, []byte, os.FileMode) {
+	t.Helper()
+	cmake, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(filepath.Join(f.root, "tests", "generated", "choose_test.cpp"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(cmake), source, info.Mode().Perm()
+}
+
+func TestPlanAcceptPublishesAndRepeatsWithoutRewrite(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	if len(plan.Edits) != 2 || plan.Diff == "" || plan.DiffDigest != digest([]byte(plan.Diff)) || plan.ConfirmationDigest == "" {
+		t.Fatalf("incomplete plan: %+v", plan)
+	}
+	receipt, err := f.p.Accept(context.Background(), f.request(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Edits) != 2 || receipt.RunID != testRun || strings.Contains(receipt.String(), f.root) || strings.Contains(receipt.String(), "CHECK_EQUAL") {
+		t.Fatalf("unsafe receipt: %+v", receipt)
+	}
+	cmake, source, _ := readFixture(t, f)
+	if !strings.Contains(cmake, "target_sources(unit_tests PRIVATE") || !strings.Contains(string(source), "CHECK_EQUAL") {
+		t.Fatal("edits not published")
+	}
+	info, err := os.Stat(filepath.Join(f.root, "tests", "generated", "choose_test.cpp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat, err := f.p.Accept(context.Background(), f.request(plan))
+	if err != nil || !reflect.DeepEqual(receipt, repeat) {
+		t.Fatalf("repeat: %+v %v", repeat, err)
+	}
+	info2, err := os.Stat(filepath.Join(f.root, "tests", "generated", "choose_test.cpp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(info, info2) {
+		t.Fatal("repeat rewrote generated file")
+	}
+}
+
+func TestAcceptRejectsStalePreimageAndChangedGeneratedFile(t *testing.T) {
+	for _, tc := range []struct{ name, path, value string }{{"cmake", "tests/CMakeLists.txt", "user edit\n"}, {"generated", "tests/generated/choose_test.cpp", "user test\n"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			defer f.close(t)
+			plan := f.plan(t)
+			if err := os.WriteFile(filepath.Join(f.root, filepath.FromSlash(tc.path)), []byte(tc.value), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, acceptErr := f.p.Accept(context.Background(), f.request(plan))
+			if !errors.Is(acceptErr, ErrConflict) {
+				t.Fatalf("want conflict, got %v", acceptErr)
+			}
+			if tc.name == "cmake" {
+				var conflict *ConflictReceipt
+				if !errors.As(acceptErr, &conflict) || conflict.Path != "tests/CMakeLists.txt" || conflict.ActualDigest != digest([]byte(tc.value)) {
+					t.Fatalf("missing closed conflict receipt: %+v %v", conflict, acceptErr)
+				}
+			}
+			got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(tc.path)))
+			if err != nil || string(got) != tc.value {
+				t.Fatalf("user edit overwritten: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAcceptFaultsRollBackExactBytesAndMode(t *testing.T) {
+	for _, stage := range []string{"stage-first", "stage-last", "journal", "commit-first", "commit-last", "readback", "cleanup"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newFixture(t)
+			defer f.close(t)
+			plan := f.plan(t)
+			f.p.hooks.fail = func(s string) error {
+				if s == stage {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			if _, err := f.p.Accept(context.Background(), f.request(plan)); err == nil {
+				t.Fatal("fault accepted")
+			}
+			cmake, source, mode := readFixture(t, f)
+			if cmake != f.before || source != nil || mode != f.mode {
+				t.Fatalf("partial edit: cmake=%q source=%q mode=%v", cmake, source, mode)
+			}
+		})
+	}
+}
+
+func TestAcceptCancellationBeforeAndDuringCommit(t *testing.T) {
+	for _, during := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before", true: "during"}[during], func(t *testing.T) {
+			f := newFixture(t)
+			defer f.close(t)
+			plan := f.plan(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			if during {
+				f.p.hooks.fail = func(stage string) error {
+					if stage == "commit-first" {
+						cancel()
+					}
+					return nil
+				}
+			} else {
+				cancel()
+			}
+			if _, err := f.p.Accept(ctx, f.request(plan)); !errors.Is(err, context.Canceled) {
+				t.Fatalf("want cancelled, got %v", err)
+			}
+			cmake, source, mode := readFixture(t, f)
+			if cmake != f.before || source != nil || mode != f.mode {
+				t.Fatal("cancellation left edit")
+			}
+		})
+	}
+}
+
+func TestRecoverInterruptedTransactionRestoresWorkspace(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "commit-last" {
+			panic("simulated process crash")
+		}
+		return nil
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered == nil {
+				t.Fatal("crash did not interrupt")
+			}
+		}()
+		_, _ = f.p.Accept(context.Background(), f.request(plan))
+	}()
+	f.close(t)
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cmake, source, mode := readFixture(t, fixture{root: f.root})
+	if cmake != f.before || source != nil || mode != f.mode {
+		t.Fatalf("recovery incomplete: %q %q %v", cmake, source, mode)
+	}
+}
+
+func TestRepeatAcceptanceAfterRestartDoesNotRewrite(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	request := f.request(plan)
+	want, err := f.p.Accept(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "tests", "generated", "choose_test.cpp")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.close(t)
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	got, err := p.Accept(context.Background(), request)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("repeat after restart: %+v %v", got, err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("restart repeat rewrote target")
+	}
+}
+
+func TestAcceptCreatesMissingGeneratedDirectoryAndRollsItBackOnFault(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
+			f := newFixture(t)
+			defer f.close(t)
+			if err := os.Remove(filepath.Join(f.root, "tests", "generated")); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := f.p.Plan(context.Background(), f.set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fail {
+				f.p.hooks.fail = func(stage string) error {
+					if stage == "commit-last" {
+						return errors.New("injected")
+					}
+					return nil
+				}
+			}
+			_, err = f.p.Accept(context.Background(), f.request(plan))
+			if fail {
+				if err == nil {
+					t.Fatal("fault accepted")
+				}
+				if _, statErr := os.Lstat(filepath.Join(f.root, "tests", "generated")); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("orphan directory: %v", statErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestConcurrentPreimageEditBeforeCommitConflictsWithoutOverwrite(t *testing.T) {
+	f := newFixture(t)
+	defer f.close(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "commit-first" {
+			return os.WriteFile(filepath.Join(f.root, "tests", "CMakeLists.txt"), []byte("user change\n"), 0600)
+		}
+		return nil
+	}
+	if _, err := f.p.Accept(context.Background(), f.request(plan)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("want conflict: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil || string(data) != "user change\n" {
+		t.Fatalf("user edit lost: %q %v", data, err)
+	}
+}

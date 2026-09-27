@@ -1,0 +1,721 @@
+// Package testgenpublish is the sole workspace-write boundary for generated tests.
+package testgenpublish
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+)
+
+type SnapshotVerifier func(context.Context, string) error
+type AcceptRequest struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string }
+type publisherHooks struct{ fail func(string) error }
+type Publisher struct {
+	root, journal *os.Root
+	verify        SnapshotVerifier
+	mu            sync.Mutex
+	plans         map[string]preparedPlan
+	hooks         publisherHooks
+}
+
+type journalFile struct {
+	Path, BeforeDigest, AfterDigest, StageName, BackupName string
+	Before                                                 []byte
+	Mode                                                   uint32
+	Existed                                                bool
+}
+type journalRecord struct {
+	Version            int
+	ConfirmationDigest string
+	Receipt            Receipt
+	Files              []journalFile
+	CreatedDirs        []string
+}
+
+var errMissingParent = errors.New("missing generated-test directory")
+
+func New(source, journal string, verify SnapshotVerifier) (*Publisher, error) {
+	if verify == nil || !absoluteSafeDirectory(source) || !absoluteSafeDirectory(journal) || overlaps(source, journal) {
+		return nil, ErrInvalidPlan
+	}
+	root, err := os.OpenRoot(source)
+	if err != nil {
+		return nil, ErrInvalidPlan
+	}
+	storage, err := os.OpenRoot(journal)
+	if err != nil {
+		_ = root.Close()
+		return nil, ErrInvalidPlan
+	}
+	return &Publisher{root: root, journal: storage, verify: verify, plans: map[string]preparedPlan{}}, nil
+}
+func (p *Publisher) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return errors.Join(p.root.Close(), p.journal.Close())
+}
+func overlaps(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	rel, err := filepath.Rel(a, b)
+	if err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return true
+	}
+	rel, err = filepath.Rel(b, a)
+	return err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+func absoluteSafeDirectory(value string) bool {
+	if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return false
+	}
+	for current := value; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil || !info.IsDir() || linked(info) {
+			return false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return true
+}
+
+func (p *Publisher) fail(stage string) error {
+	if p.hooks.fail != nil {
+		return p.hooks.fail(stage)
+	}
+	return nil
+}
+
+func (p *Publisher) parent(relative string, create bool) (*os.Root, error) {
+	if !validRelative(relative) {
+		return nil, ErrInvalidPlan
+	}
+	dir := path.Dir(relative)
+	if dir == "." {
+		return nil, ErrInvalidPlan
+	}
+	current := ""
+	for _, segment := range strings.Split(dir, "/") {
+		if current == "" {
+			current = segment
+		} else {
+			current += "/" + segment
+		}
+		info, err := p.root.Lstat(filepath.FromSlash(current))
+		if errors.Is(err, os.ErrNotExist) && !create {
+			return nil, errMissingParent
+		}
+		if errors.Is(err, os.ErrNotExist) && create {
+			if err := p.root.Mkdir(filepath.FromSlash(current), 0700); err != nil {
+				return nil, ErrConflict
+			}
+			info, err = p.root.Lstat(filepath.FromSlash(current))
+		}
+		if err != nil || !info.IsDir() || linked(info) {
+			return nil, ErrConflict
+		}
+		if !exactEntry(p.root, path.Dir(current), segment) {
+			return nil, ErrConflict
+		}
+	}
+	parent, err := p.root.OpenRoot(filepath.FromSlash(dir))
+	if err != nil {
+		return nil, ErrConflict
+	}
+	info, err := p.root.Lstat(filepath.FromSlash(dir))
+	opened, openErr := parent.Stat(".")
+	if err != nil || openErr != nil || linked(info) || !os.SameFile(info, opened) {
+		_ = parent.Close()
+		return nil, ErrConflict
+	}
+	return parent, nil
+}
+func exactEntry(root *os.Root, dir, base string) bool {
+	name := "."
+	if dir != "." {
+		name = filepath.FromSlash(dir)
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return false
+	}
+	entries, err := f.ReadDir(-1)
+	_ = f.Close()
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), base) {
+			return entry.Name() == base
+		}
+	}
+	return false
+}
+func (p *Publisher) readTarget(relative string) ([]byte, os.FileMode, bool, error) {
+	parent, err := p.parent(relative, false)
+	if errors.Is(err, errMissingParent) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		if errors.Is(err, ErrConflict) {
+			return nil, 0, false, ErrConflict
+		}
+		return nil, 0, false, err
+	}
+	defer parent.Close()
+	name := path.Base(relative)
+	info, err := parent.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		if !exactEntryAlias(parent, name) {
+			return nil, 0, false, nil
+		}
+		return nil, 0, false, ErrConflict
+	}
+	if err != nil || linked(info) || !info.Mode().IsRegular() || !exactEntry(parent, ".", name) {
+		return nil, 0, false, ErrConflict
+	}
+	f, err := parent.Open(name)
+	if err != nil {
+		return nil, 0, false, ErrConflict
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) || opened.Size() < 0 || opened.Size() > maxEditBytes {
+		return nil, 0, false, ErrConflict
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxEditBytes+1))
+	if err != nil || len(data) > maxEditBytes {
+		return nil, 0, false, ErrConflict
+	}
+	last, err := parent.Lstat(name)
+	if err != nil || !os.SameFile(last, opened) || linked(last) || last.Size() != opened.Size() {
+		return nil, 0, false, ErrConflict
+	}
+	return data, info.Mode().Perm(), true, nil
+}
+func exactEntryAlias(parent *os.Root, name string) bool {
+	f, err := parent.Open(".")
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, error) {
+	if p == nil || ctx == nil || !validHex(req.RunID, 32) || !validHex(req.CandidateSetDigest, 64) || !validHex(req.SnapshotDigest, 64) || !validHex(req.DiffDigest, 64) || !validHex(req.ConfirmationDigest, 64) || req.CharacterizationDigest != "" && !validHex(req.CharacterizationDigest, 64) {
+		return Receipt{}, ErrConflict
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Receipt{}, err
+	}
+	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+		return Receipt{}, ErrConflict
+	}
+	if receipt, exists, err := p.readReceipt(req.ConfirmationDigest); err != nil {
+		return Receipt{}, err
+	} else if exists {
+		if !matchesReceiptRequest(receipt, req) || p.verifyReceiptCurrent(receipt) != nil {
+			return Receipt{}, ErrConflict
+		}
+		return receipt, nil
+	}
+	plan, ok := p.plans[req.ConfirmationDigest]
+	if !ok || !matchesRequest(plan.public, req) {
+		return Receipt{}, ErrConflict
+	}
+	if err := p.verifyCurrent(plan.files, false); err != nil {
+		return Receipt{}, err
+	}
+	journal := journalRecord{Version: 1, ConfirmationDigest: req.ConfirmationDigest, Receipt: receiptFor(plan.public)}
+	created, err := p.missingDirectories(plan.files)
+	if err != nil {
+		return Receipt{}, err
+	}
+	journal.CreatedDirs = created
+	for index, file := range plan.files {
+		suffix := req.ConfirmationDigest[:16] + "-" + string(rune('a'+index))
+		journal.Files = append(journal.Files, journalFile{Path: file.edit.Path, BeforeDigest: file.edit.BeforeDigest, AfterDigest: file.edit.AfterDigest, Before: append([]byte(nil), file.before...), Mode: uint32(file.mode), Existed: file.existed, StageName: ".testgen-" + suffix + ".stage", BackupName: ".testgen-" + suffix + ".backup"})
+	}
+	if err := p.fail("journal"); err != nil {
+		return Receipt{}, err
+	}
+	if err := p.writeJournal(journal); err != nil {
+		return Receipt{}, err
+	}
+	rollback := func(cause error) (Receipt, error) {
+		recoverErr := p.rollback(journal)
+		if recoverErr == nil {
+			_ = p.journal.Remove(journalName(req.ConfirmationDigest))
+		}
+		return Receipt{}, errors.Join(cause, recoverErr)
+	}
+	for i, file := range plan.files {
+		stage := "stage-first"
+		if i == len(plan.files)-1 {
+			stage = "stage-last"
+		}
+		if err := p.fail(stage); err != nil {
+			return rollback(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return rollback(err)
+		}
+		if err := p.stageFile(journal.Files[i], file.after); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := p.verifyCurrent(plan.files, false); err != nil {
+		return rollback(err)
+	}
+	for i, item := range journal.Files {
+		stage := "commit-first"
+		if i == len(journal.Files)-1 {
+			stage = "commit-last"
+		}
+		if err := p.fail(stage); err != nil {
+			return rollback(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return rollback(err)
+		}
+		if err := p.commitFile(item); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := p.fail("readback"); err != nil {
+		return rollback(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	if err := p.verifyCurrent(plan.files, true); err != nil {
+		return rollback(err)
+	}
+	if err := p.fail("cleanup"); err != nil {
+		return rollback(err)
+	}
+	if err := p.writeReceipt(journal.Receipt); err != nil {
+		return rollback(err)
+	}
+	// A durable receipt marks commit. Leftover backups/journal are safely cleaned on restart.
+	if err := p.cleanupCommitted(journal); err != nil {
+		return journal.Receipt, nil
+	}
+	return journal.Receipt, nil
+}
+func matchesRequest(p PublishPlan, r AcceptRequest) bool {
+	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
+}
+func matchesReceiptRequest(p Receipt, r AcceptRequest) bool {
+	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
+}
+func receiptFor(p PublishPlan) Receipt {
+	return Receipt{RunID: p.RunID, CandidateSetDigest: p.CandidateSetDigest, SnapshotDigest: p.SnapshotDigest, DiffDigest: p.DiffDigest, ConfirmationDigest: p.ConfirmationDigest, CharacterizationDigest: p.CharacterizationDigest, Edits: append([]PlannedEdit(nil), p.Edits...)}
+}
+func matchesReceipt(r Receipt, p PublishPlan) bool { return r.String() == receiptFor(p).String() }
+func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
+	if len(r.Edits) == 0 || len(r.Edits) > maxFiles {
+		return ErrConflict
+	}
+	seen := map[string]bool{}
+	for _, edit := range r.Edits {
+		if !generatedTestPath(edit.Path) && !cmakePath(edit.Path) || !validHex(edit.AfterDigest, 64) || seen[strings.ToLower(edit.Path)] {
+			return ErrConflict
+		}
+		seen[strings.ToLower(edit.Path)] = true
+		data, _, exists, err := p.readTarget(edit.Path)
+		if err != nil || !exists || digest(data) != edit.AfterDigest {
+			return ErrConflict
+		}
+	}
+	return nil
+}
+func (p *Publisher) verifyCurrent(files []preparedFile, after bool) error {
+	for _, file := range files {
+		data, _, exists, err := p.readTarget(file.edit.Path)
+		if err != nil {
+			return ErrConflict
+		}
+		if after {
+			if !exists || digest(data) != file.edit.AfterDigest {
+				return conflictReceipt(file.edit.Path, file.edit.AfterDigest, data, exists)
+			}
+		} else if exists != file.existed || exists && (!bytes.Equal(data, file.before) || digest(data) != file.edit.BeforeDigest) {
+			return conflictReceipt(file.edit.Path, file.edit.BeforeDigest, data, exists)
+		}
+	}
+	return nil
+}
+
+func (p *Publisher) stageFile(item journalFile, data []byte) error {
+	parent, err := p.parent(item.Path, true)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	f, err := parent.OpenFile(item.StageName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return ErrConflict
+	}
+	writeErr := error(nil)
+	if _, err := f.Write(data); err != nil {
+		writeErr = err
+	}
+	if writeErr == nil {
+		writeErr = f.Chmod(os.FileMode(item.Mode))
+	}
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
+	writeErr = errors.Join(writeErr, f.Close())
+	if writeErr != nil {
+		return ErrConflict
+	}
+	return nil
+}
+func (p *Publisher) missingDirectories(files []preparedFile) ([]string, error) {
+	missing := map[string]bool{}
+	for _, file := range files {
+		current := ""
+		for _, segment := range strings.Split(path.Dir(file.edit.Path), "/") {
+			if current == "" {
+				current = segment
+			} else {
+				current += "/" + segment
+			}
+			info, err := p.root.Lstat(filepath.FromSlash(current))
+			if errors.Is(err, os.ErrNotExist) {
+				missing[current] = true
+				continue
+			}
+			if err != nil || linked(info) || !info.IsDir() {
+				return nil, ErrConflict
+			}
+		}
+	}
+	result := make([]string, 0, len(missing))
+	for item := range missing {
+		result = append(result, item)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+func (p *Publisher) commitFile(item journalFile) error {
+	before, _, exists, err := p.readTarget(item.Path)
+	if err != nil || exists != item.Existed || exists && digest(before) != item.BeforeDigest {
+		return ErrConflict
+	}
+	parent, err := p.parent(item.Path, false)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	name := path.Base(item.Path)
+	if item.Existed {
+		if err := parent.Rename(name, item.BackupName); err != nil {
+			return ErrConflict
+		}
+		backup, err := parent.Open(item.BackupName)
+		if err != nil {
+			return ErrConflict
+		}
+		data, err := io.ReadAll(io.LimitReader(backup, maxEditBytes+1))
+		_ = backup.Close()
+		if err != nil || digest(data) != item.BeforeDigest {
+			return ErrConflict
+		}
+	}
+	if err := parent.Rename(item.StageName, name); err != nil {
+		return ErrConflict
+	}
+	return nil
+}
+
+func journalName(d string) string { return "txn-" + d + ".json" }
+func receiptName(d string) string { return "receipt-" + d + ".json" }
+func writeRootJSON(root *os.Root, name string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ErrInvalidPlan
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return ErrConflict
+	}
+	tmp := name + "." + hex.EncodeToString(random[:]) + ".tmp"
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return ErrConflict
+	}
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		_ = root.Remove(tmp)
+		return ErrConflict
+	}
+	if err := root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp)
+		return ErrConflict
+	}
+	return nil
+}
+func (p *Publisher) writeJournal(j journalRecord) error {
+	if _, err := p.journal.Lstat(journalName(j.ConfirmationDigest)); err == nil {
+		return ErrConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrConflict
+	}
+	return writeRootJSON(p.journal, journalName(j.ConfirmationDigest), j)
+}
+func (p *Publisher) writeReceipt(r Receipt) error {
+	if _, err := p.journal.Lstat(receiptName(r.ConfirmationDigest)); err == nil {
+		return ErrConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrConflict
+	}
+	return writeRootJSON(p.journal, receiptName(r.ConfirmationDigest), r)
+}
+func (p *Publisher) readReceipt(d string) (Receipt, bool, error) {
+	f, err := p.journal.Open(receiptName(d))
+	if errors.Is(err, os.ErrNotExist) {
+		return Receipt{}, false, nil
+	}
+	if err != nil {
+		return Receipt{}, false, ErrConflict
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return Receipt{}, false, ErrConflict
+	}
+	var r Receipt
+	if json.Unmarshal(data, &r) != nil || r.ConfirmationDigest != d {
+		return Receipt{}, false, ErrConflict
+	}
+	return r, true, nil
+}
+
+func (p *Publisher) rollback(j journalRecord) error {
+	var result error
+	for i := len(j.Files) - 1; i >= 0; i-- {
+		item := j.Files[i]
+		parent, err := p.parent(item.Path, false)
+		if errors.Is(err, errMissingParent) && !item.Existed {
+			continue
+		}
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		name := path.Base(item.Path)
+		current, currentErr := parent.Lstat(name)
+		backup, backupErr := parent.Lstat(item.BackupName)
+		if currentErr == nil {
+			if linked(current) || !current.Mode().IsRegular() {
+				result = errors.Join(result, ErrConflict)
+				_ = parent.Close()
+				continue
+			}
+			data, readErr := p.readRelative(parent, name)
+			if readErr != nil {
+				result = errors.Join(result, readErr)
+				_ = parent.Close()
+				continue
+			}
+			hash := digest(data)
+			if hash != item.BeforeDigest && hash != item.AfterDigest {
+				result = errors.Join(result, ErrConflict)
+				_ = parent.Close()
+				continue
+			}
+			if hash == item.AfterDigest {
+				if err := parent.Remove(name); err != nil {
+					result = errors.Join(result, ErrConflict)
+					_ = parent.Close()
+					continue
+				}
+			}
+		} else if !errors.Is(currentErr, os.ErrNotExist) {
+			result = errors.Join(result, ErrConflict)
+			_ = parent.Close()
+			continue
+		}
+		if item.Existed {
+			if backupErr == nil {
+				if linked(backup) || !backup.Mode().IsRegular() {
+					result = errors.Join(result, ErrConflict)
+				} else if b, err := p.readRelative(parent, item.BackupName); err != nil || digest(b) != item.BeforeDigest {
+					result = errors.Join(result, ErrConflict)
+				} else if err := parent.Rename(item.BackupName, name); err != nil {
+					result = errors.Join(result, ErrConflict)
+				}
+			} else if errors.Is(backupErr, os.ErrNotExist) {
+				if _, err := parent.Lstat(name); errors.Is(err, os.ErrNotExist) {
+					f, err := parent.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(item.Mode))
+					if err == nil {
+						_, err = f.Write(item.Before)
+						err = errors.Join(err, f.Chmod(os.FileMode(item.Mode)), f.Sync(), f.Close())
+					}
+					if err != nil {
+						result = errors.Join(result, ErrConflict)
+					}
+				}
+			} else {
+				result = errors.Join(result, ErrConflict)
+			}
+		}
+		if err := parent.Remove(item.StageName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, ErrConflict)
+		}
+		result = errors.Join(result, parent.Close())
+	}
+	for i := len(j.CreatedDirs) - 1; i >= 0; i-- {
+		err := p.root.Remove(filepath.FromSlash(j.CreatedDirs[i]))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, ErrConflict)
+		}
+	}
+	return result
+}
+func (p *Publisher) readRelative(parent *os.Root, name string) ([]byte, error) {
+	f, err := parent.Open(name)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxEditBytes+1))
+	if err != nil || len(data) > maxEditBytes {
+		return nil, ErrConflict
+	}
+	return data, nil
+}
+func (p *Publisher) cleanupCommitted(j journalRecord) error {
+	for _, item := range j.Files {
+		parent, err := p.parent(item.Path, false)
+		if err != nil {
+			return err
+		}
+		for _, name := range []string{item.BackupName, item.StageName} {
+			if err := parent.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = parent.Close()
+				return ErrConflict
+			}
+		}
+		_ = parent.Close()
+	}
+	if err := p.journal.Remove(journalName(j.ConfirmationDigest)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (p *Publisher) Recover(ctx context.Context) error {
+	if p == nil || ctx == nil {
+		return ErrInvalidPlan
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f, err := p.journal.Open(".")
+	if err != nil {
+		return ErrConflict
+	}
+	entries, err := f.ReadDir(-1)
+	_ = f.Close()
+	if err != nil {
+		return ErrConflict
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "txn-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		data, err := p.readJournal(name)
+		if err != nil {
+			return err
+		}
+		var j journalRecord
+		if json.Unmarshal(data, &j) != nil || j.Version != 1 || name != journalName(j.ConfirmationDigest) || !validJournal(j) {
+			return ErrConflict
+		}
+		if receipt, ok, err := p.readReceipt(j.ConfirmationDigest); err != nil {
+			return err
+		} else if ok {
+			if receipt.String() != j.Receipt.String() {
+				return ErrConflict
+			}
+			if err := p.cleanupCommitted(j); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := p.rollback(j); err != nil {
+			return err
+		}
+		if err := p.journal.Remove(name); err != nil {
+			return ErrConflict
+		}
+	}
+	return nil
+}
+func (p *Publisher) readJournal(name string) ([]byte, error) {
+	f, err := p.journal.Open(name)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 32<<20))
+	if err != nil || len(data) >= 32<<20 {
+		return nil, ErrConflict
+	}
+	return data, nil
+}
+func validJournal(j journalRecord) bool {
+	if !validHex(j.ConfirmationDigest, 64) || j.Receipt.ConfirmationDigest != j.ConfirmationDigest || len(j.Files) == 0 || len(j.Files) > maxFiles {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, f := range j.Files {
+		if !generatedTestPath(f.Path) && !cmakePath(f.Path) || seen[strings.ToLower(f.Path)] || !validHex(f.AfterDigest, 64) || f.Existed && (!validHex(f.BeforeDigest, 64) || digest(f.Before) != f.BeforeDigest) || !f.Existed && (f.BeforeDigest != "" || len(f.Before) > 0) || len(f.Before) > maxEditBytes || !strings.HasPrefix(f.StageName, ".testgen-") || !strings.HasSuffix(f.StageName, ".stage") || !strings.HasPrefix(f.BackupName, ".testgen-") || !strings.HasSuffix(f.BackupName, ".backup") {
+			return false
+		}
+		seen[strings.ToLower(f.Path)] = true
+	}
+	for _, dir := range j.CreatedDirs {
+		if !validRelative(dir) || !strings.HasPrefix(dir, "tests/") {
+			return false
+		}
+	}
+	return true
+}
