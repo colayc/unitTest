@@ -22,13 +22,29 @@ const (
 	TypeArray    TypeKind = "array"
 	TypeRecord   TypeKind = "record"
 	TypePointer  TypeKind = "pointer"
+	TypeString   TypeKind = "string"
 )
 
+// Field is a bounded, independently proven record member. The analyzer does
+// not populate it until it can prove layout and construction safety.
+type Field struct {
+	Name string `json:"name"`
+	Type Type   `json:"type"`
+}
+
 type Type struct {
-	Kind     TypeKind `json:"kind"`
-	Spelling string   `json:"spelling,omitempty"`
-	Bound    int      `json:"bound,omitempty"`
-	Proven   bool     `json:"proven,omitempty"`
+	Kind           TypeKind `json:"kind"`
+	Spelling       string   `json:"spelling,omitempty"`
+	Bound          int      `json:"bound,omitempty"`
+	Proven         bool     `json:"proven,omitempty"`
+	BitWidth       int      `json:"bitWidth,omitempty"`
+	Signed         bool     `json:"signed,omitempty"`
+	EnumValues     []string `json:"enumValues,omitempty"`
+	Element        *Type    `json:"element,omitempty"`
+	Fields         []Field  `json:"fields,omitempty"`
+	Owned          bool     `json:"owned,omitempty"`
+	MaxLength      int      `json:"maxLength,omitempty"`
+	AllowNonFinite bool     `json:"allowNonFinite,omitempty"`
 }
 type Parameter struct {
 	Name string `json:"name"`
