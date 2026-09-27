@@ -132,6 +132,43 @@ func TestDomainPreflightRejectsRecursiveExpansionAtTinyBudget(t *testing.T) {
 	}
 }
 
+func TestPointerChildBudgetErrorIsNotMisclassifiedAsUnsafe(t *testing.T) {
+	wide := analysis.Type{Kind: analysis.TypeRecord, Proven: true, Fields: []analysis.Field{
+		{Name: "a", Type: analysis.Type{Kind: analysis.TypeString, MaxLength: 256}},
+		{Name: "b", Type: analysis.Type{Kind: analysis.TypeString, MaxLength: 256}},
+	}}
+	p := entryProgram(analysis.Type{Kind: analysis.TypePointer, Owned: true, Element: &wide})
+	budget := standardBudget()
+	budget.MemoryBytes = 1024
+	v, d, err := (Solver{}).Solve(context.Background(), p, entryGap(), budget)
+	if err != nil || len(v) != 0 || len(d) != 1 || d[0].Code != DiagnosticBudgetExceeded {
+		t.Fatalf("pointer child budget must remain a budget diagnostic: %v %v %v", v, d, err)
+	}
+}
+
+func TestReversedIntegerThresholdsProduceBoundaryCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		operator string
+		want     string
+	}{
+		{"==", "5"},
+		{">", "4"},
+	} {
+		p := baseProgram(intType(), analysis.Predicate{Operator: tc.operator, Left: "5", Right: "x"})
+		v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())
+		if err != nil || len(d) != 0 || len(v) == 0 {
+			t.Fatalf("reversed %s: %v %v %v", tc.operator, v, d, err)
+		}
+		found := false
+		for _, candidate := range v {
+			found = found || candidate.Inputs[0].Value.Integer == tc.want
+		}
+		if !found {
+			t.Fatalf("reversed %s misses boundary %s: %+v", tc.operator, tc.want, v)
+		}
+	}
+}
+
 func TestSignedUnsignedConversionFailsClosed(t *testing.T) {
 	p := baseProgram(analysis.Type{Kind: analysis.TypeInteger, BitWidth: 32}, analysis.Predicate{Operator: ">", Left: "x", Right: "-1"})
 	v, d, err := (Solver{}).Solve(context.Background(), p, standardGap(OutcomeTrue), standardBudget())

@@ -388,9 +388,15 @@ func (g goalPredicate) constants(name string) []string {
 		if n == nil {
 			return
 		}
-		if n.left != nil && n.right != nil && n.left.op == "atom" && n.right.op == "atom" && n.left.value == name {
-			if _, ok := new(big.Int).SetString(n.right.value, 10); ok {
-				result = append(result, n.right.value)
+		if n.left != nil && n.right != nil && n.left.op == "atom" && n.right.op == "atom" {
+			other := ""
+			if n.left.value == name {
+				other = n.right.value
+			} else if n.right.value == name {
+				other = n.left.value
+			}
+			if _, ok := new(big.Int).SetString(other, 10); ok {
+				result = append(result, other)
 			}
 		}
 		walk(n.left)

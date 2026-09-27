@@ -158,7 +158,10 @@ func finiteDomain(m *domainMeter, typ analysis.Type, thresholds []string, depth 
 			return nil, err
 		}
 		pointee, err := finiteDomain(m, *typ.Element, nil, depth+1)
-		if err != nil || len(pointee) == 0 {
+		if err != nil {
+			return nil, err
+		}
+		if len(pointee) == 0 {
 			return nil, errUnsafeDomain
 		}
 		v := pointee[0]
