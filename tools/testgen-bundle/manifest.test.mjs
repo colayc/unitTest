@@ -71,5 +71,7 @@ test("foundation packaging prepares, checks, and stages the matching offline Cla
     assert.ok(prepare >= 0 && check > prepare && stage > check, `${platform} must verify Clang before staging`);
     const root = `.superpowers/cache/testgen-bundle/22.1.8/${platform}-x64`;
     assert.equal(section.split(`--testgen-root ${platform === "windows" ? "'" : ""}${root}${platform === "windows" ? "'" : ""}`).length - 1, 2);
+    assert.equal(section.split("go test ./apps/test-service/internal/testgenbundle").length - 1, 2,
+      `${platform} must open each staged bundle with the product consumer`);
   }
 });

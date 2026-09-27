@@ -1145,6 +1145,10 @@ jobs:
             --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $stagingRoot = $stagingRoot.Trim()
+          $env:TESTGEN_STAGED_BUNDLE_ROOT = Join-Path $stagingRoot 'bundles/testgen'
+          go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'staged Windows Clang bundle failed Go consumer verification' }
+          Remove-Item Env:TESTGEN_STAGED_BUNDLE_ROOT
           $packagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$version.msix"
           & 'tools/release/windows/package-msix.ps1' `
             -StagingRoot $stagingRoot `
@@ -1165,6 +1169,10 @@ jobs:
             --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $baselineStagingRoot = $baselineStagingRoot.Trim()
+          $env:TESTGEN_STAGED_BUNDLE_ROOT = Join-Path $baselineStagingRoot 'bundles/testgen'
+          go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'baseline staged Windows Clang bundle failed Go consumer verification' }
+          Remove-Item Env:TESTGEN_STAGED_BUNDLE_ROOT
           $baselinePackagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$baselineVersion.msix"
           & 'tools/release/windows/package-msix.ps1' `
             -StagingRoot $baselineStagingRoot `
@@ -1391,6 +1399,7 @@ jobs:
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
             --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
+          TESTGEN_STAGED_BUNDLE_ROOT="$staging_root/bundles/testgen" go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
           package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$staging_root" \
             --output ".release/linux/dist/unit-test-ide-$version.AppImage" \
@@ -1412,6 +1421,7 @@ jobs:
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
             --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
+          TESTGEN_STAGED_BUNDLE_ROOT="$baseline_staging_root/bundles/testgen" go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
           baseline_package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$baseline_staging_root" \
             --output ".release/linux/dist/unit-test-ide-$baseline_version.AppImage" \

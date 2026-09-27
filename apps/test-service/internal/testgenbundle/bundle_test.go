@@ -201,3 +201,17 @@ func TestOpenPreparedLocalBundleWhenAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOpenStagedBundleFromEnvironment(t *testing.T) {
+	root := os.Getenv("TESTGEN_STAGED_BUNDLE_ROOT")
+	if root == "" {
+		t.Skip("no release-staged Clang bundle supplied")
+	}
+	bundle, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}

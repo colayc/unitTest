@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -34,6 +34,112 @@ export function validateArchiveEntries(entries) {
     seen.add(folded);
   }
   return entries;
+}
+
+function selectedPathSets(spec) {
+  const files = new Set(spec.files.map(({ path }) => `${spec.archiveRoot}/${path}`));
+  const directories = new Set();
+  for (const file of files) {
+    const parts = file.split("/");
+    for (let count = 1; count < parts.length; count += 1) {
+      directories.add(parts.slice(0, count).join("/"));
+    }
+  }
+  return { files, directories };
+}
+
+export function validateSelectedArchiveEntries(entries, spec) {
+  validateArchiveEntries(entries.map(({ path }) => path));
+  const { files, directories } = selectedPathSets(spec);
+  const includePrefix = `${spec.archiveRoot}/${spec.resourceDir}/include`;
+  const seenFiles = new Set();
+  for (const { path, type, target } of entries) {
+    const normalized = path.replace(/\/$/u, "");
+    const selected = files.has(normalized) || directories.has(normalized) || normalized.startsWith(`${includePrefix}/`);
+    if (!selected) continue;
+    if (type === "l" || type === "h") {
+      throw new Error(`selected archive link is forbidden: ${path}${target ? ` -> ${target}` : ""}`);
+    }
+    if (files.has(normalized)) {
+      if (type !== "-") throw new Error(`selected archive file has unsupported type: ${path}`);
+      seenFiles.add(normalized);
+    } else if (directories.has(normalized)) {
+      if (type !== "d") throw new Error(`selected archive directory has unsupported type: ${path}`);
+    } else {
+      throw new Error(`unlisted selected archive entry: ${path}`);
+    }
+  }
+  for (const file of files) {
+    if (!seenFiles.has(file)) throw new Error(`missing selected archive file: ${file}`);
+  }
+  return entries;
+}
+
+export async function verifyExtractedSelection(extractRoot, spec) {
+  const sourceRoot = join(extractRoot, spec.archiveRoot);
+  const { files, directories } = selectedPathSets(spec);
+  const seenFiles = new Set();
+  const seenDirs = new Set();
+  async function walk(path, relativePath) {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new Error(`selected extraction contains a link: ${relativePath}`);
+    if (info.isDirectory()) {
+      if (!directories.has(relativePath)) throw new Error(`extra selected extraction directory: ${relativePath}`);
+      seenDirs.add(relativePath);
+      for (const name of await readdir(path)) await walk(join(path, name), `${relativePath}/${name}`);
+    } else if (info.isFile()) {
+      if (!files.has(relativePath)) throw new Error(`unlisted selected extraction file: ${relativePath}`);
+      seenFiles.add(relativePath);
+    } else {
+      throw new Error(`unsupported selected extraction entry: ${relativePath}`);
+    }
+  }
+  await walk(sourceRoot, spec.archiveRoot);
+  for (const path of files) if (!seenFiles.has(path)) throw new Error(`missing selected extraction file: ${path}`);
+  for (const path of directories) if (!seenDirs.has(path)) throw new Error(`missing selected extraction directory: ${path}`);
+}
+
+export async function publishCheckedBundle({ candidateRoot, finalRoot, temporaryRoot, verify }) {
+  await verify(candidateRoot);
+  let previousExists = false;
+  try {
+    await lstat(finalRoot);
+    previousExists = true;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  if (previousExists) {
+    try {
+      return await verify(finalRoot);
+    } catch {
+      // Only a verified existing cache can win a concurrent preparation race.
+    }
+  }
+  const previousRoot = join(temporaryRoot, "replaced-cache");
+  let movedPrevious = false;
+  let published = false;
+  let result;
+  try {
+    if (previousExists) {
+      await rename(finalRoot, previousRoot);
+      movedPrevious = true;
+    }
+    await rename(candidateRoot, finalRoot);
+    published = true;
+    result = await verify(finalRoot);
+  } catch (error) {
+    try {
+      if (published) await rename(finalRoot, candidateRoot);
+      if (movedPrevious) await rename(previousRoot, finalRoot);
+    } catch (rollbackError) {
+      const failure = new AggregateError([error, rollbackError], "Clang cache publication rollback failed");
+      failure.preserveTemporaryRoot = true;
+      throw failure;
+    }
+    throw error;
+  }
+  if (movedPrevious) await rm(previousRoot, { recursive: true, force: true });
+  return result;
 }
 
 export { validateSourceManifest };
@@ -82,15 +188,26 @@ async function downloadVerifiedSource(url, destination, maximumBytes) {
   throw new Error("source redirect limit exceeded");
 }
 
-async function listArchivePaths(archivePath) {
-  const { stdout } = await execFile("tar", ["-tf", archivePath], {
+async function listArchiveEntries(archivePath, spec) {
+  const options = {
     encoding: "utf8",
     maxBuffer: 128 * 1024 * 1024,
     windowsHide: true,
+  };
+  const [names, verbose] = await Promise.all([
+    execFile("tar", ["-tf", archivePath], options),
+    execFile("tar", ["-tvf", archivePath], options),
+  ]);
+  const paths = names.stdout.split(/\r?\n/u).filter(Boolean);
+  const lines = verbose.stdout.split(/\r?\n/u).filter(Boolean);
+  if (paths.length !== lines.length) throw new Error("archive type listing does not match path listing");
+  const entries = paths.map((path, index) => {
+    const line = lines[index];
+    const type = line[0];
+    const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
+    return { path, type, target: marker && line.includes(marker) ? line.slice(line.lastIndexOf(marker) + marker.length) : undefined };
   });
-  const entries = stdout.split(/\r?\n/u).filter(Boolean);
-  validateArchiveEntries(entries);
-  return entries;
+  return validateSelectedArchiveEntries(entries, spec);
 }
 
 async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec) {
@@ -102,6 +219,7 @@ async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
   });
+  await verifyExtractedSelection(extractRoot, spec);
   const sourceRoot = join(extractRoot, spec.archiveRoot);
   const canonicalRoot = await realpath(sourceRoot);
   for (const file of spec.files) {
@@ -119,18 +237,6 @@ async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot,
   }
 }
 
-async function verifyNoSelectedArchiveLinks(extractRoot, spec) {
-  const root = join(extractRoot, spec.archiveRoot);
-  for (const path of [spec.executable, spec.resourceDir, `${spec.resourceDir}/include`]) {
-    let current = root;
-    for (const segment of path.split("/")) {
-      current = join(current, segment);
-      const info = await lstat(current);
-      if (info.isSymbolicLink()) throw new Error(`selected archive path is a symlink or reparse point: ${path}`);
-    }
-  }
-}
-
 export async function prepareBundle({
   manifest,
   manifestBytes,
@@ -139,7 +245,7 @@ export async function prepareBundle({
   downloadArchive = downloadVerifiedSource,
 } = {}) {
   const sourceBytes = manifestBytes ?? (manifest ? Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`) : await readFile(join(toolDir, "manifest.json")));
-  const sourceManifest = validateSourceManifest(manifest ?? JSON.parse(sourceBytes.toString("utf8")));
+  const sourceManifest = validateSourceManifest(manifest ?? JSON.parse(sourceBytes.toString("utf8")), sourceBytes);
   const key = platform ?? (process.platform === "win32" ? "windows-x64" : process.platform === "linux" ? "linux-x64" : "");
   const spec = sourceManifest.platforms[key];
   if (!spec) throw new Error("unsupported Clang bundle platform");
@@ -147,12 +253,17 @@ export async function prepareBundle({
   const finalRoot = join(resolvedCacheRoot, key);
   try {
     await lstat(finalRoot);
-    return await checkBundle({ root: finalRoot, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes });
+    try {
+      return await checkBundle({ root: finalRoot, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes });
+    } catch {
+      // A corrupt or stale final cache is replaced only after a new tree verifies.
+    }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   await mkdir(resolvedCacheRoot, { recursive: true });
   const temporaryRoot = await mkdtemp(join(resolvedCacheRoot, ".prepare-"));
+  let preserveTemporaryRoot = false;
   try {
     const archivePath = join(temporaryRoot, spec.archive.filename);
     await downloadArchive(spec.archive.url, archivePath, maximumArchiveBytes);
@@ -161,13 +272,13 @@ export async function prepareBundle({
         await sha256File(archivePath) !== spec.archive.sha256) {
       throw new Error("Clang archive SHA-256 digest mismatch");
     }
-    const entries = await listArchivePaths(archivePath);
+    const entries = await listArchiveEntries(archivePath, spec);
     const selected = [
       `${spec.archiveRoot}/${spec.executable}`,
       `${spec.archiveRoot}/${spec.resourceDir}/include/`,
     ];
     for (const path of selected) {
-      if (!entries.includes(path) && !entries.includes(path.replace(/\/$/u, ""))) {
+      if (!entries.some((entry) => entry.path === path || entry.path === path.replace(/\/$/u, ""))) {
         throw new Error(`missing selected archive entry: ${path}`);
       }
     }
@@ -176,7 +287,6 @@ export async function prepareBundle({
     await mkdir(extractRoot);
     await mkdir(bundleRoot);
     await copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec);
-    await verifyNoSelectedArchiveLinks(extractRoot, spec);
     for (const license of spec.licenses) {
       const destination = join(bundleRoot, ...license.path.split("/"));
       await mkdir(dirname(destination), { recursive: true });
@@ -190,11 +300,17 @@ export async function prepareBundle({
     const manifestSha256 = createHash("sha256").update(sourceBytes).digest("hex");
     await writeFile(join(bundleRoot, "manifest.json"), sourceBytes, { flag: "wx" });
     await writeFile(join(bundleRoot, "READY"), `${JSON.stringify({ schemaVersion: 1, platform: key, manifestSha256 })}\n`, { flag: "wx" });
-    await checkBundle({ root: bundleRoot, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes });
-    await rename(bundleRoot, finalRoot);
-    return await checkBundle({ root: finalRoot, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes });
+    return await publishCheckedBundle({
+      candidateRoot: bundleRoot,
+      finalRoot,
+      temporaryRoot,
+      verify: (root) => checkBundle({ root, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes }),
+    });
+  } catch (error) {
+    preserveTemporaryRoot = error?.preserveTemporaryRoot === true;
+    throw error;
   } finally {
-    await rm(temporaryRoot, { recursive: true, force: true });
+    if (!preserveTemporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
   }
 }
 

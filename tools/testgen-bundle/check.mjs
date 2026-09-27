@@ -16,6 +16,8 @@ const archiveHashes = {
   "linux-x64": "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
 };
 const sourceCommit = "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1";
+// Also compiled into testgenbundle.Open; Node must never stage a tree Go rejects.
+const trustedManifestSHA256 = "e2c58c06cef1b86eda4e2c2dbdbcc2338eca9419f44eddc3b227fb42d72bf345";
 const expectedArchive = {
   "windows-x64": "clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz",
   "linux-x64": "LLVM-22.1.8-Linux-X64.tar.xz",
@@ -69,9 +71,13 @@ async function sha256File(path) {
   return hash.digest("hex");
 }
 
-export function validateSourceManifest(manifest) {
+export function validateSourceManifest(manifest, manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)) {
   if (!validateSchema(manifest)) {
     throw new Error(`invalid Clang source manifest: ${JSON.stringify(validateSchema.errors)}`);
+  }
+  if (createHash("sha256").update(manifestBytes).digest("hex") !== trustedManifestSHA256 ||
+      JSON.stringify(JSON.parse(manifestBytes.toString("utf8"))) !== JSON.stringify(manifest)) {
+    throw new Error("Clang source manifest does not match the product inventory pin");
   }
   if (manifest.clangVersion !== "22.1.8" || manifest.sourceCommit !== sourceCommit) {
     throw new Error("unreviewed Clang version or source commit");
@@ -162,7 +168,7 @@ export async function checkBundle({ root, platform, manifest, manifestBytes } = 
   const key = platform ?? (process.platform === "win32" ? "windows-x64" : process.platform === "linux" ? "linux-x64" : "");
   if (!archiveHashes[key]) throw new Error("unsupported Clang bundle platform");
   const sourceBytes = manifestBytes ?? (manifest ? Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`) : await readFile(manifestPath));
-  const sourceManifest = validateSourceManifest(manifest ?? JSON.parse(sourceBytes.toString("utf8")));
+  const sourceManifest = validateSourceManifest(manifest ?? JSON.parse(sourceBytes.toString("utf8")), sourceBytes);
   const resolvedRoot = resolve(root ?? join(repositoryRoot, ".superpowers", "cache", "testgen-bundle", sourceManifest.clangVersion, key));
   const preparedManifest = await readFile(join(resolvedRoot, "manifest.json"));
   if (!preparedManifest.equals(sourceBytes)) throw new Error("prepared manifest changed from product source manifest");

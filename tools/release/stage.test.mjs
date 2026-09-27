@@ -499,6 +499,40 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
   });
 });
 
+test("release-staged Clang bundle opens with the real Go product consumer", async (t) => {
+  const platform = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "";
+  if (!platform) return t.skip("unsupported host platform");
+  const preparedTestgenRoot = resolve(`.superpowers/cache/testgen-bundle/22.1.8/${platform}-x64`);
+  try {
+    await stat(preparedTestgenRoot);
+  } catch (error) {
+    if (error?.code === "ENOENT") return t.skip("verified host Clang bundle is not prepared");
+    throw error;
+  }
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root, platform);
+    const staged = await stageRelease({
+      platform,
+      architecture: "x64",
+      version: "1.2.3",
+      sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
+      ...fixture,
+      testgenRoot: preparedTestgenRoot,
+    });
+    const consumer = spawnSync("go", [
+      "test", "./apps/test-service/internal/testgenbundle", "-run", "^TestOpenStagedBundleFromEnvironment$", "-count=1",
+    ], {
+      cwd: resolve("."),
+      encoding: "utf8",
+      env: { ...process.env, TESTGEN_STAGED_BUNDLE_ROOT: join(staged.stagingRoot, "bundles", "testgen") },
+      windowsHide: true,
+    });
+    assert.equal(consumer.status, 0, `${consumer.stdout}\n${consumer.stderr}`);
+    assert.match(consumer.stdout, /ok\s+unit-test-ide\.local\/test-service\/internal\/testgenbundle/u);
+  });
+});
+
 test("stageRelease fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
