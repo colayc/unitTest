@@ -293,6 +293,9 @@ func cStringLiteral(value string) string {
 			b.WriteString("\\\"")
 		case c == '\\':
 			b.WriteString("\\\\")
+		case c == '?':
+			// C translation phases recognize ??/ even inside quoted strings.
+			b.WriteString("\\077")
 		case c >= 0x20 && c <= 0x7e:
 			b.WriteByte(c)
 		default:

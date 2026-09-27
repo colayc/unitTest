@@ -234,3 +234,41 @@ func TestCStringLiteralTerminatesControlEscape(t *testing.T) {
 		}
 	}
 }
+
+func TestCStringLiteralSurvivesTrigraphs(t *testing.T) {
+	if got := cStringLiteral("??/"); got != "\"\\077\\077/\"" {
+		t.Fatalf("question marks remain a trigraph: %q", got)
+	}
+	for _, tc := range []struct {
+		ext       string
+		compilers []string
+	}{{".c", []string{"gcc", "clang"}}, {".cpp", []string{"g++", "clang++"}}} {
+		compiler := ""
+		for _, name := range tc.compilers {
+			if found, err := exec.LookPath(name); err == nil {
+				compiler = found
+				break
+			}
+		}
+		if compiler == "" {
+			t.Logf("compiler unavailable for %s; literal representation checked", tc.ext)
+			continue
+		}
+		dir := t.TempDir()
+		source := filepath.Join(dir, "trigraph"+tc.ext)
+		binary := filepath.Join(dir, "trigraph")
+		if runtime.GOOS == "windows" {
+			binary += ".exe"
+		}
+		body := fmt.Sprintf("int main(void) { const unsigned char *s = (const unsigned char *)%s; return s[0] == '?' && s[1] == '?' && s[2] == '/' && s[3] == 0 ? 0 : 1; }\n", cStringLiteral("??/"))
+		if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command(compiler, "-trigraphs", source, "-o", binary).CombinedOutput(); err != nil {
+			t.Fatalf("%s trigraph compile: %v\n%s", tc.ext, err, output)
+		}
+		if output, err := exec.Command(binary).CombinedOutput(); err != nil {
+			t.Fatalf("%s trigraph byte mismatch: %v\n%s", tc.ext, err, output)
+		}
+	}
+}
