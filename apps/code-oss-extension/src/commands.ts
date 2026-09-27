@@ -9,6 +9,7 @@ import type { GenerationPreviewBinding, GenerationSelection, TestGenerationContr
 import { createGenerationDiffReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
 import { buildGenerationResults, renderGenerationResults } from "./test-generation-results.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
+import { isAbsolute, relative, resolve } from "node:path";
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -56,6 +57,7 @@ export interface TestGenerationCommandHost extends CommandHost {
   openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
   pickGenerationCandidate?: (candidates: readonly GenerationCandidateChoice[]) => GenerationCandidateChoice | undefined | PromiseLike<GenerationCandidateChoice | undefined>;
   pickGenerationSelection?: (scope: GenerationSelection["scope"]) => unknown | PromiseLike<unknown>;
+  workspaceRoot?: () => string | undefined;
 }
 
 export interface GenerationCandidateChoice {
@@ -308,11 +310,26 @@ export function registerCoverageCommands(
   );
 }
 
-function generationSelection(value: unknown, scope: GenerationSelection["scope"]): GenerationSelection {
+function safeRelativePath(value: string, workspaceRoot: string | undefined): string | undefined {
+  const normalized = value.replaceAll("\\", "/");
+  if (!workspaceRoot && isAbsolute(value)) return undefined;
+  const candidate = workspaceRoot && isAbsolute(value)
+    ? relative(resolve(workspaceRoot), resolve(value))
+    : normalized;
+  const relativePath = candidate.replaceAll("\\", "/");
+  if (!relativePath || relativePath === "." || relativePath.startsWith("../") || relativePath === ".." || relativePath.startsWith("/") || /^[A-Za-z]:\//.test(relativePath)) return undefined;
+  return relativePath;
+}
+
+function generationSelection(value: unknown, scope: GenerationSelection["scope"], workspaceRoot?: string): GenerationSelection | undefined {
   const input = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+  const uriPath = typeof input.fsPath === "string" ? input.fsPath : typeof input.path === "string" ? input.path : undefined;
+  const file = typeof input.file === "string" ? safeRelativePath(input.file, workspaceRoot) : uriPath ? safeRelativePath(uriPath, workspaceRoot) : undefined;
+  if (scope === TestGenerationScopeV15.File && value !== undefined && !file) return undefined;
+  if (scope !== TestGenerationScopeV15.File && uriPath) return undefined;
   return {
     scope,
-    ...(typeof input.file === "string" ? { file: input.file } : {}),
+    ...(file ? { file } : {}),
     ...(typeof input.symbolId === "string" ? { symbolId: input.symbolId } : {}),
     ...(typeof input.targetId === "string" ? { targetId: input.targetId } : {}),
     ...(typeof input.coverageReportId === "string" ? { coverageReportId: input.coverageReportId } : {}),
@@ -347,15 +364,26 @@ export function registerTestGenerationCommands(
     }
   };
   const startForScope = async (value: unknown, scope: GenerationSelection["scope"]): Promise<void> => {
-    if (value === undefined && scope !== TestGenerationScopeV15.Workspace) {
+    const requiresInput = scope !== TestGenerationScopeV15.Workspace;
+    let selection = value === undefined && requiresInput ? undefined : generationSelection(value, scope, host.workspaceRoot?.());
+    if (!selection && scope === TestGenerationScopeV15.Workspace) {
+      await host.showErrorMessage("Unit Test: A valid workspace selection is required.");
+      return;
+    }
+    if (!selection && scope !== TestGenerationScopeV15.Workspace) {
       if (!host.pickGenerationSelection) {
         await host.showErrorMessage("Unit Test: Select a file, symbol, target, or coverage gap before generating tests.");
         return;
       }
       value = await host.pickGenerationSelection(scope);
       if (value === undefined) return;
+      selection = generationSelection(value, scope, host.workspaceRoot?.());
+      if (!selection) {
+        await host.showErrorMessage("Unit Test: The selected generation target is invalid or outside the workspace.");
+        return;
+      }
     }
-    await start(generationSelection(value, scope));
+    await start(selection!);
   };
   const review = async (): Promise<void> => {
     if (!await requireTrusted()) return;

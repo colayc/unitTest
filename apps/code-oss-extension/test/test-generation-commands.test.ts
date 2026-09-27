@@ -15,7 +15,8 @@ function setup(trust: "trusted" | "blocked-untrusted" = "trusted") {
     showInformationMessage(message) { info.push(message); },
     confirmGeneration: async (message) => { confirmations.push(message); return true; },
     pickGenerationCandidate: async (candidates) => candidates[0],
-    pickGenerationSelection: async (scope) => scope === "file" ? { file: "src/main.cpp" } : { symbolId: "opaque-symbol" }
+    pickGenerationSelection: async (scope) => scope === "file" ? { file: "src/main.cpp" } : { symbolId: "opaque-symbol" },
+    workspaceRoot: () => "C:\\workspace"
   };
   const controller: TestGenerationCommandController = {
     getState: () => ({ state: "preview", run: { runId: "a".repeat(32) } as any, candidates: { items: [] } as any }),
@@ -52,6 +53,14 @@ test("scoped command palette entries prompt for an explicit selection", async ()
   const fixture = setup();
   await fixture.handlers.get("unitTestIde.generateTestsForSymbol")!();
   assert.deepEqual(fixture.calls[0], ["start", { scope: "symbol", symbolId: "opaque-symbol" }]);
+});
+
+test("URI-shaped context arguments become safe relative files and symbols use an explicit picker", async () => {
+  const fixture = setup();
+  await fixture.handlers.get("unitTestIde.generateTestsForFile")!({ fsPath: "C:\\workspace\\src\\main.cpp", path: "/workspace/src/main.cpp" });
+  assert.deepEqual(fixture.calls[0], ["start", { scope: "file", file: "src/main.cpp" }]);
+  await fixture.handlers.get("unitTestIde.generateTestsForSymbol")!({ fsPath: "C:\\workspace\\src\\main.cpp", path: "/workspace/src/main.cpp" });
+  assert.deepEqual(fixture.calls[1], ["start", { scope: "symbol", symbolId: "opaque-symbol" }]);
 });
 
 test("accept command picks a candidate, binds the displayed preview, and double-confirms characterization", async () => {

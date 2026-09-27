@@ -98,3 +98,24 @@ test("controller rejects trust or session changes while an RPC is pending", asyn
   release!();
   await assert.rejects(operation, /workspace or service session changed|stale/);
 });
+
+test("late accept responses cannot republish the old preview after a workspace switch", async () => {
+  const fixture = setup();
+  await fixture.controller.start({ scope: "workspace" as any });
+  const shown = fixture.controller.getState();
+  const preview = shown.run!.preview!;
+  const selected = shown.candidates!.items[0]!;
+  const binding = { runId: shown.run!.runId, candidateId: selected.candidateId, candidateSetDigest: preview.candidateSetDigest, candidateArtifactDigest: selected.artifactDigest, candidateCodeDigest: selected.codeDigest, diffDigest: preview.diffDigest, confirmationDigest: preview.confirmationDigest };
+  let release: (() => void) | undefined;
+  fixture.client.acceptTestGeneration = async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    return { ...runBase, state: "accepted" };
+  };
+  const operation = fixture.controller.accept(selected.candidateId, false, binding);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fixture.setContext({ trust: "blocked-untrusted" });
+  release!();
+  await assert.rejects(operation, /workspace or service session changed|stale/);
+  assert.equal(fixture.controller.getState().state, "unavailable");
+  assert.equal(fixture.controller.getState().run, undefined);
+});

@@ -51,6 +51,7 @@ export interface ExtensionHost extends CommandHost {
   openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
   pickGenerationCandidate?: (candidates: readonly { candidateId: string; kind: string; label: string }[]) => { candidateId: string; kind: string; label: string } | undefined | PromiseLike<{ candidateId: string; kind: string; label: string } | undefined>;
   pickGenerationSelection?: (scope: TestGenerationScopeV15) => unknown | PromiseLike<unknown>;
+  workspaceRoot?: () => string | undefined;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -574,6 +575,9 @@ function createVSCodeHost(
       if (scope === TestGenerationScopeV15.Target) return { targetId: value };
       return { coverageReportId: value };
     },
+    workspaceRoot: () => vscode.workspace.workspaceFolders?.length === 1
+      ? vscode.workspace.workspaceFolders[0]!.uri.fsPath
+      : undefined,
     pickCoverageSource: async (sources) => {
       const picked = await vscode.window.showQuickPick(
         sources.map((source) => ({ label: source.uri, description: source.sha256, source })),

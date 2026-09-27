@@ -231,7 +231,13 @@ export class TestGenerationController {
       this.#setRun(accepted, epoch);
       return this.refresh();
     } catch (error) {
-      this.#publish({ state: "preview", run, candidates, detail: errorMessage(error) });
+      // A late RPC failure must not restore a preview belonging to the old
+      // workspace/session. The caller can explicitly refresh the new session.
+      if (this.#isFreshContext(context, client, epoch)) {
+        this.#publish({ state: "preview", run, candidates, detail: errorMessage(error) });
+      } else if (!this.#closed && epoch === this.#epoch) {
+        this.#publish({ state: "unavailable", detail: "The workspace or service session changed during acceptance." });
+      }
       throw error;
     }
   }
@@ -309,10 +315,13 @@ export class TestGenerationController {
 
   #assertFresh(epoch: number, expected: GenerationContext, client: ExtensionGenerationProtocolClient): void {
     this.#assertEpoch(epoch);
+    if (!this.#isFreshContext(expected, client, epoch)) throw new Error("The workspace or service session changed during test generation.");
+  }
+
+  #isFreshContext(expected: GenerationContext, client: ExtensionGenerationProtocolClient, epoch: number): boolean {
+    if (this.#closed || epoch !== this.#epoch) return false;
     const current = this.options.readContext();
-    if (current.trust !== "trusted" || current.projectId !== expected.projectId || current.workspaceGeneration !== expected.workspaceGeneration || current.client !== client) {
-      throw new Error("The workspace or service session changed during test generation.");
-    }
+    return current.trust === "trusted" && current.projectId === expected.projectId && current.workspaceGeneration === expected.workspaceGeneration && current.client === client;
   }
 }
 
