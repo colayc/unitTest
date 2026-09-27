@@ -68,7 +68,9 @@
     },
     "uri": {
       "type": "string",
-      "format": "uri"
+      "format": "uri",
+      "pattern": "^unit-test-ide://artifacts?/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+      "description": "Opaque service artifact URI only; filesystem and network URIs are forbidden in protocol v1.5."
     }
   },
   "allOf": [

@@ -9,16 +9,19 @@ export interface TestGenerationContractV15 {
     targetListRequest:    TestGenerationTargetListRequestV15;
 }
 
+/**
+ * The service MUST resolve the authoritative stored candidate kind from runId and
+ * candidateId, and MUST reject a characterization candidate unless confirmCharacterization
+ * is true. Caller-supplied candidate classification is forbidden.
+ */
 export interface TestGenerationAcceptRequestV15 {
-    candidateId:             string;
-    candidateKind:           TestGenerationCandidateKindV15;
+    candidateId: string;
+    /**
+     * Explicit consent for a characterization candidate. The service checks this against the
+     * stored kind resolved by runId and candidateId.
+     */
     confirmCharacterization: boolean;
     runId:                   string;
-}
-
-export enum TestGenerationCandidateKindV15 {
-    Characterization = "characterization",
-    Verified = "verified",
 }
 
 export interface TestGenerationCandidateListRequestV15 {
@@ -71,6 +74,11 @@ export enum Severity {
     Error = "error",
     Info = "info",
     Warning = "warning",
+}
+
+export enum TestGenerationCandidateKindV15 {
+    Characterization = "characterization",
+    Verified = "verified",
 }
 
 export interface TestGenerationPlannedEditV15 {

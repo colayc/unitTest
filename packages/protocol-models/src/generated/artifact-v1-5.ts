@@ -6,7 +6,11 @@ export interface ArtifactMetadataV15 {
     sha256:     string;
     sizeBytes:  number;
     taskId:     string;
-    uri:        string;
+    /**
+     * Opaque service artifact URI only; filesystem and network URIs are forbidden in protocol
+     * v1.5.
+     */
+    uri: string;
 }
 
 export enum ArtifactKindV15 {

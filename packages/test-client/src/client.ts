@@ -729,6 +729,7 @@ export class ProtocolClient {
     });
   }
 
+  /** The service resolves candidate kind from runId/candidateId and checks explicit characterization consent. */
   async acceptTestGeneration(input: TestGenerationAcceptInput): Promise<TestGenerationRunV15> {
     const version = this.#requireV15();
     const request = snapshotRequestPayload("testGeneration/accept", input);

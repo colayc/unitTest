@@ -85,7 +85,8 @@ import {
 import type {
   TestGenerationStartRequestV15,
   TestGenerationRunV15,
-  TestGenerationCandidatePageV15
+  TestGenerationCandidatePageV15,
+  TestGenerationAcceptRequestV15
 } from "./index.js";
 import {
   TestGenerationFrameworkV15,
@@ -106,8 +107,10 @@ test("protocol 1.5 generated models expose typed generation contracts", () => {
     lastSequence: 0
   };
   const page: TestGenerationCandidatePageV15 = { items: [] };
+  const accept: TestGenerationAcceptRequestV15 = { runId: run.runId, candidateId: "e".repeat(32), confirmCharacterization: true };
   assert.equal(run.projectId, "core");
   assert.equal(page.items.length, 0);
+  assert.equal(accept.confirmCharacterization, true);
 });
 
 test("generated capabilities represent an empty Windows service", () => {

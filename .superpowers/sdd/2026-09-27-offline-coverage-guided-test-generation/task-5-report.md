@@ -9,7 +9,7 @@ Implemented in the task worktree. Protocol v1.5 adds closed offline test-generat
 - Added `testGeneration/targets/list`, `testGeneration/start`, `testGeneration/runs/get`, `testGeneration/candidates/list`, and `testGeneration/accept` as v1.5-only methods. Generic `tasks/cancel` remains available and decodes a v1.5 generation task.
 - Closed scope, framework, candidate-kind, run-state, budgets, percentages, digest formats, and state-change transitions. Start requests carry goals and wall-time/candidate/memory/concurrency budgets.
 - Candidate summaries are metadata only: code/artifact/evidence digests, assertion provenance, baseline/delta coverage, relative planned-edit paths, diagnostics, and characterization confirmation state. Raw source and absolute path fields are rejected.
-- Characterization accept requests require explicit `confirmCharacterization: true`; verified candidates require `false`. The service must still compare the request's candidate kind with its authoritative candidate record when implementing the route.
+- Accept requests carry explicit `confirmCharacterization` consent. The service must resolve candidate kind from the authoritative `(runId, candidateId)` record and reject characterization candidates unless consent is true; the caller cannot supply candidate kind.
 - Added v1.5 package exports, generator model registrations, client envelope/connection validation, typed decoders, and public model/client exports. The schema package export map and connection/client index files were additionally necessary to make the listed contracts callable.
 
 ## Red/green evidence
@@ -35,3 +35,14 @@ Implemented in the task worktree. Protocol v1.5 adds closed offline test-generat
 - The v1.5 generated Go event name and protocol-version constants were checked after regeneration.
 - New v1.5 client decoders build typed objects after schema validation and do not add `unknown as` casts. Older decoder casts were left unchanged.
 - No signing, tagging, release publishing, remote synchronization, branch-protection changes, runtime routes, or UI work was performed.
+
+## Round 1 review fixes (T5-R1–R4)
+
+- **T5-R1:** Removed caller-supplied `candidateKind` from `testGeneration/accept`. The request is now only `(runId, candidateId, confirmCharacterization)`. Schema and generated TypeScript/Go types explicitly require the future service to look up the authoritative candidate kind by run/candidate IDs and reject a characterization candidate without true confirmation. The client validates and transmits no classification field. This deliberately cannot be decided by wire schema alone because candidate state lives on the service.
+- **T5-R2:** Candidate diagnostic messages and target display names now use closed path-free/assignment-free character patterns. Structured `targetId`, diagnostic `code`, and `plannedEdit.path` remain available for useful identifiers. V1.5 artifact URIs are limited to the `unit-test-ide://artifact[s]/...` service scheme, rejecting `file:` and network URIs. The producer must still redact sensitive words before formatting a permitted summary; no character pattern can recognize every possible secret value.
+- **T5-R3:** Generation target-list/start requests and runs now use the same 64-character project ID limit as the v1.5 task schema.
+- **T5-R4:** The start request uses five exclusive scope branches. Symbol/file/target/coverage-gap each require exactly their own selector; workspace accepts none.
+
+Regression evidence: schema tests were red at 26/28 before the fix (accept required caller classification; mixed selectors were accepted), and the generated-model test failed to compile without `candidateKind`. After regeneration: schema 28/28, model 8/8, client 93/93. Client tests cover spoofed classification rejected before writing, path/secret-bearing candidate diagnostics and target names rejected on receipt, and `file:` artifact metadata rejected. Mutation tests cover Windows drive/backslash, slash-prefixed, and drive/slash paths, all five valid scopes and conflicting selectors, and 65-character project IDs across generation and task schemas. `go test ./apps/test-service/internal/protocolmodel/v1_5/...` passed. Existing v1.0–v1.4 generated files remain byte-stable in the working diff.
+
+`pnpm generate:protocol`, `pnpm check:protocol-generated`, and `git diff --check` also passed with the pinned runtime. Self-review found no Go routes or UI changes; the only client implementation edit is a comment documenting the service-side acceptance obligation already carried by the generated type.

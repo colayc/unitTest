@@ -13,11 +13,15 @@ type TestGenerationContractV15 struct {
 	TargetListRequest    TestGenerationTargetListRequestV15    `json:"targetListRequest"`
 }
 
+// The service MUST resolve the authoritative stored candidate kind from runId and
+// candidateId, and MUST reject a characterization candidate unless confirmCharacterization
+// is true. Caller-supplied candidate classification is forbidden.
 type TestGenerationAcceptRequestV15 struct {
-	CandidateID             string                         `json:"candidateId"`
-	CandidateKind           TestGenerationCandidateKindV15 `json:"candidateKind"`
-	ConfirmCharacterization bool                           `json:"confirmCharacterization"`
-	RunID                   string                         `json:"runId"`
+	CandidateID string `json:"candidateId"`
+	// Explicit consent for a characterization candidate. The service checks this against the
+	// stored kind resolved by runId and candidateId.
+	ConfirmCharacterization bool   `json:"confirmCharacterization"`
+	RunID                   string `json:"runId"`
 }
 
 type TestGenerationCandidateListRequestV15 struct {
@@ -129,13 +133,6 @@ type TestGenerationTargetListRequestV15 struct {
 	WorkspaceGeneration string  `json:"workspaceGeneration"`
 }
 
-type TestGenerationCandidateKindV15 string
-
-const (
-	Characterization TestGenerationCandidateKindV15 = "characterization"
-	Verified         TestGenerationCandidateKindV15 = "verified"
-)
-
 type Kind string
 
 const (
@@ -149,6 +146,13 @@ const (
 	Error   Severity = "error"
 	Info    Severity = "info"
 	Warning Severity = "warning"
+)
+
+type TestGenerationCandidateKindV15 string
+
+const (
+	Characterization TestGenerationCandidateKindV15 = "characterization"
+	Verified         TestGenerationCandidateKindV15 = "verified"
 )
 
 type Operation string

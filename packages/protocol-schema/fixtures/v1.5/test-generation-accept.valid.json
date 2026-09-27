@@ -7,7 +7,6 @@
   "payload": {
     "runId": "44444444444444444444444444444444",
     "candidateId": "77777777777777777777777777777777",
-    "candidateKind": "characterization",
     "confirmCharacterization": true
   }
 }

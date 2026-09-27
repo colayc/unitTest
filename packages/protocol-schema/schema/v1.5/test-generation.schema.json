@@ -19,6 +19,9 @@
     "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "safeDisplayText": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._,:;()#%+-]*$", "description": "Path-free, secret-free display text; use targetId for identity." },
+    "safeDiagnosticText": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._,:;()#%+-]*$", "description": "Path-free, secret-free summary; use diagnostic code and plannedEdit.path for structured identifiers." },
     "symbol": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\\\:]*:[^/\\\\]*$" },
     "relativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$" },
     "scope": { "title": "TestGenerationScopeV15", "enum": ["symbol", "file", "target", "workspace", "coverage-gap"] },
@@ -45,7 +48,7 @@
       "title": "TestGenerationTargetListRequestV15", "type": "object", "additionalProperties": false,
       "required": ["workspaceGeneration", "projectId"],
       "properties": {
-        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/name" },
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/projectId" },
         "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
       }
@@ -54,7 +57,7 @@
       "title": "TestGenerationTargetV15", "type": "object", "additionalProperties": false,
       "required": ["targetId", "displayName", "frameworks"],
       "properties": {
-        "targetId": { "$ref": "#/$defs/digest" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "targetId": { "$ref": "#/$defs/digest" }, "displayName": { "$ref": "#/$defs/safeDisplayText" },
         "frameworks": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["cpputest", "unity"] } }
       }
     },
@@ -68,16 +71,17 @@
       "required": ["idempotencyKey", "workspaceGeneration", "projectId", "scope", "framework", "goals", "budgets"],
       "properties": {
         "idempotencyKey": { "$ref": "#/$defs/id" }, "workspaceGeneration": { "$ref": "#/$defs/digest" },
-        "projectId": { "$ref": "#/$defs/name" }, "scope": { "$ref": "#/$defs/scope" },
+        "projectId": { "$ref": "#/$defs/projectId" }, "scope": { "$ref": "#/$defs/scope" },
         "symbolId": { "$ref": "#/$defs/symbol" }, "file": { "$ref": "#/$defs/relativePath" },
         "targetId": { "$ref": "#/$defs/digest" }, "coverageReportId": { "$ref": "#/$defs/id" },
         "framework": { "$ref": "#/$defs/framework" }, "goals": { "$ref": "#/$defs/goals" }, "budgets": { "$ref": "#/$defs/budgets" }
       },
-      "allOf": [
-        { "if": { "properties": { "scope": { "const": "symbol" } } }, "then": { "required": ["symbolId"] } },
-        { "if": { "properties": { "scope": { "const": "file" } } }, "then": { "required": ["file"] } },
-        { "if": { "properties": { "scope": { "const": "target" } } }, "then": { "required": ["targetId"] } },
-        { "if": { "properties": { "scope": { "const": "coverage-gap" } } }, "then": { "required": ["coverageReportId"] } }
+      "oneOf": [
+        { "properties": { "scope": { "const": "symbol" } }, "required": ["symbolId"], "not": { "anyOf": [{ "required": ["file"] }, { "required": ["targetId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "file" } }, "required": ["file"], "not": { "anyOf": [{ "required": ["symbolId"] }, { "required": ["targetId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "target" } }, "required": ["targetId"], "not": { "anyOf": [{ "required": ["symbolId"] }, { "required": ["file"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "workspace" } }, "not": { "anyOf": [{ "required": ["symbolId"] }, { "required": ["file"] }, { "required": ["targetId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "coverage-gap" } }, "required": ["coverageReportId"], "not": { "anyOf": [{ "required": ["symbolId"] }, { "required": ["file"] }, { "required": ["targetId"] }] } }
       ]
     },
     "runIdRequest": {
@@ -101,7 +105,7 @@
       "required": ["code", "severity", "message"],
       "properties": {
         "code": { "$ref": "#/$defs/name" }, "severity": { "enum": ["info", "warning", "error"] },
-        "message": { "type": "string", "maxLength": 2048 }
+        "message": { "$ref": "#/$defs/safeDiagnosticText" }
       }
     },
     "plannedEdit": {
@@ -149,7 +153,7 @@
       "required": ["runId", "taskId", "workspaceGeneration", "projectId", "state", "createdAt", "lastSequence"],
       "properties": {
         "runId": { "$ref": "#/$defs/id" }, "taskId": { "$ref": "#/$defs/id" },
-        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/name" },
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/projectId" },
         "state": { "$ref": "#/$defs/state" }, "createdAt": { "type": "string", "format": "date-time" },
         "finishedAt": { "type": "string", "format": "date-time" },
         "lastSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
@@ -161,15 +165,12 @@
     },
     "acceptRequest": {
       "title": "TestGenerationAcceptRequestV15", "type": "object", "additionalProperties": false,
-      "required": ["runId", "candidateId", "candidateKind", "confirmCharacterization"],
+      "description": "The service MUST resolve the authoritative stored candidate kind from runId and candidateId, and MUST reject a characterization candidate unless confirmCharacterization is true. Caller-supplied candidate classification is forbidden.",
+      "required": ["runId", "candidateId", "confirmCharacterization"],
       "properties": {
         "runId": { "$ref": "#/$defs/id" }, "candidateId": { "$ref": "#/$defs/id" },
-        "candidateKind": { "$ref": "#/$defs/candidateKind" }, "confirmCharacterization": { "type": "boolean" }
-      },
-      "allOf": [
-        { "if": { "properties": { "candidateKind": { "const": "characterization" } } }, "then": { "type": "object", "properties": { "confirmCharacterization": { "const": true } } } },
-        { "if": { "properties": { "candidateKind": { "const": "verified" } } }, "then": { "type": "object", "properties": { "confirmCharacterization": { "const": false } } } }
-      ]
+        "confirmCharacterization": { "type": "boolean", "description": "Explicit consent for a characterization candidate. The service checks this against the stored kind resolved by runId and candidateId." }
+      }
     }
   }
 }

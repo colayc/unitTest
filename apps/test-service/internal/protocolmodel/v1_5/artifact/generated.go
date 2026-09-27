@@ -10,7 +10,9 @@ type ArtifactMetadataV15 struct {
 	Sha256     string              `json:"sha256"`
 	SizeBytes  int64               `json:"sizeBytes"`
 	TaskID     string              `json:"taskId"`
-	URI        string              `json:"uri"`
+	// Opaque service artifact URI only; filesystem and network URIs are forbidden in protocol
+	// v1.5.
+	URI string `json:"uri"`
 }
 
 type ArtifactKindV15 string

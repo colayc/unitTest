@@ -6,6 +6,54 @@ import addFormats from "ajv-formats";
 
 const load = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
 
+test("protocol 1.5 generation boundaries reject caller classification, leaked text, and filesystem artifacts", async () => {
+  const ajv = new Ajv2020({ strict: true, strictRequired: false });
+  addFormats(ajv);
+  const generation = await load("../schema/v1.5/test-generation.schema.json");
+  const accept = ajv.compile({ ...generation.$defs.acceptRequest, $defs: generation.$defs });
+  const request = { runId: "a".repeat(32), candidateId: "b".repeat(32), confirmCharacterization: true };
+  assert.equal(accept(request), true, "candidate kind must be resolved by the service, not supplied by the caller");
+  assert.equal(accept({ ...request, candidateKind: "verified", confirmCharacterization: false }), false);
+
+  const target = ajv.compile({ ...generation.$defs.target, $defs: generation.$defs });
+  const diagnostic = ajv.compile({ ...generation.$defs.diagnostic, $defs: generation.$defs });
+  assert.equal(target({ targetId: "c".repeat(64), displayName: "core.tests", frameworks: ["cpputest"] }), true);
+  assert.equal(diagnostic({ code: "COVERAGE_GAP", severity: "warning", message: "branch 12 remains uncovered" }), true);
+  for (const displayName of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp"]) {
+    assert.equal(target({ targetId: "c".repeat(64), displayName, frameworks: ["cpputest"] }), false, displayName);
+  }
+  for (const message of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp"]) {
+    assert.equal(diagnostic({ code: "COVERAGE_GAP", severity: "warning", message }), false, message);
+  }
+  const artifact = ajv.compile(await load("../schema/v1.5/artifact.schema.json"));
+  const metadata = { artifactId: "a".repeat(32), taskId: "b".repeat(32), kind: "task-summary", mimeType: "application/json", sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-09-27T00:00:00Z", uri: "unit-test-ide://artifact/" + "a".repeat(32) };
+  assert.equal(artifact(metadata), true);
+  assert.equal(artifact({ ...metadata, uri: "file:///C:/private/source.cpp" }), false);
+});
+
+test("protocol 1.5 generation project ids match tasks and scope selectors are exclusive", async () => {
+  const ajv = new Ajv2020({ strict: true, strictRequired: false });
+  addFormats(ajv);
+  const generation = await load("../schema/v1.5/test-generation.schema.json");
+  const start = ajv.compile({ ...generation.$defs.startRequest, $defs: generation.$defs });
+  const run = ajv.compile({ ...generation.$defs.run, $defs: generation.$defs });
+  const targetListRequest = ajv.compile({ ...generation.$defs.targetListRequest, $defs: generation.$defs });
+  const task = ajv.compile(await load("../schema/v1.5/task.schema.json"));
+  const base = { idempotencyKey: "a".repeat(32), workspaceGeneration: "b".repeat(64), projectId: "core", framework: "cpputest", goals: { functionPercent: 1, linePercent: 2, branchPercent: 3 }, budgets: { wallTimeMs: 1, candidateCount: 1, memoryMiB: 64, concurrency: 1 } };
+  const selectors = { symbol: { symbolId: "target:foo" }, file: { file: "src/foo.cpp" }, target: { targetId: "c".repeat(64) }, workspace: {}, "coverage-gap": { coverageReportId: "d".repeat(32) } };
+  for (const [scope, selected] of Object.entries(selectors)) {
+    assert.equal(start({ ...base, scope, ...selected }), true, scope);
+    for (const [otherScope, other] of Object.entries(selectors)) {
+      if (scope !== otherScope && Object.keys(other).length > 0) assert.equal(start({ ...base, scope, ...selected, ...other }), false, `${scope} with ${otherScope} selector`);
+    }
+  }
+  const longProjectId = "p".repeat(65);
+  assert.equal(start({ ...base, scope: "workspace", projectId: longProjectId }), false);
+  assert.equal(targetListRequest({ workspaceGeneration: "c".repeat(64), projectId: longProjectId }), false);
+  assert.equal(run({ runId: "a".repeat(32), taskId: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: longProjectId, state: "queued", createdAt: "2026-09-27T00:00:00Z", lastSequence: 0 }), false);
+  assert.equal(task({ taskId: "a".repeat(32), kind: "testGeneration", runId: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: longProjectId, status: "running", createdAt: "2026-09-27T00:00:00Z", lastSequence: 0 }), false);
+});
+
 test("protocol 1.5 validates test-generation methods and rejects unsafe payloads", async () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
   addFormats(ajv);
@@ -39,7 +87,7 @@ test("protocol 1.5 validates test-generation methods and rejects unsafe payloads
     ["testGeneration/targets/list", { workspaceGeneration: "c".repeat(64), projectId: "core" }],
     ["testGeneration/runs/get", { runId: "d".repeat(32) }],
     ["testGeneration/candidates/list", { runId: "d".repeat(32) }],
-    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), candidateKind: "characterization", confirmCharacterization: true }]
+    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), confirmCharacterization: true }]
   ]) assert.equal(validate({ ...base, method, payload }), true, `${method}: ${JSON.stringify(validate.errors)}`);
   for (const [name, payload] of [
     ["unknown", { ...start.payload, command: "rm -rf /" }],

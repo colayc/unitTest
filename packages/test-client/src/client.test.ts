@@ -8,7 +8,7 @@ import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
 import { ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
-import { TestGenerationCandidateKindV15, TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
+import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
@@ -347,8 +347,9 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).createdAt.getTime(), new Date(SENT_AT).getTime());
   assert.equal((await fixture.client.listTestGenerationCandidates({ runId: RUN_ID })).items[0]?.codeDigest, "a".repeat(64));
   assert.equal((await fixture.client.acceptTestGeneration({
-    runId: RUN_ID, candidateId: ARTIFACT_ID, candidateKind: TestGenerationCandidateKindV15.Characterization, confirmCharacterization: true
+    runId: RUN_ID, candidateId: ARTIFACT_ID, confirmCharacterization: true
   })).runId, RUN_ID);
+  assert.equal("candidateKind" in (fixture.requests.at(-1)?.payload as JsonObject), false);
   assert.equal(fixture.requests.filter((request) => String(request.method).startsWith("testGeneration/")).length, 5);
   fixture.client.close();
 
@@ -393,10 +394,11 @@ test("protocol 1.5 generation input fails closed before writing", async () => {
   }), /invalid protocol request/);
   const withPath = { ...input, sourcePath: "C:/private/source.cpp" };
   await assert.rejects(() => fixture.client.startTestGeneration(withPath), /invalid protocol request/);
-  await assert.rejects(() => fixture.client.acceptTestGeneration({
+  const spoofedKind = {
     runId: RUN_ID, candidateId: ARTIFACT_ID,
-    candidateKind: TestGenerationCandidateKindV15.Characterization, confirmCharacterization: false
-  }), /invalid protocol request/);
+    candidateKind: "verified", confirmCharacterization: false
+  };
+  await assert.rejects(() => fixture.client.acceptTestGeneration(spoofedKind), /invalid protocol request/);
   assert.equal(fixture.requests.length, 1);
   fixture.client.close();
 });
@@ -414,13 +416,38 @@ test("protocol 1.5 candidate responses reject source and bad digests", async () 
       baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
       deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
       plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
-      diagnostics: [], characterizationConfirmed: false, source: "int secret;" }
+      diagnostics: [], characterizationConfirmed: false, source: "int secret;" },
+    { candidateId: ARTIFACT_ID, kind: "verified", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
+      assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) },
+      baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
+      deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+      plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+      diagnostics: [{ code: "COVERAGE_GAP", severity: "warning", message: "C:\\private\\source.cpp: API_KEY=secret" }],
+      characterizationConfirmed: false }
   ]) {
     const fixture = scriptedClient((request) => request.method === "handshake"
       ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
       : response(request, { items: [candidate] }, "1.5"));
     await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
     await assert.rejects(() => fixture.client.listTestGenerationCandidates({ runId: RUN_ID }), /invalid protocol message|invalid .* response/i);
+    fixture.client.close();
+  }
+});
+
+test("protocol 1.5 client rejects unsafe target names and filesystem artifact URIs", async () => {
+  for (const [method, payload] of [
+    ["testGeneration/targets/list", { items: [{ targetId: TARGET_ID, displayName: "C:/private/source.cpp", frameworks: ["cpputest"] }] }],
+    ["artifacts/list", { items: [{ artifactId: ARTIFACT_ID, taskId: TASK_ID, kind: "task-summary", mimeType: "application/json", sizeBytes: 1, sha256: "a".repeat(64), createdAt: SENT_AT, uri: "file:///C:/private/source.cpp" }] }]
+  ] as const) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
+      : response(request, payload, "1.5"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+    if (method === "testGeneration/targets/list") {
+      await assert.rejects(() => fixture.client.listTestGenerationTargets({ workspaceGeneration: WORKSPACE_GENERATION, projectId: "core" }), /invalid protocol message|invalid .* response/i);
+    } else {
+      await assert.rejects(() => fixture.client.listArtifacts(TASK_ID), /invalid protocol message|invalid .* response/i);
+    }
     fixture.client.close();
   }
 });
