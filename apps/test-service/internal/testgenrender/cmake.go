@@ -2,6 +2,7 @@ package testgenrender
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"unicode"
 )
@@ -156,6 +157,14 @@ func cmakeArgs(body string) ([]string, error) {
 	return args, nil
 }
 func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error) {
+	base := path.Dir(t.CMakePath)
+	if base == "." || !strings.HasPrefix(t.TestPath, base+"/") {
+		return "", ErrInvalidRender
+	}
+	sourceRef := strings.TrimPrefix(t.TestPath, base+"/")
+	if !validPath(sourceRef) {
+		return "", ErrInvalidRender
+	}
 	calls, err := parseCMakeCalls(t.ExistingCMake)
 	if err != nil {
 		return "", err
@@ -187,7 +196,7 @@ func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error
 		}
 		if c.name == "target_sources" && c.args[0] == t.TestTarget {
 			for _, a := range c.args[1:] {
-				if a == t.TestPath {
+				if a == sourceRef {
 					already = true
 				}
 			}
@@ -214,7 +223,7 @@ func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error
 			}
 			switch c.name {
 			case "add_executable":
-				foundExe = len(c.args) == 2 && c.args[1] == t.TestPath
+				foundExe = len(c.args) == 2 && c.args[1] == sourceRef
 			case "target_link_libraries":
 				foundLink = contains(c.args, t.ProductionTarget) && contains(c.args, t.FrameworkTarget)
 			}
@@ -225,13 +234,13 @@ func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error
 			}
 			return "", ErrInvalidRender
 		}
-		insertion := fmt.Sprintf("\nadd_executable(%s \"%s\")\ntarget_link_libraries(%s PRIVATE %s %s)\nadd_test(NAME %s COMMAND %s)", generated, t.TestPath, generated, t.ProductionTarget, t.FrameworkTarget, generated, generated)
+		insertion := fmt.Sprintf("\nadd_executable(%s \"%s\")\ntarget_link_libraries(%s PRIVATE %s %s)\nadd_test(NAME %s COMMAND %s)", generated, sourceRef, generated, t.ProductionTarget, t.FrameworkTarget, generated, generated)
 		return t.ExistingCMake[:target.end] + insertion + t.ExistingCMake[target.end:], nil
 	}
 	if already {
 		return t.ExistingCMake, nil
 	}
-	insertion := fmt.Sprintf("\ntarget_sources(%s PRIVATE \"%s\")", t.TestTarget, t.TestPath)
+	insertion := fmt.Sprintf("\ntarget_sources(%s PRIVATE \"%s\")", t.TestTarget, sourceRef)
 	return t.ExistingCMake[:target.end] + insertion + t.ExistingCMake[target.end:], nil
 }
 func contains(values []string, want string) bool {

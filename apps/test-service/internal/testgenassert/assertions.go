@@ -93,6 +93,14 @@ func ValueDigest(v solver.Value) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// InputDigest binds the complete ordered, typed vector independently of the
+// solver's ID, which also incorporates gap and compile metadata unavailable here.
+func InputDigest(inputs []solver.Input) string {
+	b, _ := json.Marshal(inputs)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 func digest(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -143,8 +151,6 @@ func Derive(p analysis.Program, vector solver.InputVector, o Observation) ([]Ass
 	}
 	assertions := make([]Assertion, 0, len(o.Evidence))
 	kind := KindVerified
-	seenVerified := false
-	seenObserved := false
 	for _, e := range o.Evidence {
 		if !digest(e.TargetDigest) || e.SourceDigest != fn.Excerpt.Digest || e.Stability != StabilityDeterministic || e.Target == TargetInput {
 			return nil, "", ErrInvalidEvidence
@@ -182,10 +188,9 @@ func Derive(p analysis.Program, vector solver.InputVector, o Observation) ([]Ass
 		}
 		switch e.Kind {
 		case EvidenceReturnContract, EvidenceErrorContract, EvidenceInvariant:
-			seenVerified = true
 			proven := false
 			for _, proof := range fn.OracleProofs {
-				if proof.Kind == string(e.Kind) && proof.CandidateID == vector.ID && proof.TargetDigest == e.TargetDigest && proof.SourceDigest == e.SourceDigest && proof.ExpectedDigest == ValueDigest(e.Expected) && proof.Rule == string(e.Rule) && proof.Tolerance == e.Tolerance {
+				if proof.Kind == string(e.Kind) && proof.CandidateID == vector.ID && proof.InputDigest == InputDigest(vector.Inputs) && proof.TargetDigest == e.TargetDigest && proof.SourceDigest == e.SourceDigest && proof.ExpectedDigest == ValueDigest(e.Expected) && proof.Rule == string(e.Rule) && proof.Tolerance == e.Tolerance {
 					proven = true
 					break
 				}
@@ -194,11 +199,10 @@ func Derive(p analysis.Program, vector solver.InputVector, o Observation) ([]Ass
 				return nil, "", ErrInvalidEvidence
 			}
 		case EvidenceObservedOutput:
-			seenObserved = true
-			if !digest(e.StabilityDigest) || e.RepeatCount < 2 || e.RepeatCount > 100 {
-				return nil, "", ErrInvalidEvidence
-			}
-			kind = KindCharacterization
+			// A caller-supplied count/digest does not attest repeated execution.
+			// Task 10 must provide a product-verified typed observation receipt
+			// before this provenance can be classified or rendered.
+			return nil, "", ErrInvalidEvidence
 		default:
 			return nil, "", ErrInvalidEvidence
 		}
@@ -215,13 +219,13 @@ func Derive(p analysis.Program, vector solver.InputVector, o Observation) ([]Ass
 		}
 		assertions = append(assertions, Assertion{Provenance: e.Kind, Target: e.Target, TargetName: e.TargetName, TargetDigest: e.TargetDigest, EvidenceDigest: hex.EncodeToString(sum[:]), Expected: e.Expected, Rule: e.Rule, Tolerance: e.Tolerance, Stability: e.Stability, StabilityDigest: stabilityDigest})
 	}
-	if seenVerified && seenObserved {
-		return nil, "", ErrInvalidEvidence
-	}
 	return assertions, kind, nil
 }
 
 func validRule(e Evidence, t analysis.Type) bool {
+	if (t.Kind == analysis.TypeArray || t.Kind == analysis.TypeRecord) && containsFloatingLeaf(t, 0) {
+		return false
+	}
 	if t.Kind == analysis.TypeFloating {
 		if e.Rule != RuleNear {
 			return false
@@ -230,6 +234,25 @@ func validRule(e Evidence, t analysis.Type) bool {
 		return err == nil && !math.IsInf(n, 0) && !math.IsNaN(n) && n > 0 && n <= 1
 	}
 	return e.Rule == RuleEqual && e.Tolerance == ""
+}
+func containsFloatingLeaf(t analysis.Type, depth int) bool {
+	if depth > 4 {
+		return true
+	}
+	if t.Kind == analysis.TypeFloating {
+		return true
+	}
+	if t.Kind == analysis.TypeArray && t.Element != nil {
+		return containsFloatingLeaf(*t.Element, depth+1)
+	}
+	if t.Kind == analysis.TypeRecord {
+		for _, f := range t.Fields {
+			if containsFloatingLeaf(f.Type, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 func validValue(v solver.Value, t analysis.Type, depth int) bool {
 	if depth > 4 || v.Kind != t.Kind {

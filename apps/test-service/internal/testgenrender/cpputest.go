@@ -246,7 +246,7 @@ func literal(v solver.Value, t analysis.Type, lang Language) (string, error) {
 		if t.MaxLength <= 0 || len(v.String) > t.MaxLength || strings.ContainsAny(v.String, "\x00") || strings.HasPrefix(v.String, "/") || strings.Contains(v.String, ":\\") {
 			return "", ErrInvalidRender
 		}
-		return strconv.Quote(v.String), nil
+		return cStringLiteral(v.String), nil
 	case analysis.TypeArray:
 		if t.Element == nil || t.Bound < 1 || len(v.Elements) != t.Bound {
 			return "", ErrInvalidRender
@@ -279,6 +279,28 @@ func literal(v solver.Value, t analysis.Type, lang Language) (string, error) {
 	default:
 		return "", ErrInvalidRender
 	}
+}
+
+// C hex escapes consume an unbounded run of following hex digits, unlike Go
+// quoted strings. Fixed-width octal escapes preserve each UTF-8 byte exactly.
+func cStringLiteral(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c == '"':
+			b.WriteString("\\\"")
+		case c == '\\':
+			b.WriteString("\\\\")
+		case c >= 0x20 && c <= 0x7e:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "\\%03o", c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 func finite(n float64) bool { return !math.IsNaN(n) && !math.IsInf(n, 0) }
 func typeName(t analysis.Type, lang Language) (string, error) {

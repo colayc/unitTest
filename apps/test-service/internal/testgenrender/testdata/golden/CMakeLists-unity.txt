@@ -1,5 +1,5 @@
 add_executable(unit_tests existing.cpp)
-add_executable(unit_tests_generated_bbbbbbbbbbbb "tests/generated/choose_test.c")
+add_executable(unit_tests_generated_bbbbbbbbbbbb "generated/choose_test.c")
 target_link_libraries(unit_tests_generated_bbbbbbbbbbbb PRIVATE core unity)
 add_test(NAME unit_tests_generated_bbbbbbbbbbbb COMMAND unit_tests_generated_bbbbbbbbbbbb)
 target_link_libraries(unit_tests PRIVATE core unity)

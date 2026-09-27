@@ -34,7 +34,7 @@ func TestDeriveRequiresIndependentBoundProof(t *testing.T) {
 	if _, _, err := Derive(p, v, o); err == nil {
 		t.Fatal("unproven claimed contract accepted")
 	}
-	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleEqual)}}
+	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, InputDigest: InputDigest(v.Inputs), TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleEqual)}}
 	got, kind, err := Derive(p, v, o)
 	if err != nil || kind != KindVerified || len(got) != 1 || got[0].TargetDigest != hashC || got[0].Expected.Integer != "7" {
 		t.Fatalf("got=%+v kind=%s err=%v", got, kind, err)
@@ -50,13 +50,24 @@ func TestDeriveObservationOnlyIsCharacterization(t *testing.T) {
 	o.Evidence[0].Kind = EvidenceObservedOutput
 	o.Evidence[0].StabilityDigest = hashA
 	o.Evidence[0].RepeatCount = 2
-	got, kind, err := Derive(p, v, o)
-	if err != nil || kind != KindCharacterization || len(got) != 1 || got[0].Provenance != EvidenceObservedOutput {
-		t.Fatalf("got=%+v kind=%s err=%v", got, kind, err)
+	if _, _, err := Derive(p, v, o); err == nil {
+		t.Fatal("caller-claimed repeat evidence accepted without trusted receipt")
 	}
 	o.Evidence = nil
 	if _, _, err := Derive(p, v, o); err == nil {
 		t.Fatal("assertionless probe accepted")
+	}
+}
+
+func TestProofBindsCanonicalInputBytesNotOnlyVectorID(t *testing.T) {
+	p, v, o := fixture()
+	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, InputDigest: InputDigest(v.Inputs), TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleEqual)}}
+	if _, _, err := Derive(p, v, o); err != nil {
+		t.Fatalf("valid proof: %v", err)
+	}
+	v.Inputs[0].Value.Integer = "3"
+	if _, _, err := Derive(p, v, o); err == nil {
+		t.Fatal("mutated input under same vector ID accepted")
 	}
 }
 
@@ -75,7 +86,7 @@ func TestObservedOutputRequiresRepeatStabilityEvidence(t *testing.T) {
 
 func TestDeriveRejectsMixedProvenance(t *testing.T) {
 	p, v, o := fixture()
-	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleEqual)}}
+	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, InputDigest: InputDigest(v.Inputs), TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleEqual)}}
 	observed := o.Evidence[0]
 	observed.Kind = EvidenceObservedOutput
 	observed.StabilityDigest = hashA
@@ -131,7 +142,7 @@ func TestDeriveTypedBooleanEnumAndBoundedOutput(t *testing.T) {
 			}
 			o.Evidence[0].Target = tc.target
 			o.Evidence[0].Expected = tc.value
-			p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(tc.value), Rule: string(RuleEqual)}}
+			p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, InputDigest: InputDigest(v.Inputs), TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(tc.value), Rule: string(RuleEqual)}}
 			a, k, err := Derive(p, v, o)
 			if err != nil || k != KindVerified || len(a) != 1 {
 				t.Fatalf("%v %v %v", a, k, err)
@@ -155,7 +166,7 @@ func TestDeriveRejectsHostPathAndUnstableFloat(t *testing.T) {
 	}
 	o.Evidence[0].Rule = RuleNear
 	o.Evidence[0].Tolerance = "0.001"
-	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleNear), Tolerance: "0.001"}}
+	p.Functions[0].OracleProofs = []analysis.OracleProof{{Kind: string(EvidenceReturnContract), CandidateID: hashB, InputDigest: InputDigest(v.Inputs), TargetDigest: hashC, SourceDigest: hashD, ExpectedDigest: ValueDigest(o.Evidence[0].Expected), Rule: string(RuleNear), Tolerance: "0.001"}}
 	if _, k, err := Derive(p, v, o); err != nil || k != KindVerified {
 		t.Fatalf("valid near rejected: %v", err)
 	}

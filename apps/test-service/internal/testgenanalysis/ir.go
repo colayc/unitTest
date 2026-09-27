@@ -127,6 +127,7 @@ type Diagnostic struct {
 type OracleProof struct {
 	Kind           string `json:"kind"`
 	CandidateID    string `json:"candidateId"`
+	InputDigest    string `json:"inputDigest"`
 	TargetDigest   string `json:"targetDigest"`
 	SourceDigest   string `json:"sourceDigest"`
 	ExpectedDigest string `json:"expectedDigest"`
