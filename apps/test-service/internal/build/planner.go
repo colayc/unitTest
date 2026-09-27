@@ -123,6 +123,19 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 				"-DCMAKE_C_COMPILER="+compiler,
 				"-DCMAKE_CXX_COMPILER="+compiler,
 			)
+		} else if input.Coverage != nil && input.Toolchain.Family == toolchain.FamilyClang {
+			launchCompiler, err = cmakeLaunchPath(input.Toolchain.CCompiler)
+			if err != nil {
+				return task.ExecutionStep{}, task.ErrInvalidArgument
+			}
+			launchCXXCompiler, err = cmakeLaunchPath(input.Toolchain.CXXCompiler)
+			if err != nil {
+				return task.ExecutionStep{}, task.ErrInvalidArgument
+			}
+			args = append(args,
+				"-DCMAKE_C_COMPILER="+filepath.ToSlash(launchCompiler),
+				"-DCMAKE_CXX_COMPILER="+filepath.ToSlash(launchCXXCompiler),
+			)
 		}
 		if input.Coverage != nil {
 			args = append(args, "-B", launchBinaryDir)

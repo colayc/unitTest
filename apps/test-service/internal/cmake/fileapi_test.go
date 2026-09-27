@@ -223,6 +223,9 @@ func TestFileAPIReplyFollowsObjectGraphAndReturnsCanonicalTargets(t *testing.T) 
 	if len(reply.ToolchainIDs) != 2 || !sort.StringsAreSorted(reply.ToolchainIDs) {
 		t.Fatalf("ToolchainIDs = %#v, want two stable sorted identities", reply.ToolchainIDs)
 	}
+	if got, want := reply.CompilerPaths, map[string]string{"C": canonicalPortablePath(filepath.Join(fixture.sourceDir, "tools", "clang")), "CXX": canonicalPortablePath(filepath.Join(fixture.sourceDir, "tools", "clang++"))}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("CompilerPaths = %#v, want %#v", got, want)
+	}
 	for _, id := range reply.ToolchainIDs {
 		if len(id) != 64 || strings.ToLower(id) != id {
 			t.Fatalf("toolchain ID = %q, want lowercase SHA-256", id)

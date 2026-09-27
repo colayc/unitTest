@@ -266,6 +266,9 @@ func (plan *PreparedPlan) RefreshTargets(ctx context.Context) ([]cmake.Target, e
 	if err != nil {
 		return nil, ErrConfigureRequired
 	}
+	if err := plan.verifyCoverageCompilerEvidence(reply); err != nil {
+		return nil, ErrConfigureRequired
+	}
 	return cloneTargets(reply.Targets), nil
 }
 
@@ -276,12 +279,31 @@ func (plan *PreparedPlan) PersistConfiguration(ctx context.Context) error {
 		plan.prepared.coverage == nil {
 		return task.ErrInvalidArgument
 	}
+	if plan.prepared.toolchain.Family == toolchain.FamilyClang && runtime.GOOS == "linux" {
+		reply, err := plan.coordinator.readReply(plan.prepared.profile, plan.prepared.toolchain, plan.prepared.snapshot.Toolchains)
+		if err != nil || plan.verifyCoverageCompilerEvidence(reply) != nil {
+			return ErrConfigureRequired
+		}
+	}
 	for _, step := range plan.prepared.request.Plan.Steps {
 		if step.Kind == task.StepConfigure {
 			return plan.coordinator.Succeeded(ctx, task.Task{}, step)
 		}
 	}
 	return task.ErrInvalidArgument
+}
+
+func (plan *PreparedPlan) verifyCoverageCompilerEvidence(reply cmake.FileAPIReply) error {
+	if plan.prepared.toolchain.Family != toolchain.FamilyClang || runtime.GOOS != "linux" {
+		return nil
+	}
+	if err := verifyLinuxCoverageCompilerCache(filepath.Join(plan.prepared.profile.BinaryDir, "CMakeCache.txt"), plan.prepared.toolchain); err != nil {
+		return err
+	}
+	if !sameNativePath(filepath.FromSlash(reply.CompilerPaths["C"]), plan.prepared.toolchain.CCompiler) || !sameNativePath(filepath.FromSlash(reply.CompilerPaths["CXX"]), plan.prepared.toolchain.CXXCompiler) {
+		return task.ErrInvalidArgument
+	}
+	return nil
 }
 
 func (plan *PreparedPlan) AttachCoverageToolset(toolset coverageplatform.Toolset) error {
@@ -376,9 +398,9 @@ func (c *Coordinator) Resume(
 		IdempotencyKey:      persisted.IdempotencyKey,
 		WorkspaceGeneration: persisted.WorkspaceGeneration,
 		ProjectID:           payload.ProjectID, BuildProfileID: payload.BuildProfileID,
-		ToolchainID:         payload.ToolchainID,
-		TargetIDs: append([]string(nil), payload.TargetIDs...),
-		Jobs:      payload.Jobs, Timeout: persisted.Timeout,
+		ToolchainID: payload.ToolchainID,
+		TargetIDs:   append([]string(nil), payload.TargetIDs...),
+		Jobs:        payload.Jobs, Timeout: persisted.Timeout,
 	}, false)
 	if err != nil {
 		return task.Task{}, err
@@ -565,8 +587,8 @@ func (c *Coordinator) prepare(
 	}{
 		ProjectID: request.ProjectID, BuildProfileID: request.BuildProfileID,
 		ToolchainID: request.ToolchainID,
-		TargetIDs: append([]string{}, request.TargetIDs...),
-		Jobs:      request.Jobs, TimeoutMS: request.Timeout.Milliseconds(),
+		TargetIDs:   append([]string{}, request.TargetIDs...),
+		Jobs:        request.Jobs, TimeoutMS: request.Timeout.Milliseconds(),
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument
