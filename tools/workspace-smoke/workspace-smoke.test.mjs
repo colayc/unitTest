@@ -702,6 +702,35 @@ test("Phase 10A publishes exact candidate-bound GCC, Clang, and clang-cl coverag
   assert.match(matrix, /coverage-backends-\$\{\{ github\.run_attempt \}\}/u);
 });
 
+test("Windows coverage backend row is limited to its dedicated producer without changing legacy master WFP smoke", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const source = await readFile("apps/code-oss-extension/test/coverage-service-smoke.test.ts", "utf8");
+  const legacy = workflowJob(workflow, "verify-windows");
+  const producer = workflowJob(workflow, "coverage-windows-clang-cl");
+  assert.doesNotMatch(legacy, /UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED/u);
+  assert.match(producer, /UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED:\s*['"]?1['"]?/u);
+  assert.match(source, /process\.env\.UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED/u);
+  assert.doesNotMatch(source, /if \(process\.env\.GITHUB_ACTIONS === "true"\) \{\s*const candidateCommit/u);
+  assert.match(legacy, /name: Verify Windows LLVM coverage execution/u);
+  assert.match(legacy, /name: Verify privileged Windows WFP lifecycle/u);
+});
+
+test("dedicated Windows coverage producer resolves Go dependencies before a fail-closed offline build", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const source = await readFile("apps/code-oss-extension/test/coverage-service-smoke.test.ts", "utf8");
+  const job = workflowJob(workflow, "coverage-windows-clang-cl");
+  const prepared = job.indexOf("go mod download");
+  const smoke = job.indexOf("test:coverage-service-smoke");
+  assert.ok(prepared >= 0 && smoke > prepared);
+  const smokeStep = job.slice(job.lastIndexOf("      - ", smoke), smoke);
+  for (const setting of ["GOENV: 'off'", "GOTOOLCHAIN: local", "GOPROXY: 'off'", "GOSUMDB: 'off'"]) {
+    assert.ok(smokeStep.includes(setting), `${setting} must apply to the actual smoke process`);
+  }
+  assert.match(smokeStep, /go list -deps .*unit-test-service.*coverage-toolset-preflight.*native-offline-guardian/u);
+  assert.match(source, /GOPROXY:\s*"off"/u);
+  assert.match(source, /GOSUMDB:\s*"off"/u);
+});
+
 test("dependency metadata uses the official npm registry", async () => {
   assert.equal((await readFile(".npmrc", "utf8")).trim(), "registry=https://registry.npmjs.org/");
   assert.doesNotMatch(await readFile("pnpm-lock.yaml", "utf8"), /registry\.npmmirror\.com/);

@@ -6,7 +6,7 @@ import { inflateRawSync } from "node:zlib";
 
 import { encodeCanonicalJson, phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { writeMatrixOutputs } from "./render.mjs";
-import { validateMatrix } from "./validate.mjs";
+import { COVERAGE_BACKEND_GATES, validCoverageBackendReport, validateMatrix } from "./validate.mjs";
 import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
 import {
   P8_REPORT_ARTIFACTS,
@@ -120,7 +120,7 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-export function parseP8ReportArchive(bytes) {
+function parseReportArchive(bytes, entryName, validateDocument) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_REPORT_ARCHIVE_BYTES) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive size is invalid");
   }
@@ -178,14 +178,14 @@ export function parseP8ReportArchive(bytes) {
     if (dataOffset + compressedSize > centralOffset) throw new Error("entry overlaps directory");
     const compressed = bytes.subarray(dataOffset, dataOffset + compressedSize);
     const content = method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: MAX_REPORT_BYTES });
-    if (centralName !== "p8-report.json" || content.length !== uncompressedSize || crc32(content) !== expectedCrc) {
+    if (centralName !== entryName || content.length !== uncompressedSize || crc32(content) !== expectedCrc) {
       throw new Error("entry content mismatch");
     }
     const source = decoder.decode(content);
     const report = JSON.parse(source);
     if (report === null || typeof report !== "object" || Array.isArray(report)
         || encodeCanonicalJson(report) !== source) throw new Error("report is not canonical");
-    validateP8ReportDocument(report);
+    validateDocument(report);
     return {
       archiveDigest: createHash("sha256").update(bytes).digest("hex"),
       report,
@@ -193,6 +193,16 @@ export function parseP8ReportArchive(bytes) {
   } catch (error) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive content is invalid", error);
   }
+}
+
+export function parseP8ReportArchive(bytes) {
+  return parseReportArchive(bytes, "p8-report.json", validateP8ReportDocument);
+}
+
+export function parseCoverageBackendReportArchive(bytes) {
+  return parseReportArchive(bytes, "coverage-backends.json", (report) => {
+    if (!validCoverageBackendReport(report, report?.candidateCommit)) throw new Error("coverage report is invalid");
+  });
 }
 
 function assertReceipt(receipt) {
@@ -228,9 +238,12 @@ function assertReceipt(receipt) {
   }
   const jobNames = new Set();
   for (const job of evidence.jobs) {
-    if (!hasExactKeys(job, ["name", "conclusion"])
+    const jobKeys = Object.hasOwn(job ?? {}, "id") || Object.hasOwn(job ?? {}, "runnerImage")
+      ? ["id", "name", "conclusion", "runnerImage"] : ["name", "conclusion"];
+    if (!hasExactKeys(job, jobKeys)
         || !isSafeText(job.name)
         || !CONCLUSIONS.has(job.conclusion)
+        || (jobKeys.length === 4 && (canonicalId(job.id) !== job.id || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(job.runnerImage)))
         || jobNames.has(job.name)) {
       fail(receipt, "receipt jobs are invalid");
     }
@@ -256,13 +269,14 @@ function assertReceipt(receipt) {
     if (artifact.report !== undefined) {
       try {
         if (artifact.report?.gateId?.startsWith("P7-")) validateP7ReportDocument(artifact.report);
-        else validateP8ReportDocument(artifact.report);
+        else if (artifact.report?.gateId?.startsWith("P8-")) validateP8ReportDocument(artifact.report);
+        else if (!validCoverageBackendReport(artifact.report, receipt.candidateCommit)) throw new Error("invalid coverage report");
       } catch {
         fail(receipt, "receipt artifact report is invalid");
       }
       if (artifact.report.candidateCommit !== receipt.candidateCommit
-          || artifact.report.sourceCommit !== receipt.candidateCommit
-          || artifact.report.runAttempt !== evidence.runAttempt) {
+          || (artifact.report.rows === undefined && (artifact.report.sourceCommit !== receipt.candidateCommit
+          || artifact.report.runAttempt !== evidence.runAttempt))) {
         fail(receipt, "receipt artifact report identity is invalid");
       }
     }
@@ -314,7 +328,10 @@ function normalizeJobSnapshot(receipt, snapshot) {
     }
     ids.add(id);
     names.add(job.name);
-    return { id, runId, name: job.name, status: job.status, conclusion: job.conclusion };
+    if (job.labels !== undefined && (!isDenseArray(job.labels) || job.labels.some((label) => !isSafeText(label)))) {
+      fail(receipt, "job snapshot is invalid");
+    }
+    return { id, runId, name: job.name, status: job.status, conclusion: job.conclusion, labels: job.labels };
   });
   return jobs;
 }
@@ -367,6 +384,8 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
     if (job.runId !== expected.runId) fail(receipt, "job run ID does not match");
     if (job.status !== "completed") fail(receipt, "job status is not completed");
     if (job.conclusion !== expectedJob.conclusion) fail(receipt, "job conclusion does not match");
+    if (expectedJob.id !== undefined && job.id !== expectedJob.id) fail(receipt, "job ID does not match");
+    if (expectedJob.runnerImage !== undefined && !job.labels?.includes(expectedJob.runnerImage)) fail(receipt, "job runner label does not match");
   }
 
   if (artifacts.length !== expected.artifacts.length) fail(receipt, "artifact set does not match");
@@ -420,6 +439,24 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
     } catch {
       fail(receipt, "required P8 semantic report is invalid");
     }
+  }
+  if (COVERAGE_BACKEND_GATES.has(gateId)) {
+    const reports = expected.artifacts.filter((artifact) => artifact.name === `coverage-backends-${expected.runAttempt}`);
+    if (reports.length !== 1 || !validCoverageBackendReport(reports[0].report, receipt.candidateCommit)) {
+      fail(receipt, "required coverage backend report is invalid");
+    }
+    const report = reports[0];
+    const authenticated = reportArtifacts instanceof Map ? reportArtifacts.get(report.id) : undefined;
+    if (authenticated?.archiveDigest !== report.digest
+        || encodeCanonicalJson(authenticated?.report ?? {}) !== encodeCanonicalJson(report.report)) {
+      fail(receipt, "required coverage backend report bytes are untrusted");
+    }
+    for (const [index, name] of ["coverage-linux-gcc", "coverage-linux-clang", "coverage-windows-clang-cl"].entries()) {
+      const job = expected.jobs.find((item) => item.name === name);
+      if (!job?.id || job.runnerImage !== report.report.rows[index].runnerImage) fail(receipt, "coverage backend job identity is invalid");
+    }
+    const matrixJob = expected.jobs.find((item) => item.name === "coverage-backend-matrix");
+    if (!matrixJob?.id || matrixJob.runnerImage !== "ubuntu-24.04") fail(receipt, "coverage matrix job identity is invalid");
   }
   return {
     receiptId: receipt.receiptId,
@@ -574,7 +611,9 @@ async function loadReportArtifacts(directory) {
     const bytes = await readBoundedBytes(join(directory, entry.name), {
       label: "P8 report archive", maxBytes: MAX_REPORT_ARCHIVE_BYTES,
     });
-    reports.set(id, parseP8ReportArchive(bytes));
+    const parsed = bytes.includes(Buffer.from("coverage-backends.json", "utf8"))
+      ? parseCoverageBackendReportArchive(bytes) : parseP8ReportArchive(bytes);
+    reports.set(id, parsed);
   }
   return reports;
 }

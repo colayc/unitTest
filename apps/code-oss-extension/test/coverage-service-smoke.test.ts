@@ -221,6 +221,7 @@ async function buildService(fixture: Fixture): Promise<string> {
     ...process.env,
     GOENV: "off",
     GOTOOLCHAIN: "local",
+    ...(process.env.UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED === "1" ? { GOPROXY: "off", GOSUMDB: "off" } : {}),
     GOCACHE: fixture.goCache
   };
   const version = await execFile(executable, ["version"], {
@@ -881,7 +882,8 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const evidence = buildEvidence(verifiedToolset.digest, coverageStartedAt, coverageFinishedAt);
         const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
         assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
-        if (process.env.GITHUB_ACTIONS === "true") {
+        if (process.env.UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED === "1") {
+          assert.equal(process.env.GITHUB_ACTIONS, "true");
           const candidateCommit = process.env.UTIDE_CANDIDATE_SHA;
           const runnerImage = process.env.UTIDE_COVERAGE_RUNNER_IMAGE;
           assert.match(candidateCommit ?? "", /^[0-9a-f]{40}$/u);

@@ -70,7 +70,7 @@ jobs:
             done < <(jq -r '
               .artifacts[]
               | select(.expired == false)
-              | select(.name | test("^p8-(install-lifecycle-linux|install-lifecycle-windows|license-audit|linux-appimage-package|qualification-unsigned|runtime-producer-provenance|windows-msix-package)-report-[1-9][0-9]*-[0-9a-f]{64}$"))
+              | select(.name | (test("^p8-(install-lifecycle-linux|install-lifecycle-windows|license-audit|linux-appimage-package|qualification-unsigned|runtime-producer-provenance|windows-msix-package)-report-[1-9][0-9]*-[0-9a-f]{64}$") or test("^coverage-backends-[1-9][0-9]*$")))
               | .id
             ' ".superpowers/phase9/snapshots/$run_id/artifacts.json")
           done

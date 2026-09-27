@@ -751,6 +751,7 @@ jobs:
     env:
       UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       UTIDE_COVERAGE_RUNNER_IMAGE: windows-2025-vs2026
+      UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED: '1'
       UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -783,7 +784,17 @@ jobs:
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
       - name: Run required real Windows clang-cl coverage
-        run: pnpm --filter code-oss-extension test:coverage-service-smoke
+        env:
+          GOENV: 'off'
+          GOTOOLCHAIN: local
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+        shell: pwsh
+        run: |
+          go list -deps ./apps/test-service/cmd/unit-test-service ./apps/test-service/cmd/coverage-toolset-preflight ./apps/test-service/cmd/native-offline-guardian | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Offline Go dependency preflight failed' }
+          pnpm --filter code-oss-extension test:coverage-service-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage smoke failed' }
       - name: Validate refreshed Windows clang-cl evidence
         run: pnpm --filter code-oss-extension validate:coverage-evidence:windows
       - name: Upload refreshed Windows clang-cl backend evidence

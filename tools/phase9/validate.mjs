@@ -45,7 +45,7 @@ const P7_SEMANTIC_REPORT_GATES = new Set([
   "P7-MOCK-CONFIGURATION-UX",
 ]);
 const P8_SEMANTIC_REPORT_GATES = new Set(Object.keys(P8_REPORT_ARTIFACTS));
-const COVERAGE_BACKEND_GATES = new Set([
+export const COVERAGE_BACKEND_GATES = new Set([
   "P5-COVERAGE-FAULT-MAPPING", "P5-COVERAGE-REPORTS", "P5-LINUX-CLANG-COVERAGE",
   "P5-LINUX-GCC-COVERAGE", "P5-WINDOWS-LLVM-COVERAGE",
 ]);
@@ -58,6 +58,7 @@ const validateRegistrySchema = ajv.compile(schema);
 const validateBaselineSchema = ajv.getSchema(`${schema.$id}#/$defs/baseline`);
 const validateReceiptSchema = ajv.getSchema(`${schema.$id}#/$defs/receipt`);
 const validateMatrixSchema = ajv.getSchema(`${schema.$id}#/$defs/matrix`);
+const validateCoverageBackendReportSchema = ajv.getSchema(`${schema.$id}#/$defs/coverageBackendReport`);
 
 function schemaFailure(label) {
   throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", `${label} is invalid`);
@@ -384,7 +385,8 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
   return true;
 }
 
-function validCoverageBackendReport(report, candidateCommit) {
+export function validCoverageBackendReport(report, candidateCommit) {
+  if (typeof validateCoverageBackendReportSchema !== "function" || !validateCoverageBackendReportSchema(report)) return false;
   if (report.schemaVersion !== 1 || report.candidateCommit !== candidateCommit ||
     !Array.isArray(report.rows) || report.rows.length !== 3) return false;
   const digests = new Set();
