@@ -17,14 +17,14 @@ Protocol v1.5 提供以下 scope：
 | scope | 输入 | 典型入口 |
 | --- | --- | --- |
 | `symbol` | 已发现的 symbol ID | 函数/方法编辑器上下文（需要权威 picker 提供 ID） |
-| `file` | workspace-relative file URI | 当前文件 |
+| `file` | workspace-relative `relativePath` | 当前文件 |
 | `target` | 已发现的 CMake target ID | target 上下文（需要权威 picker 提供 ID） |
 | `workspace` | 已信任的 workspace generation | 全工作区（按 target 分批，需有效 workspace context） |
 | `coverage-gap` | `coverageReportId` | coverage viewer 的缺口（由服务从报告解析具体缺口） |
 
-扩展命令已注册：`unitTestIde.generateTests`、`generateTestsForSymbol`、`generateTestsForFile`、`generateTestsForTarget`、`generateTestsForCoverageGap`、`reviewGeneratedTests`、`acceptGeneratedTests` 和 `cancelTestGeneration`。当前 Code-OSS host 只有文件上下文可以从活动编辑器得到；`symbol`、`target` 和 `coverage-gap` 没有权威的 service-backed picker 时必须 fail-closed，不能猜测或让用户手填 ID，因此当前不是可用的一键入口。workspace 也必须带有效的受信任 workspace context。服务端方法为 `testGeneration/targets/list`、`testGeneration/start`、`testGeneration/runs/get`、`testGeneration/candidates/list` 和 `testGeneration/accept`；取消使用专用的 `testGeneration/runs/cancel`，不是旧版 `tasks/cancel`。
+扩展命令已注册：`unitTestIde.generateTests`、`generateTestsForSymbol`、`generateTestsForFile`、`generateTestsForTarget`、`generateTestsForCoverageGap`、`reviewGeneratedTests`、`acceptGeneratedTests` 和 `cancelTestGeneration`。当前 Code-OSS host 只有文件上下文可以从活动编辑器得到；`symbol`、`target` 和 `coverage-gap` 没有权威的 service-backed picker 时必须 fail-closed，不能猜测或让用户手填 ID，因此当前不是可用的一键入口。workspace 也必须带有效的受信任 workspace context。服务端方法为 `testGeneration/targets/list`、`testGeneration/start`、`testGeneration/runs/get`、`testGeneration/events/replay`、`testGeneration/candidates/list` 和 `testGeneration/accept`；取消使用专用的 `testGeneration/runs/cancel`，不是旧版 `tasks/cancel`。
 
-生成请求只包含 workspace URI/generation、已发现的目标标识、框架偏好、覆盖率目标、资源预算和幂等 key。客户端不能提交 shell 字符串、可执行文件、argv/environment、原生工作目录、任意编译/链接选项、输出路径、网络位置或 Mock/Stub 配置。
+生成请求只包含 `projectId`、`workspaceGeneration`、已发现的目标标识、框架偏好、覆盖率目标、资源预算和幂等 key。客户端不能提交 shell 字符串、可执行文件、argv/environment、原生工作目录、任意编译/链接选项、输出路径、网络位置或 Mock/Stub 配置。
 
 ## 信任与能力门禁
 
@@ -36,7 +36,7 @@ Protocol v1.5 提供以下 scope：
 4. workspace、build profile、target graph、compile database、toolchain、framework 和固定分析器 bundle 的摘要能够闭合。
 5. 基线测试和覆盖率报告成功且 provenance 一致。
 
-低于 v1.5 的会话必须在客户端本地拒绝生成 API，不能向旧服务发送未知消息。所有能力、任务、事件和制品均使用闭集版本化契约；路径只允许 workspace-relative URI/稳定 ID，日志和协议不包含主机绝对路径、环境变量、token、完整源文件或原始进程输出。
+低于 v1.5 的会话必须在客户端本地拒绝生成 API，不能向旧服务发送未知消息。所有能力、任务、事件和制品均使用闭集版本化契约；路径字段只允许 workspace-relative `relativePath` 或稳定 ID，日志和协议不包含主机绝对路径、环境变量、token、完整源文件或原始进程输出。
 
 ## 支持的安全子集
 

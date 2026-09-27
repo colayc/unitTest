@@ -246,7 +246,7 @@ Windows clang-cl/LLVM 的真实 Service 矩阵。
 
 真正的 Phase 10 native/hosted evidence 必须绑定合并候选 SHA、固定 Clang/analyzer
 bundle 的逐文件摘要与 license inventory、实际 runner/job/artifact identity、四个
-toolchain/framework 组合的 coverage delta、mutation 和性能报告，并在全部报告关闭
+4×2=8 个 toolchain/framework blocks 的 coverage delta、mutation 和性能报告，并在全部报告关闭
 后才写入 gate catalog。cross-compile、parser-only、local-static 或缺少 immutable
 artifact receipt 的结果保持 `MISSING`，不得标为 PASS。
 
