@@ -45,6 +45,11 @@ const P7_SEMANTIC_REPORT_GATES = new Set([
   "P7-MOCK-CONFIGURATION-UX",
 ]);
 const P8_SEMANTIC_REPORT_GATES = new Set(Object.keys(P8_REPORT_ARTIFACTS));
+const COVERAGE_BACKEND_GATES = new Set([
+  "P5-COVERAGE-FAULT-MAPPING", "P5-COVERAGE-REPORTS", "P5-LINUX-CLANG-COVERAGE",
+  "P5-LINUX-GCC-COVERAGE", "P5-WINDOWS-LLVM-COVERAGE",
+]);
+const COVERAGE_BACKEND_ORDER = ["linux-gcc", "linux-clang", "windows-clang-cl"];
 const execFileAsync = promisify(execFile);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -223,6 +228,10 @@ export function validateReceipt(value) {
     }
     for (const artifact of value.evidence.artifacts) {
       if (artifact.report?.gateId?.startsWith("P7-")) validateP7ReportDocument(artifact.report);
+      else if (Array.isArray(artifact.report?.rows)) {
+        // The closed receipt schema validates the row shape; gate evaluation
+        // binds the rows to this candidate and all three required backends.
+      }
       else if (artifact.report !== undefined) validateP8ReportDocument(artifact.report);
     }
   } else {
@@ -322,6 +331,19 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
   if (!verification.jobs.every((name) => jobs.get(name)?.conclusion === "success")) return false;
   if (!P8_SEMANTIC_REPORT_GATES.has(gate.id)
       && !verification.artifacts.every((name) => artifacts.get(artifactNameForRunAttempt(name, receipt.evidence.runAttempt))?.expired === false)) return false;
+  if (COVERAGE_BACKEND_GATES.has(gate.id)) {
+    const matrix = artifacts.get(`coverage-backends-${receipt.evidence.runAttempt}`);
+    if (!matrix?.report || matrix.expired !== false ||
+      !validCoverageBackendReport(matrix.report, receipt.candidateCommit)) return false;
+    for (const [index, name] of ["coverage-linux-gcc", "coverage-linux-clang", "coverage-windows-clang-cl"].entries()) {
+      const job = jobs.get(name);
+      if (job?.conclusion !== "success" || !/^[1-9][0-9]*$/u.test(job.id ?? "") ||
+        job.runnerImage !== matrix.report.rows[index].runnerImage) return false;
+    }
+    const matrixJob = jobs.get("coverage-backend-matrix");
+    if (matrixJob?.conclusion !== "success" || !/^[1-9][0-9]*$/u.test(matrixJob.id ?? "") ||
+      matrixJob.runnerImage !== "ubuntu-24.04") return false;
+  }
   if (gate.id === "P7-WINDOWS-WFP-OFFLINE" && receipt.evidence.event !== "push") return false;
   if (P7_SEMANTIC_REPORT_GATES.has(gate.id)) {
     if (verification.artifacts.length !== 1) return false;
@@ -357,6 +379,25 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
     } catch (error) {
       if (error?.code !== "PHASE9_P8_REPORT_INVALID") throw error;
       return false;
+    }
+  }
+  return true;
+}
+
+function validCoverageBackendReport(report, candidateCommit) {
+  if (report.schemaVersion !== 1 || report.candidateCommit !== candidateCommit ||
+    !Array.isArray(report.rows) || report.rows.length !== 3) return false;
+  const digests = new Set();
+  for (let index = 0; index < COVERAGE_BACKEND_ORDER.length; index++) {
+    const row = report.rows[index];
+    const backend = COVERAGE_BACKEND_ORDER[index];
+    const family = backend === "linux-gcc" ? "gcc" : backend === "linux-clang" ? "clang" : "clang-cl";
+    if (row.backend !== backend || row.status !== "passed" || row.candidateCommit !== candidateCommit ||
+      row.compiler.family !== family || digests.has(row.sourceArtifactSha256)) return false;
+    digests.add(row.sourceArtifactSha256);
+    for (const metric of [row.summary.functions, row.summary.lines, row.summary.branches]) {
+      if (!Number.isSafeInteger(metric.covered) || !Number.isSafeInteger(metric.total) ||
+        metric.covered < 1 || metric.covered > metric.total) return false;
     }
   }
   return true;

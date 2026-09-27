@@ -71,6 +71,7 @@ const evidencePath = join(
   "windows",
   "coverage-execution-report.json"
 );
+const backendEvidencePath = join(repositoryRoot, ".native-e2e", "artifacts", "windows", "windows-clang-cl-coverage-backend.json");
 const firewallGuardianStateRoot = join(
   repositoryRoot,
   ".native-e2e",
@@ -657,6 +658,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   skip: process.platform !== "win32" ? "Windows named-pipe/WFP smoke runs only on Windows" : false
 }, async (t) => {
   await rm(evidencePath, { force: true });
+  await rm(backendEvidencePath, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
@@ -664,6 +666,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   const tokens: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
+  let backendEvidenceBytes: Uint8Array | undefined;
 
   const stopService = async (): Promise<void> => {
     if (manager === undefined) return;
@@ -878,6 +881,21 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const evidence = buildEvidence(verifiedToolset.digest, coverageStartedAt, coverageFinishedAt);
         const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
         assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
+        if (process.env.GITHUB_ACTIONS === "true") {
+          const candidateCommit = process.env.UTIDE_CANDIDATE_SHA;
+          const runnerImage = process.env.UTIDE_COVERAGE_RUNNER_IMAGE;
+          assert.match(candidateCommit ?? "", /^[0-9a-f]{40}$/u);
+          assert.match(runnerImage ?? "", /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+          const backend = {
+            schemaVersion: 1, candidateCommit, backend: "windows-clang-cl", status: "passed",
+            runnerImage,
+            compiler: { family: "clang-cl", version: toolVersion, sha256: verifiedToolset.digest },
+            summary: report.summary,
+            sourceArtifactSha256: artifactByKind(artifacts, "coverage-json").metadata.sha256,
+          };
+          backendEvidenceBytes = Buffer.from(`${JSON.stringify(backend)}\n`, "utf8");
+          assertNoSensitiveBytes("coverage backend evidence", backendEvidenceBytes, sensitive);
+        }
         boundarySignal.throwIfAborted();
         return expectedEvidenceBytes;
       },
@@ -886,6 +904,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       cleanupFixture,
       publish: (bytes) => publishEvidenceAtomically(evidencePath, bytes)
     });
+    if (backendEvidenceBytes !== undefined) {
+      await publishEvidenceAtomically(backendEvidencePath, backendEvidenceBytes);
+    }
   } catch (error) {
     throw redactServiceError(error, sensitive);
   }

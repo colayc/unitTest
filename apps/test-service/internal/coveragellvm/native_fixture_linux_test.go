@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -72,6 +73,18 @@ func TestNativeLinuxLLVMFixture(t *testing.T) {
 	if err != nil || bytes.Contains(canonical, []byte(workspace)) {
 		t.Fatalf("normalized coverage retained host path: %v", err)
 	}
+	// This marker is consumed only after go test itself passes. It carries
+	// observed native coverage totals and digests, never host paths or source.
+	evidence, err := json.Marshal(struct {
+		CompilerVersion       string      `json:"compilerVersion"`
+		CompilerSha256        string      `json:"compilerSha256"`
+		Summary               interface{} `json:"summary"`
+		CoverageDocumentSha256 string      `json:"coverageDocumentSha256"`
+	}{toolset.Version(), toolset.compiler.sha256, first.Summary, fmt.Sprintf("%x", sha256.Sum256(canonical))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("UTIDE_NATIVE_LLVM_EVIDENCE=%s", evidence)
 }
 
 func nativeFixtureToolset(t *testing.T) *Toolset {

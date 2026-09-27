@@ -599,15 +599,15 @@
       "title": "Coverage failure and fault mapping",
       "verification": {
         "artifacts": [
-          "coverage-execution-windows-{runAttempt}",
+          "coverage-backends-{runAttempt}",
           "linux-gcc-coverage-report-{runAttempt}"
         ],
         "commands": [
           "go test ./apps/test-service/internal/coverageexec ./apps/test-service/internal/coveragerun"
         ],
         "jobs": [
-          "coverage-linux-gcc",
-          "verify-windows"
+          "coverage-backend-matrix",
+          "coverage-linux-gcc"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -634,15 +634,15 @@
       "title": "Deterministic coverage JSON JUnit and HTML reports",
       "verification": {
         "artifacts": [
-          "coverage-execution-windows-{runAttempt}",
+          "coverage-backends-{runAttempt}",
           "linux-gcc-coverage-report-{runAttempt}"
         ],
         "commands": [
           "go test ./apps/test-service/internal/coveragereport ./apps/test-service/internal/coveragerun"
         ],
         "jobs": [
-          "coverage-linux-gcc",
-          "verify-windows"
+          "coverage-backend-matrix",
+          "coverage-linux-gcc"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -665,13 +665,15 @@
       "title": "Linux Clang LLVM coverage execution",
       "verification": {
         "artifacts": [
-          "linux-clang-coverage-report"
+          "coverage-backends-{runAttempt}",
+          "linux-clang-coverage-backend-{runAttempt}"
         ],
         "commands": [
-          "pnpm test:e2e:native"
+          "go test -tags native_llvm_fixture ./apps/test-service/internal/coveragellvm ./apps/test-service/internal/coverageexec -run TestNativeLinuxLLVMFixture -count=1"
         ],
         "jobs": [
-          "verify-linux"
+          "coverage-backend-matrix",
+          "coverage-linux-clang"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -694,12 +696,15 @@
       "title": "Linux GCC gcovr coverage execution",
       "verification": {
         "artifacts": [
+          "coverage-backends-{runAttempt}",
+          "linux-gcc-coverage-backend-{runAttempt}",
           "linux-gcc-coverage-report-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test:coverage-service-smoke:linux"
         ],
         "jobs": [
+          "coverage-backend-matrix",
           "coverage-linux-gcc"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
@@ -759,13 +764,15 @@
       "title": "Windows clang-cl LLVM coverage execution",
       "verification": {
         "artifacts": [
-          "coverage-execution-windows-{runAttempt}"
+          "coverage-backends-{runAttempt}",
+          "windows-clang-cl-coverage-backend-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test:coverage-service-smoke"
         ],
         "jobs": [
-          "verify-windows"
+          "coverage-backend-matrix",
+          "coverage-windows-clang-cl"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }

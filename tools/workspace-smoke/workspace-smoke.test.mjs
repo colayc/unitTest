@@ -672,6 +672,36 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   }
 });
 
+test("Phase 10A publishes exact candidate-bound GCC, Clang, and clang-cl coverage backend evidence", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const clang = workflowJob(workflow, "coverage-linux-clang");
+  const windows = workflowJob(workflow, "coverage-windows-clang-cl");
+  const matrix = workflowJob(workflow, "coverage-backend-matrix");
+  const gcc = workflowJob(workflow, "coverage-linux-gcc");
+  for (const [job, backend, report] of [
+    [gcc, "linux-gcc", "linux-gcc-coverage-backend.json"],
+    [clang, "linux-clang", "linux-clang-coverage-backend.json"],
+    [windows, "windows-clang-cl", "windows-clang-cl-coverage-backend.json"],
+  ]) {
+    assert.match(job, new RegExp(`${backend}-coverage-backend-\\$\\{\\{ github\\.run_attempt \\}\\}`));
+    assert.ok(job.includes(report));
+    assert.match(job, /UTIDE_COVERAGE_RUNNER_IMAGE:/u);
+    assert.match(job, /UTIDE_CANDIDATE_SHA:\s*\$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u);
+    assert.doesNotMatch(job, /continue-on-error|if-no-files-found:\s*warn|@v[0-9]+\b/u);
+    for (const action of workflowActionUses(job)) assert.match(action, /@[0-9a-f]{40}$/u);
+  }
+  assert.match(clang, /TestNativeLinuxLLVMFixture/u);
+  assert.match(clang, /UTIDE_NATIVE_LLVM_BUNDLE/u);
+  assert.match(clang, /node tools\/linux-offline\/run\.mjs --allow-sudo-root/u);
+  const prepared = clang.indexOf("go mod download");
+  const native = clang.indexOf("TestNativeLinuxLLVMFixture");
+  assert.ok(prepared >= 0 && native > prepared);
+  assert.doesNotMatch(clang.slice(native), /go mod download|pnpm install|prepare:(?:coverage|framework)-bundle|actions\/cache@/u);
+  assert.match(matrix, /needs:\s*\n\s*- coverage-linux-gcc\s*\n\s*- coverage-linux-clang\s*\n\s*- coverage-windows-clang-cl/u);
+  assert.match(matrix, /native-report\.js --mode matrix/u);
+  assert.match(matrix, /coverage-backends-\$\{\{ github\.run_attempt \}\}/u);
+});
+
 test("dependency metadata uses the official npm registry", async () => {
   assert.equal((await readFile(".npmrc", "utf8")).trim(), "registry=https://registry.npmjs.org/");
   assert.doesNotMatch(await readFile("pnpm-lock.yaml", "utf8"), /registry\.npmmirror\.com/);

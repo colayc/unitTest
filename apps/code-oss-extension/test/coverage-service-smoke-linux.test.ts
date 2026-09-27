@@ -23,6 +23,7 @@ const timeout = 300_000;
 const projectId = "coverage-fixture";
 const coverageProfileId = "coverage-gcc";
 const evidencePath = join(root, ".native-e2e/artifacts/linux/coverage-execution-report.json");
+const backendEvidencePath = join(root, ".native-e2e/artifacts/linux/linux-gcc-coverage-backend.json");
 const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 type Framework = "cpputest" | "unity";
@@ -170,6 +171,7 @@ async function artifacts(client: ProtocolClient, run: CoverageRun, framework: Fr
 
 test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault mappings", { skip: process.platform !== "linux" ? "Linux-native smoke requires Linux" : false, timeout: 30 * 60_000 }, async () => {
   await rm(evidencePath, { force: true });
+  await rm(backendEvidencePath, { force: true });
   const startedAt = new Date().toISOString();
   const bundleInput = process.env.UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT;
   const lockedBundle = join(root, ".superpowers/runtime/coverage-bundle/linux-x64");
@@ -215,6 +217,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const faults: LinuxGccFaultEvidence[] = [];
     let unityBytes: Uint8Array | undefined;
     let toolchainDigest = "";
+    let toolchainVersion = "";
     for (const scenario of ["cpputest", "unity", "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"] as const) {
       const framework: Framework = scenario === "cpputest" ? "cpputest" : "unity";
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
@@ -302,6 +305,8 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const currentDigest = digest(JSON.stringify({ toolchainId: selected.toolchain.toolchainId, version: selected.toolchain.version }));
       if (!toolchainDigest) toolchainDigest = currentDigest;
       assert.equal(currentDigest, toolchainDigest);
+      if (!toolchainVersion) toolchainVersion = selected.toolchain.version;
+      assert.equal(selected.toolchain.version, toolchainVersion);
       for (let repeat = 0; repeat < (scenario === "unity" ? 2 : 1); repeat++) {
         // A completed native coverage run may refresh the generated catalog
         // (notably for Unity). Rebind both snapshot and catalog revision before
@@ -388,6 +393,24 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`);
     await rm(scratch, { recursive: true, force: true });
     await publishEvidenceAtomically(evidencePath, bytes);
+    if (process.env.GITHUB_ACTIONS === "true") {
+      const candidateCommit = process.env.UTIDE_CANDIDATE_SHA;
+      const runnerImage = process.env.UTIDE_COVERAGE_RUNNER_IMAGE;
+      assert.match(candidateCommit ?? "", /^[0-9a-f]{40}$/u);
+      assert.match(runnerImage ?? "", /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+      assert.equal(cases.length, 2);
+      const total = (name: "functions" | "lines" | "branches") => ({
+        covered: cases.reduce((sum, item) => sum + item.summary[name].covered, 0),
+        total: cases.reduce((sum, item) => sum + item.summary[name].total, 0),
+      });
+      const backend = {
+        schemaVersion: 1, candidateCommit, backend: "linux-gcc", status: "passed",
+        runnerImage, compiler: { family: "gcc", version: toolchainVersion, sha256: toolchainDigest },
+        summary: { functions: total("functions"), lines: total("lines"), branches: total("branches") },
+        sourceArtifactSha256: digest(bytes),
+      };
+      await publishEvidenceAtomically(backendEvidencePath, Buffer.from(`${JSON.stringify(backend)}\n`, "utf8"));
+    }
   } catch (error) { throw redactServiceError(error, sensitive); }
   finally { try { await manager?.stop(); } finally { await rm(scratch, { recursive: true, force: true }); } }
 });

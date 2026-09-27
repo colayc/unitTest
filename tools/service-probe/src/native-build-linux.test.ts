@@ -15,10 +15,15 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
-import { __testing as reportTesting } from "./native-report.js";
+import { __testing as reportTesting, parseNativeLLVMFixtureLog } from "./native-report.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 
 const trackedManifestPath = resolve(import.meta.dirname, "../../../tools/cmake-bundle/manifest.json");
+
+test("Linux LLVM native evidence cannot be inferred from a skipped or marker-only fixture", () => {
+  assert.throws(() => parseNativeLLVMFixtureLog("--- SKIP: TestNativeLinuxLLVMFixture (0.01s)\n"), /native LLVM fixture/u);
+  assert.throws(() => parseNativeLLVMFixtureLog('UTIDE_NATIVE_LLVM_EVIDENCE={"summary":{}}\n'), /native LLVM fixture/u);
+});
 
 test("required native toolchain parsing is closed and deterministic", () => {
   assert.deepEqual([...parseRequiredToolchains(undefined)], []);
