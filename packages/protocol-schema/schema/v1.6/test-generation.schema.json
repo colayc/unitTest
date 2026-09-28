@@ -256,12 +256,12 @@
     "reviewResolution": {
       "title": "ManagedReviewResolutionV16", "type": "object", "additionalProperties": false,
       "required": ["caseId", "choice"],
-      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "choice": { "$ref": "#/$defs/conflictChoice" } }
+      "properties": { "caseId": { "oneOf": [{ "$ref": "#/$defs/managedCaseId" }, { "type": "string", "maxLength": 250, "pattern": "^scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }] }, "choice": { "$ref": "#/$defs/conflictChoice" } }
     },
     "reviewApplyRequest": {
       "title": "ManagedReviewApplyRequestV16", "type": "object", "additionalProperties": false,
       "required": ["reviewId", "reviewDigest", "resolutions"],
-      "properties": { "reviewId": { "$ref": "#/$defs/id" }, "reviewDigest": { "$ref": "#/$defs/digest" }, "resolutions": { "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/reviewResolution" } } }
+      "properties": { "reviewId": { "$ref": "#/$defs/id" }, "reviewDigest": { "$ref": "#/$defs/digest" }, "resolutions": { "type": "array", "minItems": 0, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/reviewResolution" } } }
     },
     "reviewApplyResult": {
       "title": "ManagedReviewApplyResultV16", "type": "object", "additionalProperties": false,

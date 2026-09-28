@@ -8,6 +8,32 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
 
+func TestManagedGapIdentityPersistsWithoutChangingLegacyGapRequests(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	req := Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: hash, ProjectID: "core", Scope: ScopeCoverageGap,
+		CoverageReportID: strings.Repeat("2", 32), Framework: FrameworkAuto,
+		Goals: Goals{}, Budgets: Budgets{WallTimeMS: 1000, CandidateCount: 1, MemoryMiB: 64, Concurrency: 1},
+		CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: hash, CMakeTargetDigest: hash,
+		FrameworkBundleDigest: hash, AnalyzerBundleDigest: hash, BaselineReportDigest: hash, ProcessOwnerDigest: hash}
+	if err := ValidateRequest(req); err != nil {
+		t.Fatalf("legacy gap request rejected: %v", err)
+	}
+	req.ManagedGapID = strings.Repeat("3", 32)
+	if err := ValidateRequest(req); err != nil {
+		t.Fatalf("bound managed gap rejected: %v", err)
+	}
+	req.ManagedGapID = "forged"
+	if err := ValidateRequest(req); err == nil {
+		t.Fatal("malformed managed gap accepted")
+	}
+	req.Scope = ScopeWorkspace
+	req.CoverageReportID = ""
+	req.ManagedGapID = strings.Repeat("3", 32)
+	if err := ValidateRequest(req); err == nil {
+		t.Fatal("managed gap accepted outside report scope")
+	}
+}
+
 func TestManagedTargetResolvesOnlyExactCurrentIndexIDs(t *testing.T) {
 	report := strings.Repeat("a", 32)
 	generation := strings.Repeat("b", 64)

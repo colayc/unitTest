@@ -19,7 +19,7 @@ async function compileV16() {
 test("protocol 1.6 accepts all seven closed detail and managed-test routes", async () => {
   const { message } = await compileV16();
   const requests = await load("../fixtures/v1.6/methods.valid.json");
-  assert.equal(requests.length, 7);
+  assert.equal(new Set(requests.map((request) => request.method)).size, 7);
   for (const request of requests) assert.equal(message(request), true, `${request.method}: ${JSON.stringify(message.errors)}`);
   const old = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
   addFormats(old);

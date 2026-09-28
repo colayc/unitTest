@@ -18,6 +18,16 @@ func TestV16ReviewApplyRejectsWellFormedStaleDigestAndConflictingChoices(t *test
 	if !protocol.ValidManagedReviewApplyV16(apply, reviewID, current) {
 		t.Fatal("current digest and unique choice rejected")
 	}
+	ordinary := apply
+	ordinary.Resolutions = []generationv16.ManagedReviewResolutionV16{}
+	if !protocol.ValidManagedReviewApplyV16(ordinary, reviewID, current) {
+		t.Fatal("no-conflict review cannot be applied without inventing a choice")
+	}
+	scaffold := apply
+	scaffold.Resolutions = []generationv16.ManagedReviewResolutionV16{{CaseID: "scaffold:tests/generated/src/a_test.cpp", Choice: generationv16.KeepCurrent}}
+	if !protocol.ValidManagedReviewApplyV16(scaffold, reviewID, current) {
+		t.Fatal("publisher-required scaffold choice cannot cross the protocol")
+	}
 	stale := apply
 	stale.ReviewDigest = strings.Repeat("d", 64)
 	if protocol.ValidManagedReviewApplyV16(stale, reviewID, current) {

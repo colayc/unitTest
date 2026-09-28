@@ -37,9 +37,13 @@ type CandidateSet struct {
 
 type ManagedCandidateSet struct {
 	ReviewID, ToolchainID, ValidationReceiptDigest, CMakePath string
-	ValidationReceipt                                         []byte
-	Inputs                                                    []managedtest.ReconcileInput
-	Records                                                   []managedtest.Record
+	// ReviewArtifactDigest is the recomputed per-file reconciliation digest.
+	// When nonempty, ManagedDecision.ReviewDigest is the durable manifest CAS
+	// identity rather than the presentation artifact identity.
+	ReviewArtifactDigest string
+	ValidationReceipt    []byte
+	Inputs               []managedtest.ReconcileInput
+	Records              []managedtest.Record
 }
 
 type Plan = PublishPlan

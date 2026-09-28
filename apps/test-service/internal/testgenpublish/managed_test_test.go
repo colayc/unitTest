@@ -104,6 +104,31 @@ func TestManagedPublisherAndDurableRegistrySurviveRestart(t *testing.T) {
 	}
 }
 
+func TestManagedPublicationRetainsDurableManifestIdentity(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	decision := f.decision(t)
+	artifactDigest := decision.ReviewDigest
+	decision.ReviewDigest = strings.Repeat("a", 64)
+	f.set.Managed.ReviewArtifactDigest = artifactDigest
+	plan, err := f.p.PlanManaged(context.Background(), f.set, decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.p.PublishManaged(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	receipt, found, err := f.p.ManagedReceipt(context.Background(), decision)
+	if err != nil || !found || receipt.ManagedReviewDigest != decision.ReviewDigest || receipt.ManagedReviewID != decision.ReviewID {
+		t.Fatalf("bound receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+	wrong := decision
+	wrong.Resolutions = map[string]managedtest.ConflictChoice{f.record.CaseID: managedtest.KeepCurrent}
+	if _, found, err := f.p.ManagedReceipt(context.Background(), wrong); err != nil || found {
+		t.Fatalf("different choices matched receipt: found=%v err=%v", found, err)
+	}
+}
+
 func TestManagedTwoBlocksInOneFileAdvanceTogether(t *testing.T) {
 	f := newManagedFixture(t)
 	defer f.close(t)

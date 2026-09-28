@@ -455,6 +455,90 @@ func (p *Publisher) Receipt(ctx context.Context, req AcceptRequest) (Receipt, bo
 	}
 	return receipt, true, nil
 }
+
+// ManagedPublicationReady is a wiring gate, not a guarantee that a particular
+// review is still current. The latter is rechecked at plan and commit time.
+func (p *Publisher) ManagedPublicationReady() bool {
+	return p != nil && p.root != nil && p.journal != nil && p.verify != nil &&
+		p.ManagedRegistry != nil && p.ManagedSelectionValidator != nil
+}
+
+// ReadManagedPreimage uses the same rooted, no-symlink read boundary as the
+// publisher. The caller compares it with the authenticated durable review.
+func (p *Publisher) ReadManagedPreimage(ctx context.Context, relative string) ([]byte, error) {
+	if !p.ManagedPublicationReady() || ctx == nil || !generatedTestPath(relative) {
+		return nil, ErrInvalidPlan
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	data, _, exists, _, err := p.readTarget(relative)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if !exists {
+		return nil, nil
+	}
+	return bytes.Clone(data), nil
+}
+
+// ManagedReceipt finds a previously committed review decision after a
+// service restart. It never reconstructs a plan or writes to the workspace.
+func (p *Publisher) ManagedReceipt(ctx context.Context, decision ManagedDecision) (Receipt, bool, error) {
+	if !p.ManagedPublicationReady() || ctx == nil || !validHex(decision.ReviewID, 32) || !validHex(decision.ReviewDigest, 64) {
+		return Receipt{}, false, ErrInvalidPlan
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	root, err := p.journal.Open(".")
+	if err != nil {
+		return Receipt{}, false, ErrConflict
+	}
+	defer root.Close()
+	wantDecision := digestManagedDecision(decision)
+	var found Receipt
+	for {
+		if err := ctx.Err(); err != nil {
+			return Receipt{}, false, err
+		}
+		entries, readErr := root.ReadDir(128)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return Receipt{}, false, ErrConflict
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, "receipt-") || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			confirmation := strings.TrimSuffix(strings.TrimPrefix(name, "receipt-"), ".json")
+			if !validHex(confirmation, 64) {
+				return Receipt{}, false, ErrConflict
+			}
+			receipt, ok, err := p.readReceipt(confirmation)
+			if err != nil || !ok {
+				return Receipt{}, false, ErrConflict
+			}
+			if receipt.ManagedReviewID != decision.ReviewID || receipt.ManagedReviewDigest != decision.ReviewDigest || receipt.ManagedDecisionDigest != wantDecision {
+				continue
+			}
+			if found.ConfirmationDigest != "" || !validManagedSelectedReceipt(receipt) || p.verifyReceiptCurrent(receipt) != nil {
+				return Receipt{}, false, ErrConflict
+			}
+			if _, err := p.journal.Lstat(journalName(confirmation)); err == nil {
+				return Receipt{}, false, ErrRecoveryRequired
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return Receipt{}, false, ErrConflict
+			}
+			found = receipt
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	return found, found.ConfirmationDigest != "", nil
+}
 func matchesRequest(p PublishPlan, r AcceptRequest) bool {
 	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
 }

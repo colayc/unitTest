@@ -136,14 +136,17 @@ type SnapshotIdentity struct {
 // Request contains only service-resolved identities and closed protocol inputs.
 // No source, executable, host path, or process environment may be added here.
 type Request struct {
-	IdempotencyKey         string    `json:"idempotencyKey"`
-	WorkspaceGeneration    string    `json:"workspaceGeneration"`
-	ProjectID              string    `json:"projectId"`
-	Scope                  Scope     `json:"scope"`
-	SymbolID               string    `json:"symbolId,omitempty"`
-	File                   string    `json:"file,omitempty"`
-	TargetID               string    `json:"targetId,omitempty"`
-	CoverageReportID       string    `json:"coverageReportId,omitempty"`
+	IdempotencyKey      string `json:"idempotencyKey"`
+	WorkspaceGeneration string `json:"workspaceGeneration"`
+	ProjectID           string `json:"projectId"`
+	Scope               Scope  `json:"scope"`
+	SymbolID            string `json:"symbolId,omitempty"`
+	File                string `json:"file,omitempty"`
+	TargetID            string `json:"targetId,omitempty"`
+	CoverageReportID    string `json:"coverageReportId,omitempty"`
+	// ManagedGapID binds a v1.6 report-gap selection to the durable run. It is
+	// optional for legacy v1.5 coverage-gap requests and absent in other scopes.
+	ManagedGapID           string    `json:"managedGapId,omitempty"`
 	Framework              Framework `json:"framework"`
 	Goals                  Goals     `json:"goals"`
 	Budgets                Budgets   `json:"budgets"`
@@ -195,23 +198,23 @@ func ValidateRequest(r Request) error {
 	}
 	switch r.Scope {
 	case ScopeSymbol:
-		if !validSymbol(r.SymbolID) || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" {
+		if !validSymbol(r.SymbolID) || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeFile:
-		if !validRelativePath(r.File) || r.SymbolID != "" || r.TargetID != "" || r.CoverageReportID != "" {
+		if !validRelativePath(r.File) || r.SymbolID != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeTarget:
-		if !validDigest(r.TargetID) || r.SymbolID != "" || r.File != "" || r.CoverageReportID != "" {
+		if !validDigest(r.TargetID) || r.SymbolID != "" || r.File != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeWorkspace:
-		if r.SymbolID != "" || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" {
+		if r.SymbolID != "" || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeCoverageGap:
-		if !validID(r.CoverageReportID) || r.SymbolID != "" || r.File != "" || r.TargetID != "" {
+		if !validID(r.CoverageReportID) || r.ManagedGapID != "" && !validID(r.ManagedGapID) || r.SymbolID != "" || r.File != "" || r.TargetID != "" {
 			return ErrInvalid
 		}
 	default:

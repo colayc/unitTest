@@ -3,8 +3,10 @@ package protocol
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"strings"
 	"unicode/utf8"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 )
 
@@ -19,13 +21,14 @@ func ValidManagedReviewApplyV16(request generationv16.ManagedReviewApplyRequestV
 		!validLowerHex(currentReviewID, 32) || !validLowerHex(currentDigest, 64) ||
 		subtle.ConstantTimeCompare([]byte(request.ReviewID), []byte(currentReviewID)) != 1 ||
 		subtle.ConstantTimeCompare([]byte(request.ReviewDigest), []byte(currentDigest)) != 1 ||
-		len(request.Resolutions) < 1 || len(request.Resolutions) > 200 {
+		len(request.Resolutions) > 200 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(request.Resolutions))
 	for _, resolution := range request.Resolutions {
-		if len(resolution.CaseID) != 36 || resolution.CaseID[:4] != "utc_" ||
-			!validLowerHex(resolution.CaseID[4:], 32) || !validManagedChoiceV16(resolution.Choice) {
+		caseID := len(resolution.CaseID) == 36 && strings.HasPrefix(resolution.CaseID, "utc_") && validLowerHex(resolution.CaseID[4:], 32)
+		scaffold := strings.HasPrefix(resolution.CaseID, "scaffold:") && managedtest.ValidTestPath(strings.TrimPrefix(resolution.CaseID, "scaffold:"))
+		if (!caseID && !scaffold) || !validManagedChoiceV16(resolution.Choice) {
 			return false
 		}
 		if _, duplicate := seen[resolution.CaseID]; duplicate {

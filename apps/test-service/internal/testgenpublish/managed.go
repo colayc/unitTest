@@ -38,6 +38,7 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 	if p == nil || ctx == nil || p.ManagedRegistry == nil || p.ManagedSelectionValidator == nil || candidate.Managed == nil ||
 		!validHex(candidate.Managed.ReviewID, 32) || !validHex(decision.ReviewID, 32) ||
 		!validHex(decision.ReviewDigest, 64) || decision.ReviewID != candidate.Managed.ReviewID ||
+		candidate.Managed.ReviewArtifactDigest != "" && !validHex(candidate.Managed.ReviewArtifactDigest, 64) ||
 		!validHex(candidate.Managed.ValidationReceiptDigest, 64) || len(candidate.Managed.ValidationReceipt) == 0 || len(candidate.Managed.ValidationReceipt) > 1<<20 || digest(candidate.Managed.ValidationReceipt) != candidate.Managed.ValidationReceiptDigest || candidate.Managed.ToolchainID == "" ||
 		len(candidate.Managed.Inputs) == 0 || len(candidate.Managed.Inputs) > maxFiles ||
 		len(candidate.Managed.Records) == 0 || len(candidate.Managed.Records) > 1000 || len(decision.Resolutions) > 200 {
@@ -200,14 +201,18 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 	if len(required) != len(decision.Resolutions) {
 		return Plan{}, ErrInvalidPlan
 	}
+	artifactDigest := decision.ReviewDigest
+	if candidate.Managed.ReviewArtifactDigest != "" {
+		artifactDigest = candidate.Managed.ReviewArtifactDigest
+	}
 	if len(reviews) == 1 {
-		if reviews[0].Digest() != decision.ReviewDigest {
+		if reviews[0].Digest() != artifactDigest {
 			return Plan{}, ErrConflict
 		}
 	} else {
 		sort.Slice(reviews, func(i, j int) bool { return reviews[i].Path < reviews[j].Path })
 		encoded, _ := json.Marshal(reviews)
-		if digest(append([]byte("managed-review-set-v1\x00"), encoded...)) != decision.ReviewDigest {
+		if digest(append([]byte("managed-review-set-v1\x00"), encoded...)) != artifactDigest {
 			return Plan{}, ErrConflict
 		}
 	}
@@ -396,9 +401,9 @@ func digestManagedEvidence(value *ManagedCandidateSet) string {
 	}
 	sort.Slice(accepted, func(i, j int) bool { return accepted[i].CaseID < accepted[j].CaseID })
 	encoded, _ := json.Marshal(struct {
-		CMakePath, ToolchainID, ValidationReceiptDigest string
-		Records, Accepted                               []managedtest.Record
-	}{value.CMakePath, value.ToolchainID, value.ValidationReceiptDigest, records, accepted})
+		CMakePath, ToolchainID, ValidationReceiptDigest, ReviewArtifactDigest string
+		Records, Accepted                                                     []managedtest.Record
+	}{value.CMakePath, value.ToolchainID, value.ValidationReceiptDigest, value.ReviewArtifactDigest, records, accepted})
 	return digest(append([]byte("managed-evidence-v1\x00"), encoded...))
 }
 

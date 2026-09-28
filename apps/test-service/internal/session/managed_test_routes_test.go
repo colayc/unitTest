@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/protocol"
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/session"
@@ -24,6 +25,65 @@ type managedStartResolverBackend struct {
 	*managedGenerationBackend
 	gapID           string
 	resolutionCalls int
+}
+
+type liveManagedBackend struct {
+	*managedStartResolverBackend
+	starts, applies int
+}
+
+type managedRecordsBackend struct {
+	*managedGenerationBackend
+	called bool
+	page   generationv16.ManagedTestRecordPageV16
+}
+
+func (b *managedRecordsBackend) ListManagedTestRecords(_ context.Context, _ string, _ generationv16.ManagedRecordsRequestV16) (generationv16.ManagedTestRecordPageV16, error) {
+	b.called = true
+	return b.page, nil
+}
+
+func TestExplicitManagedRecordsRouteRequiresBoundedProvider(t *testing.T) {
+	report, workspace := strings.Repeat("4", 32), strings.Repeat("2", 64)
+	backend := &managedRecordsBackend{managedGenerationBackend: &managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true},
+		page: generationv16.ManagedTestRecordPageV16{CoverageReportID: report, WorkspaceGeneration: workspace, Items: []generationv16.ManagedTestRecordV16{}}}
+	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, backend, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+	s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16}}))
+	input := map[string]any{"projectId": "core", "workspaceGeneration": workspace, "coverageReportId": report, "limit": 1}
+	got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "managedTests/records/list", input))
+	if got.Response.Error != nil || !backend.called {
+		t.Fatalf("records=%#v called=%v", got.Response, backend.called)
+	}
+	backend.page.WorkspaceGeneration = strings.Repeat("3", 64)
+	bad := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "managedTests/records/list", input))
+	if bad.Response.Error == nil || bad.Response.Error.Code != "SERVICE_UNHEALTHY" {
+		t.Fatalf("unbound page=%#v", bad.Response)
+	}
+}
+
+func (b *liveManagedBackend) StartManaged(_ context.Context, _ string, _ generationv16.TestGenerationStartRequestV16) (generationv16.TestGenerationRunV16, error) {
+	b.starts++
+	return generationv16.TestGenerationRunV16{RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core", WorkspaceGeneration: strings.Repeat("2", 64), State: generationv16.Queued}, nil
+}
+func (b *liveManagedBackend) ManagedApplyReady() bool { return true }
+func (b *liveManagedBackend) ApplyManagedReview(_ context.Context, request managedtest.ApplyRequest) (testgendomain.Run, error) {
+	b.applies++
+	return testgendomain.Run{State: testgendomain.StateAccepted, Request: testgendomain.Request{SessionOwnerDigest: request.Owner}}, nil
+}
+
+func TestExplicitManagedStartAndApplyRoutes(t *testing.T) {
+	gapID, reportID, reviewID, reviewDigest := strings.Repeat("3", 32), strings.Repeat("4", 32), strings.Repeat("8", 32), strings.Repeat("9", 64)
+	backend := &liveManagedBackend{managedStartResolverBackend: &managedStartResolverBackend{managedGenerationBackend: &managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}, gapID: gapID}}
+	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, backend, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+	s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16}}))
+	start := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/start", map[string]any{"idempotencyKey": strings.Repeat("1", 32), "workspaceGeneration": strings.Repeat("2", 64), "projectId": "core", "scope": "coverage-gap", "coverageGapId": gapID, "coverageReportId": reportID, "framework": "auto", "goals": map[string]any{"functionPercent": 70, "linePercent": 80, "branchPercent": 60}, "budgets": map[string]any{"wallTimeMs": 60000, "candidateCount": 2, "memoryMiB": 64, "concurrency": 1}}))
+	if start.Response.Error != nil || backend.starts != 1 || backend.resolutionCalls != 1 {
+		t.Fatalf("start=%#v calls=%d/%d", start.Response, backend.starts, backend.resolutionCalls)
+	}
+	apply := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "managedTests/reviews/apply", map[string]any{"reviewId": reviewID, "reviewDigest": reviewDigest, "resolutions": []any{}}))
+	if apply.Response.Error != nil || backend.applies != 1 {
+		t.Fatalf("apply=%#v calls=%d", apply.Response, backend.applies)
+	}
 }
 
 func (b *managedStartResolverBackend) ResolveManagedStart(_ context.Context, _ string, input generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error) {

@@ -25,6 +25,7 @@ type ManagedReviewStore interface {
 	LookupManagedReviewBinding(context.Context, string, string) (managedtest.ReviewBinding, error)
 	GetManagedReview(context.Context, managedtest.ReviewGetQuery) (managedtest.ReviewPage, error)
 	LookupManagedReviewSelection(context.Context, managedtest.ReviewBinding, string, string, []string) ([]managedtest.ReviewCandidate, error)
+	ReadManagedReviewDraft(context.Context, managedtest.ReviewBinding, string, string) (managedtest.ReviewDraft, error)
 }
 
 // LookupManagedReviewBinding derives the complete binding from authenticated
@@ -376,6 +377,31 @@ func (s *Store) LookupManagedReviewSelection(ctx context.Context, binding manage
 		return nil, storageError("commit managed selection read", err)
 	}
 	return selected, nil
+}
+
+// ReadManagedReviewDraft returns the complete, MAC-checked immutable review
+// under its exact owner/run/revision/workspace/report binding. It is an
+// internal publication input, never a protocol response containing source.
+func (s *Store) ReadManagedReviewDraft(ctx context.Context, binding managedtest.ReviewBinding, reviewID, reviewDigest string) (managedtest.ReviewDraft, error) {
+	if !managedtest.ValidDigest(reviewDigest) {
+		return managedtest.ReviewDraft{}, task.ErrInvalidArgument
+	}
+	tx, stored, _, err := s.reviewRead(ctx, binding, reviewID)
+	if err != nil {
+		return managedtest.ReviewDraft{}, err
+	}
+	defer tx.Rollback()
+	if stored.digest != reviewDigest {
+		return managedtest.ReviewDraft{}, task.ErrConflict
+	}
+	result := managedtest.ReviewDraft{Manifest: stored.manifest, Candidates: stored.candidates}
+	if !managedtest.ValidReviewDraft(result) {
+		return managedtest.ReviewDraft{}, task.ErrStorageUnavailable
+	}
+	if err := tx.Commit(); err != nil {
+		return managedtest.ReviewDraft{}, storageError("commit managed review draft read", err)
+	}
+	return result, nil
 }
 
 func (s *Store) MarkManagedReviewStale(ctx context.Context, owner, reviewID string) error {

@@ -114,12 +114,22 @@ func TestManagedReviewPersistsExactBytesAndIsOwnerBoundAfterRestart(t *testing.T
 	if err != nil || string(selected[0].GeneratedBytes) != "new exact bytes\n" {
 		t.Fatalf("selected=%+v err=%v", selected, err)
 	}
+	whole, err := s.ReadManagedReviewDraft(ctx, q.Binding, q.ReviewID, draft.Manifest.Digest())
+	if err != nil || whole.Manifest != draft.Manifest || len(whole.Candidates) != 1 || string(whole.Candidates[0].CurrentBytes) != "old exact bytes\n" {
+		t.Fatalf("whole review=%+v err=%v", whole, err)
+	}
+	if _, err := s.ReadManagedReviewDraft(ctx, q.Binding, q.ReviewID, strings.Repeat("f", 64)); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("changed review digest=%v", err)
+	}
 	q.Binding.OwnerDigest = strings.Repeat("a", 64)
 	if _, err := s.GetManagedReview(ctx, q); !errors.Is(err, task.ErrNotFound) {
 		t.Fatalf("cross owner get=%v", err)
 	}
 	if _, err := s.LookupManagedReviewSelection(ctx, q.Binding, q.ReviewID, draft.Manifest.Digest(), []string{draft.Candidates[0].CandidateID}); !errors.Is(err, task.ErrNotFound) {
 		t.Fatalf("cross owner selection=%v", err)
+	}
+	if _, err := s.ReadManagedReviewDraft(ctx, q.Binding, q.ReviewID, draft.Manifest.Digest()); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("cross owner whole review=%v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 
 	"unit-test-ide.local/test-service/internal/managedtest"
@@ -29,6 +30,21 @@ type ManagedReviewPageBackend interface {
 
 type ManagedStartResolverBackend interface {
 	ResolveManagedStart(context.Context, string, generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error)
+}
+
+// These opt-in interfaces keep the legacy read-only v1.6 facade from
+// accidentally acquiring a write route merely by implementing its older
+// ManagedGenerationBackend method set.
+type ManagedStartBackend interface {
+	StartManaged(context.Context, string, generationv16.TestGenerationStartRequestV16) (generationv16.TestGenerationRunV16, error)
+}
+
+type ManagedApplyBackend interface {
+	ManagedApplyReady() bool
+}
+
+type ManagedRecordsPageBackend interface {
+	ListManagedTestRecords(context.Context, string, generationv16.ManagedRecordsRequestV16) (generationv16.ManagedTestRecordPageV16, error)
 }
 
 func validManagedStart(input generationv16.TestGenerationStartRequestV16) bool {
@@ -93,18 +109,61 @@ func (s *Session) handleManagedGeneration(ctx context.Context, version string, r
 		if _, err := resolver.ResolveManagedStart(ctx, s.generationOwner(), start); err != nil {
 			return generationFailure(version, request, err)
 		}
+		starter, ok := s.generationBackend.(ManagedStartBackend)
+		if !ok {
+			return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed generation is not available", false))
+		}
+		run, err := starter.StartManaged(ctx, s.generationOwner(), start)
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		if run.ProjectID != start.ProjectID || run.WorkspaceGeneration != start.WorkspaceGeneration || !validID(run.RunID) || !validID(run.TaskID) {
+			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed generation run is invalid", true))
+		}
+		return handled(protocol.Success(version, request, run))
 	}
 	// Candidate generation is deliberately not wired to this read-only route.
 	return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed generation ID resolution is not available", false))
 }
 
 func (s *Session) handleManagedTests(ctx context.Context, version string, request protocol.Request) HandleResult {
-	if request.Method == "managedTests/reviews/apply" {
-		return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review apply is not available", false))
-	}
 	provider, ok := s.generationBackend.(ManagedGenerationBackend)
 	if !ok || !provider.ManagedTestsReady() || s.managedTests == nil || !s.managedTests.ManagedTestsReady() {
 		return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed test service is not available", false))
+	}
+	if request.Method == "managedTests/records/list" {
+		reader, ok := s.generationBackend.(ManagedRecordsPageBackend)
+		if !ok {
+			return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed record read is not available", false))
+		}
+		input, err := decodeStrict[generationv16.ManagedRecordsRequestV16](request.Payload)
+		if err != nil || !validProjectID(input.ProjectID) || !validHash(input.WorkspaceGeneration) || !validID(input.CoverageReportID) ||
+			input.FileID != nil && !validID(*input.FileID) || !validGenerationPage(input.Cursor, input.Limit) ||
+			input.Status != nil && !managedtest.ValidStatus(managedtest.Status(*input.Status)) {
+			return invalidPayload(version, request)
+		}
+		limit := 200
+		if input.Limit != nil {
+			limit = int(*input.Limit)
+		}
+		page, err := reader.ListManagedTestRecords(ctx, s.generationOwner(), input)
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		encoded, encodeErr := json.Marshal(page)
+		if encodeErr != nil || len(encoded) > 512<<10 || page.CoverageReportID != input.CoverageReportID ||
+			page.WorkspaceGeneration != input.WorkspaceGeneration || len(page.Items) > limit ||
+			page.NextCursor != nil && (len(*page.NextCursor) == 0 || len(*page.NextCursor) > 4096) {
+			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed record page is invalid", true))
+		}
+		for _, item := range page.Items {
+			if len(item.CaseID) != 36 || item.CaseID[:4] != "utc_" || !validID(item.CaseID[4:]) ||
+				!validID(item.FileID) || !validID(item.FunctionID) || !validHash(item.AcceptedDigest) || !validHash(item.CurrentDigest) ||
+				!managedtest.ValidStatus(managedtest.Status(item.Status)) {
+				return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed record item is invalid", true))
+			}
+		}
+		return handled(protocol.Success(version, request, page))
 	}
 	if request.Method == "managedTests/reviews/get" {
 		reader, ok := s.generationBackend.(ManagedReviewPageBackend)
@@ -130,6 +189,28 @@ func (s *Session) handleManagedTests(ctx context.Context, version string, reques
 			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed review page is invalid", true))
 		}
 		return handled(protocol.Success(version, request, page))
+	}
+	if request.Method == "managedTests/reviews/apply" {
+		apply, ok := s.generationBackend.(ManagedApplyBackend)
+		if !ok || !apply.ManagedApplyReady() {
+			return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review apply is not available", false))
+		}
+		input, err := decodeStrict[generationv16.ManagedReviewApplyRequestV16](request.Payload)
+		if err != nil || !protocol.ValidManagedReviewApplyV16(input, input.ReviewID, input.ReviewDigest) {
+			return invalidPayload(version, request)
+		}
+		resolutions := make(map[string]managedtest.ConflictChoice, len(input.Resolutions))
+		for _, item := range input.Resolutions {
+			resolutions[item.CaseID] = managedtest.ConflictChoice(item.Choice)
+		}
+		run, err := provider.ApplyManagedReview(ctx, managedtest.ApplyRequest{Owner: s.generationOwner(), ReviewID: input.ReviewID, ReviewDigest: input.ReviewDigest, Resolutions: resolutions})
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		if run.State != testgendomain.StateAccepted || run.Request.SessionOwnerDigest != s.generationOwner() {
+			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed review outcome is not confirmed", true))
+		}
+		return handled(protocol.Success(version, request, generationv16.ManagedReviewApplyResultV16{Applied: true, ReviewID: input.ReviewID, ReviewDigest: input.ReviewDigest}))
 	}
 	return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review lifecycle is not available", false))
 }

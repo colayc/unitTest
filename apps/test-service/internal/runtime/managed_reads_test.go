@@ -17,6 +17,7 @@ import (
 type managedReadFixture struct {
 	binding managedtest.ReviewBinding
 	page    managedtest.ReviewPage
+	draft   managedtest.ReviewDraft
 	index   coveragedetail.Index
 	ready   bool
 }
@@ -71,6 +72,12 @@ func (f *managedReadFixture) GetManagedReview(_ context.Context, q managedtest.R
 		return managedtest.ReviewPage{}, task.ErrConflict
 	}
 	return f.page, nil
+}
+func (f *managedReadFixture) ReadManagedReviewDraft(_ context.Context, binding managedtest.ReviewBinding, reviewID, digest string) (managedtest.ReviewDraft, error) {
+	if binding != f.binding || reviewID != f.draft.Manifest.ReviewID || digest != f.draft.Manifest.Digest() {
+		return managedtest.ReviewDraft{}, task.ErrConflict
+	}
+	return f.draft, nil
 }
 func (f *managedReadFixture) ReadCurrentCoverageIndex(_ context.Context, q coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
 	if q.ProjectID != f.index.ProjectID || q.ReportID != f.index.ReportID || q.WorkspaceGeneration != f.index.WorkspaceGeneration {
