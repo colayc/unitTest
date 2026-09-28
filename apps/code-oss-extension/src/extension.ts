@@ -17,6 +17,10 @@ import {
   type StatusBarLike
 } from "./commands.js";
 import { createCoverageController, type CoverageController } from "./coverage-controller.js";
+import { CoverageDetailTree, type CoverageFilter, type CoverageTreeNode } from "./coverage-detail-tree.js";
+import { CoverageDecorations, type LineDecoration } from "./coverage-decorations.js";
+import { coverageTreeItem } from "./coverage-viewer.js";
+import { verifyCoverageDetailLocation } from "./coverage-sources.js";
 import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
 import {
   TestingApiAdapter,
@@ -45,6 +49,9 @@ export interface ExtensionHost extends CommandHost {
   createStatusBarItem(): StatusBarLike;
   openCoverageHtml?: (html: string) => void | PromiseLike<void>;
   openCoverageSource?: (path: string) => void | PromiseLike<void>;
+  openCoverageLocation?: (path: string, line: number) => void | PromiseLike<void>;
+  setCoverageDetailsAvailable?: (available: boolean) => void | PromiseLike<void>;
+  createCoverageDetailView?: (tree: CoverageDetailTree) => CoverageDetailView;
   pickCoverageSource?: (sources: readonly CoverageSourceSnapshotV14[]) => CoverageSourceSnapshotV14 | undefined | PromiseLike<CoverageSourceSnapshotV14 | undefined>;
   showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
   confirmGeneration?: (message: string) => boolean | PromiseLike<boolean>;
@@ -55,6 +62,12 @@ export interface ExtensionHost extends CommandHost {
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
+}
+
+export interface CoverageDetailView extends DisposableLike {
+  refresh(): void;
+  showDecorations(path: string, items: readonly LineDecoration[]): void;
+  clearDecorations(): void;
 }
 
 export type LifecycleManager = CommandManager;
@@ -220,6 +233,11 @@ class ExtensionController {
   readonly #stopTimeoutMs: number;
   #testingAdapter: TestingApiAdapter | undefined;
   #coverageController: CoverageController | undefined;
+  #detailTree: CoverageDetailTree | undefined;
+  #detailView: CoverageDetailView | undefined;
+  #decorations: CoverageDecorations | undefined;
+  #decorationPath: string | undefined;
+  #detailRefreshEpoch = 0;
   #generationController: TestGenerationController | undefined;
   #generationWorkspaceGeneration = "";
   #generationProjectId = "";
@@ -271,6 +289,26 @@ class ExtensionController {
     }
     this.#bindTestingSession();
 
+    this.#detailTree = new CoverageDetailTree(() => {
+      const catalog = this.#testingAdapter?.catalogState;
+      const state = this.#coverageController?.getState();
+      return {
+        client: this.#testingClient(),
+        workspaceGeneration: catalog?.workspaceGeneration ?? "",
+        projectId: catalog?.projectId ?? "",
+        reportId: state?.state === "available" ? state.reportId ?? "" : ""
+      };
+    });
+    this.#detailView = this.host.createCoverageDetailView?.(this.#detailTree);
+    if (this.#detailView) this.host.context.subscriptions.push(this.#detailView);
+    void this.host.setCoverageDetailsAvailable?.(false);
+    this.#decorations = new CoverageDecorations(() => {
+      const binding = this.#detailTree?.binding;
+      return { client: binding?.client, workspaceGeneration: binding?.workspaceGeneration ?? "", reportId: binding?.reportId ?? "", limit: this.#detailTree?.linePageLimit };
+    }, (items) => {
+      if (this.#decorationPath && items.length > 0) this.#detailView?.showDecorations(this.#decorationPath, items);
+      else this.#detailView?.clearDecorations();
+    });
     this.#coverageController = createCoverageController({
       readContext: () => {
         const catalog = this.#testingAdapter?.catalogState;
@@ -282,7 +320,8 @@ class ExtensionController {
           catalog,
           coverageProfileId: this.host.configuration("coverageProfileId", "coverage-debug")
         };
-      }
+      },
+      onStateChanged: () => { void this.#refreshCoverageDetails(); }
     });
     this.host.context.subscriptions.push(this.#coverageController);
 
@@ -316,7 +355,13 @@ class ExtensionController {
       this.#status,
       this.host,
       this.#output,
-      () => this.host.workspaceSnapshot().workspaceRoot
+      () => this.host.workspaceSnapshot().workspaceRoot,
+      {
+        available: () => this.#detailTree?.available ?? false,
+        select: (node) => this.#openCoverageDetail(node),
+        filter: (value) => this.#filterCoverageDetails(value),
+        loadMore: async (node) => { await this.#detailTree?.children(node); this.#detailView?.refresh(); }
+      }
     );
     registerTestGenerationCommands(
       this.host.context,
@@ -341,6 +386,7 @@ class ExtensionController {
     if (this.#deactivation) return this.#deactivation;
     this.#deactivating = true;
     this.#testingAdapter?.close();
+    this.#clearCoverageDetails();
     this.#coverageController?.dispose();
     this.#generationController?.dispose();
     const transitions = this.#transitionTail.catch(() => undefined);
@@ -469,6 +515,7 @@ class ExtensionController {
 
   #invalidateTestingSession(): void {
     this.#testingSessionRoot = undefined;
+    this.#clearCoverageDetails();
     void this.#refreshTesting();
   }
 
@@ -480,6 +527,47 @@ class ExtensionController {
       this.#generationWorkspaceGeneration = "";
       this.#generationProjectId = "";
     }
+  }
+
+  #clearCoverageDetails(): void {
+    this.#detailRefreshEpoch++;
+    this.#detailTree?.invalidate();
+    this.#decorationPath = undefined;
+    this.#decorations?.clear();
+    this.#detailView?.refresh();
+    void this.host.setCoverageDetailsAvailable?.(false);
+  }
+
+  async #refreshCoverageDetails(): Promise<void> {
+    this.#clearCoverageDetails();
+    if (!this.#detailTree || this.#deactivating) return;
+    const epoch = this.#detailRefreshEpoch;
+    const available = await this.#detailTree.refresh();
+    if (!available || this.#deactivating || epoch !== this.#detailRefreshEpoch) return;
+    await this.host.setCoverageDetailsAvailable?.(true);
+    if (epoch !== this.#detailRefreshEpoch) { void this.host.setCoverageDetailsAvailable?.(false); return; }
+    this.#detailView?.refresh();
+  }
+
+  #filterCoverageDetails(value: CoverageFilter): void {
+    this.#detailTree?.setFilter(value);
+    this.#detailView?.refresh();
+  }
+
+  async #openCoverageDetail(node: CoverageTreeNode): Promise<void> {
+    const tree = this.#detailTree;
+    const binding = tree?.binding;
+    const state = this.#coverageController?.getState();
+    const root = this.host.workspaceSnapshot().workspaceRoot;
+    if (!tree?.owns(node) || !binding || state?.state !== "available" || state.reportId !== binding.reportId || !root || !node.relativePath || !node.sourceSha256 || !this.host.openCoverageLocation) {
+      throw new Error("Coverage detail location is no longer current.");
+    }
+    const verified = await verifyCoverageDetailLocation(root, node.relativePath, node.sourceSha256, state.sources ?? []);
+    if (!tree.owns(node) || this.#coverageController?.getState().reportId !== binding.reportId) throw new Error("Coverage detail location changed while opening.");
+    await this.host.openCoverageLocation(verified.path, node.startLine ?? 1);
+    this.#decorationPath = verified.path;
+    const fileId = tree.fileIdFor(node);
+    if (fileId) await this.#decorations?.load(fileId, node.status);
   }
 
 }
@@ -544,6 +632,60 @@ function createVSCodeHost(
     openCoverageSource: async (path) => {
       const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
       await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+    },
+    openCoverageLocation: async (path, line) => {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
+      const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+      const position = new vscode.Position(Math.max(0, line - 1), 0);
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(new vscode.Range(position, position));
+    },
+    setCoverageDetailsAvailable: (available) => vscode.commands.executeCommand("setContext", "unitTestIde.coverageDetailsAvailable", available),
+    createCoverageDetailView: (tree) => {
+      const changed = new vscode.EventEmitter<CoverageTreeNode | undefined>();
+      const provider: vscodeTypes.TreeDataProvider<CoverageTreeNode> = {
+        onDidChangeTreeData: changed.event,
+        getChildren: (node) => tree.children(node),
+        getTreeItem: (node) => {
+          const model = coverageTreeItem(node);
+          const expandable = node.kind === "project" || node.kind === "file";
+          const item = new vscode.TreeItem(model.label, expandable ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+          item.id = `${node.kind}:${node.id}:${node.nextCursor ?? ""}`;
+          item.description = model.description;
+          item.tooltip = model.label;
+          if (node.kind === "file" || node.kind === "function") item.command = { title: "Open coverage location", command: "unitTestIde.openCoverageDetail", arguments: [node] };
+          if (node.kind === "load-more") item.command = { title: "Load more coverage", command: "unitTestIde.loadMoreCoverageDetails", arguments: [node] };
+          return item;
+        }
+      };
+      const view = vscode.window.createTreeView("unitTestIde.coverageDetails", { treeDataProvider: provider });
+      const colors = {
+        covered: "gitDecoration.addedResourceForeground",
+        uncovered: "gitDecoration.deletedResourceForeground",
+        stale: "gitDecoration.modifiedResourceForeground",
+        incomplete: "editorWarning.foreground"
+      } as const;
+      const types = Object.fromEntries(Object.entries(colors).map(([style, color]) => [style, vscode.window.createTextEditorDecorationType({
+        isWholeLine: true, borderStyle: "solid", borderWidth: "0 0 0 2px", borderColor: new vscode.ThemeColor(color)
+      })])) as Record<LineDecoration["style"], vscodeTypes.TextEditorDecorationType>;
+      let decorated: vscodeTypes.TextEditor | undefined;
+      const clear = () => { if (decorated) for (const type of Object.values(types)) decorated.setDecorations(type, []); decorated = undefined; };
+      const changedEditor = vscode.window.onDidChangeActiveTextEditor((editor) => { if (editor !== decorated) clear(); });
+      return {
+        refresh: () => changed.fire(undefined),
+        showDecorations: (path, lines) => {
+          const editor = vscode.window.activeTextEditor;
+          if (!editor || editor.document.uri.fsPath !== path) { clear(); return; }
+          if (decorated !== editor) clear();
+          decorated = editor;
+          for (const style of Object.keys(types) as LineDecoration["style"][]) editor.setDecorations(types[style], lines.filter((item) => item.style === style).map((item) => ({
+            range: new vscode.Range(Math.max(0, item.line - 1), 0, Math.max(0, item.line - 1), 0),
+            hoverMessage: item.label
+          })));
+        },
+        clearDecorations: clear,
+        dispose: () => { clear(); changedEditor.dispose(); view.dispose(); changed.dispose(); for (const type of Object.values(types)) type.dispose(); }
+      };
     },
     showInformationMessage: (message) => vscode.window.showInformationMessage(message),
     confirmGeneration: async (message) => Boolean(await vscode.window.showInformationMessage(message, { modal: true }, "Accept") === "Accept"),

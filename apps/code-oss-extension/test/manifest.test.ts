@@ -13,7 +13,7 @@ test("extension manifest declares workspace extension and safe commands", async 
   assert.equal(`${String(manifest.publisher)}.${String(manifest.name)}`, "unit-test-ide.code-oss-extension");
   assert.equal(manifest.main, "./dist/src/extension-entry.cjs");
   assert.deepEqual(manifest.extensionKind, ["workspace"]);
-  const contributes = manifest.contributes as { commands: Array<{ command: string }> };
+  const contributes = manifest.contributes as { commands: Array<{ command: string }>; views: { explorer: Array<{ id: string; when?: string }> }; menus: Record<string, Array<{ command: string; when?: string }>> };
   assert.deepEqual(
     contributes.commands.map((command) => command.command),
     [
@@ -24,6 +24,10 @@ test("extension manifest declares workspace extension and safe commands", async 
       "unitTestIde.refreshCoverage",
       "unitTestIde.openCoverageReport",
       "unitTestIde.openCoverageSource",
+      "unitTestIde.coverageFilter.all",
+      "unitTestIde.coverageFilter.uncovered",
+      "unitTestIde.coverageFilter.regressed",
+      "unitTestIde.coverageFilter.incomplete",
       "unitTestIde.generateTests",
       "unitTestIde.generateTestsForSymbol",
       "unitTestIde.generateTestsForFile",
@@ -34,6 +38,10 @@ test("extension manifest declares workspace extension and safe commands", async 
       "unitTestIde.cancelTestGeneration"
     ]
   );
+  assert.ok(contributes.views.explorer.some((view) => view.id === "unitTestIde.coverageDetails" && view.when === "unitTestIde.coverageDetailsAvailable"));
+  for (const command of contributes.commands.filter((item) => item.command.startsWith("unitTestIde.coverageFilter."))) {
+    assert.ok(contributes.menus.commandPalette?.some((item) => item.command === command.command && item.when === "unitTestIde.coverageDetailsAvailable"));
+  }
 });
 
 test("contracts expose explicit lifecycle states", async () => {

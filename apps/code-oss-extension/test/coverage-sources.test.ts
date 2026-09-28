@@ -8,6 +8,7 @@ import {
   resolveCoverageSourcePath,
   openCoverageSource,
   verifyCoverageSource,
+  verifyCoverageDetailLocation,
   type CoverageSourceSnapshot
 } from "../src/coverage-sources.js";
 
@@ -50,4 +51,16 @@ test("openCoverageSource verifies before handing a native path to the host", asy
   let opened = "";
   await openCoverageSource({ openCoverageSource: (path) => { opened = path; } }, root, source);
   assert.equal(opened, join(root, "src", "main.cpp"));
+});
+
+test("detail navigation requires a matching report source path and digest", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-ide-detail-source-"));
+  await mkdir(join(root, "src"));
+  const path = join(root, "src", "main.cpp");
+  await writeFile(path, "source\n");
+  const digest = createHash("sha256").update("source\n").digest("hex");
+  const sources = [{ uri: "src/main.cpp", sha256: digest }];
+  assert.equal((await verifyCoverageDetailLocation(root, "src/main.cpp", digest, sources)).path, path);
+  await assert.rejects(() => verifyCoverageDetailLocation(root, "src/main.cpp", "a".repeat(64), sources), /digest|snapshot/i);
+  await assert.rejects(() => verifyCoverageDetailLocation(root, "../main.cpp", digest, sources), /path/i);
 });

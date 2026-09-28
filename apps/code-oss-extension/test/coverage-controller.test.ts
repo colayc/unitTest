@@ -140,3 +140,17 @@ test("coverage report identity mismatch is rejected and not published", async ()
   assert.equal(controller.getState().state, "unavailable");
   assert.equal(controller.getState().reportId, undefined);
 });
+
+test("cancelled refresh cannot republish unavailable over a stopped workspace", async () => {
+  let finish!: (run: CoverageRun) => void;
+  const client = {
+    ...clientFixture(),
+    getCoverageRun: async () => new Promise<CoverageRun>((resolve) => { finish = resolve; })
+  };
+  const controller = createCoverageController({ readContext: () => context(client) });
+  const pending = controller.refresh(id);
+  controller.setTrustState("blocked-untrusted");
+  finish(runFixture());
+  await assert.rejects(pending);
+  assert.equal(controller.getState().state, "stopped");
+});

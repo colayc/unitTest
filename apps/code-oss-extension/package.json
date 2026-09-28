@@ -17,6 +17,10 @@
       { "command": "unitTestIde.refreshCoverage", "title": "Unit Test: Refresh Coverage" },
       { "command": "unitTestIde.openCoverageReport", "title": "Unit Test: Open Coverage Report" },
       { "command": "unitTestIde.openCoverageSource", "title": "Unit Test: Open Coverage Source" },
+      { "command": "unitTestIde.coverageFilter.all", "title": "Unit Test: Show All Coverage" },
+      { "command": "unitTestIde.coverageFilter.uncovered", "title": "Unit Test: Show Uncovered Coverage" },
+      { "command": "unitTestIde.coverageFilter.regressed", "title": "Unit Test: Show Regressed Coverage" },
+      { "command": "unitTestIde.coverageFilter.incomplete", "title": "Unit Test: Show Incomplete Coverage" },
       { "command": "unitTestIde.generateTests", "title": "Unit Test: Generate Tests" },
       { "command": "unitTestIde.generateTestsForSymbol", "title": "Unit Test: Generate Tests for Symbol" },
       { "command": "unitTestIde.generateTestsForFile", "title": "Unit Test: Generate Tests for File" },
@@ -28,6 +32,10 @@
     ],
     "menus": {
       "commandPalette": [
+        { "command": "unitTestIde.coverageFilter.all", "when": "unitTestIde.coverageDetailsAvailable" },
+        { "command": "unitTestIde.coverageFilter.uncovered", "when": "unitTestIde.coverageDetailsAvailable" },
+        { "command": "unitTestIde.coverageFilter.regressed", "when": "unitTestIde.coverageDetailsAvailable" },
+        { "command": "unitTestIde.coverageFilter.incomplete", "when": "unitTestIde.coverageDetailsAvailable" },
         { "command": "unitTestIde.generateTests" },
         { "command": "unitTestIde.generateTestsForSymbol" },
         { "command": "unitTestIde.generateTestsForFile" },
@@ -42,6 +50,11 @@
       ],
       "explorer/context": [
         { "command": "unitTestIde.generateTestsForFile", "when": "resourceLangId == cpp || resourceLangId == c" }
+      ]
+    },
+    "views": {
+      "explorer": [
+        { "id": "unitTestIde.coverageDetails", "name": "Unit Test Coverage", "when": "unitTestIde.coverageDetailsAvailable" }
       ]
     },
     "configuration": {
@@ -64,7 +77,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test test/extension-host-smoke-support.test.mjs dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js dist/test/test-generation-controller.test.js dist/test/test-generation-results.test.js dist/test/test-generation-diff.test.js dist/test/test-generation-commands.test.js",
+    "test": "pnpm run build && node --test test/extension-host-smoke-support.test.mjs dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js dist/test/coverage-controller.test.js dist/test/coverage-commands.test.js dist/test/coverage-viewer.test.js dist/test/coverage-sources.test.js dist/test/coverage-detail-tree.test.js dist/test/coverage-decorations.test.js dist/test/test-generation-controller.test.js dist/test/test-generation-results.test.js dist/test/test-generation-diff.test.js dist/test/test-generation-commands.test.js",
     "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:coverage-service-smoke": "pnpm run build && node --test dist/test/coverage-service-smoke.test.js",
     "test:coverage-service-smoke:linux": "pnpm run build && node --test dist/test/coverage-service-smoke-linux.test.js",

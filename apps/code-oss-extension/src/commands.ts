@@ -2,6 +2,7 @@ import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { CoverageControllerState } from "./coverage-controller.js";
+import type { CoverageFilter, CoverageTreeNode } from "./coverage-detail-tree.js";
 import { openCoverageHtml } from "./coverage-viewer.js";
 import { openCoverageSource as verifyAndOpenCoverageSource } from "./coverage-sources.js";
 import { redactServiceError } from "./service-resources.js";
@@ -85,6 +86,13 @@ export interface CoverageCommandController {
   getState(): CoverageControllerState;
   startCurrent(): Promise<CoverageControllerState>;
   refreshCurrent(): Promise<CoverageControllerState>;
+}
+
+export interface CoverageDetailCommandController {
+  available(): boolean;
+  select(node: CoverageTreeNode): Promise<void>;
+  filter(value: CoverageFilter): void;
+  loadMore?(node: CoverageTreeNode): Promise<void>;
 }
 
 export type ClientProvider = () => ExtensionProtocolClient | undefined;
@@ -208,7 +216,8 @@ export function registerCoverageCommands(
   status: CommandStatus,
   host: CoverageCommandHost,
   output: OutputChannelLike,
-  workspaceRoot?: () => string | undefined
+  workspaceRoot?: () => string | undefined,
+  detail?: CoverageDetailCommandController
 ): void {
   const requireTrusted = async (): Promise<boolean> => {
     if (!status.isActive()) return false;
@@ -307,6 +316,27 @@ export function registerCoverageCommands(
     host.registerCommand("unitTestIde.refreshCoverage", refreshCoverage),
     host.registerCommand("unitTestIde.openCoverageReport", openReport),
     host.registerCommand("unitTestIde.openCoverageSource", openSource)
+  );
+  if (detail) context.subscriptions.push(
+    host.registerCommand("unitTestIde.openCoverageDetail", async (value) => {
+      if (!await requireTrusted() || !detail.available()) return;
+      if (typeof value !== "object" || value === null || !["file", "function"].includes((value as CoverageTreeNode).kind)) return;
+      try { await detail.select(value as CoverageTreeNode); }
+      catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+    }),
+    host.registerCommand("unitTestIde.filterCoverageDetails", async (value) => {
+      if (!await requireTrusted() || !detail.available()) return;
+      if (value === "all" || value === "uncovered" || value === "regressed" || value === "incomplete") detail.filter(value);
+    }),
+    host.registerCommand("unitTestIde.loadMoreCoverageDetails", async (value) => {
+      if (!await requireTrusted() || !detail.available() || !detail.loadMore) return;
+      if (typeof value !== "object" || value === null || (value as CoverageTreeNode).kind !== "load-more") return;
+      try { await detail.loadMore(value as CoverageTreeNode); }
+      catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+    }),
+    ...(["all", "uncovered", "regressed", "incomplete"] as const).map((filter) => host.registerCommand(`unitTestIde.coverageFilter.${filter}`, async () => {
+      if (await requireTrusted() && detail.available()) detail.filter(filter);
+    }))
   );
 }
 
