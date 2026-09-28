@@ -107,6 +107,7 @@ type ManagedTestRecordPageV16 struct {
 }
 
 type ManagedTestRecordV16 struct {
+	AbsentSides     []string             `json:"absentSides,omitempty"`
 	AcceptedDigest  string               `json:"acceptedDigest"`
 	CaseID          string               `json:"caseId"`
 	CurrentDigest   string               `json:"currentDigest"`
@@ -140,6 +141,7 @@ type ManagedReviewV16 struct {
 }
 
 type ManagedReviewCaseV16 struct {
+	AbsentSides     []string             `json:"absentSides,omitempty"`
 	AcceptedDigest  string               `json:"acceptedDigest"`
 	CaseID          string               `json:"caseId"`
 	CurrentDigest   string               `json:"currentDigest"`

@@ -1,13 +1,33 @@
-import type { ManagedReviewApplyRequestV16, ManagedReviewV16 } from "./generated/test-generation-v1-6.js";
+import type { ManagedReviewApplyRequestV16, ManagedReviewCaseV16, ManagedReviewV16 } from "./generated/test-generation-v1-6.js";
 import { ManagedConflictChoiceV16 } from "./generated/test-generation-v1-6.js";
 
 export const MAX_MANAGED_REVIEW_PAGE_ITEMS_V16 = 32;
 export const MAX_MANAGED_REVIEW_PAGE_BYTES_V16 = 512 * 1024;
+/** SHA-256 of zero bytes. Absence additionally requires an absentSides marker. */
+export const ABSENT_BLOCK_DIGEST_V16 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 const id32 = /^[0-9a-f]{32}$/;
 const digest64 = /^[0-9a-f]{64}$/;
 const caseId = /^utc_[0-9a-f]{32}$/;
 const choices = new Set<string>(Object.values(ManagedConflictChoiceV16));
+const blockSides = ["accepted", "current", "generated"] as const;
+export type ManagedBlockSideV16 = typeof blockSides[number];
+
+/** A real empty block retains the sentinel digest but has absent=false. */
+export function decodeManagedBlockDigestV16(wire: string, absent: boolean): string | undefined {
+  if (!digest64.test(wire) || (absent && wire !== ABSENT_BLOCK_DIGEST_V16)) throw new Error("Invalid managed block digest or absent-side sentinel.");
+  return absent ? undefined : wire;
+}
+
+export function validateManagedReviewCaseDigestsV16(value: ManagedReviewCaseV16): boolean {
+  const absentSides = value.absentSides ?? [];
+  if (!Array.isArray(absentSides) || absentSides.length > 3 || new Set(absentSides).size !== absentSides.length || absentSides.some((side) => !blockSides.includes(side as ManagedBlockSideV16))) return false;
+  const absent = new Set<string>(absentSides);
+  try {
+    for (const side of blockSides) decodeManagedBlockDigestV16(value[`${side}Digest`], absent.has(side));
+    return true;
+  } catch { return false; }
+}
 
 export function validateManagedReviewApplyV16(
   request: ManagedReviewApplyRequestV16,
@@ -28,6 +48,7 @@ export function validateManagedReviewApplyV16(
 
 export function validateManagedReviewPageV16(page: ManagedReviewV16): boolean {
   if (page.cases.length > MAX_MANAGED_REVIEW_PAGE_ITEMS_V16) return false;
+  if (page.cases.some((item) => !validateManagedReviewCaseDigestsV16(item))) return false;
   if (page.cases.some((item) => item.diff !== undefined && [...item.diff].length > 4096)) return false;
   const serialized = JSON.stringify(page);
   // Go's encoding/json escapes these characters even though JSON.stringify

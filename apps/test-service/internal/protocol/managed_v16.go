@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"strings"
 	"unicode/utf8"
 
@@ -12,6 +13,31 @@ import (
 
 const MaxManagedReviewPageItemsV16 = 32
 const MaxManagedReviewPageBytesV16 = 512 * 1024
+
+// AbsentBlockDigestV16 is SHA-256 of the empty byte sequence. A wire digest
+// equal to this value is *not* by itself evidence of absence: absentSides must
+// name the side. Internally, an empty digest remains the absence marker.
+const AbsentBlockDigestV16 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// EncodeManagedBlockDigestV16 converts only the internal empty-absence marker;
+// malformed nonempty input never becomes the sentinel or a valid wire digest.
+func EncodeManagedBlockDigestV16(internal string) (wire string, absent bool, err error) {
+	if internal == "" {
+		return AbsentBlockDigestV16, true, nil
+	}
+	if !validLowerHex(internal, 64) {
+		return "", false, ErrInvalidManagedBlockDigestV16
+	}
+	return internal, false, nil
+}
+
+var ErrInvalidManagedBlockDigestV16 = errors.New("invalid managed block digest")
+
+// ValidManagedBlockDigestV16 binds a claimed absent side to the sentinel.
+// A present, genuinely empty block has the same digest but absent=false.
+func ValidManagedBlockDigestV16(wire string, absent bool) bool {
+	return validLowerHex(wire, 64) && (!absent || wire == AbsentBlockDigestV16)
+}
 
 // ValidManagedReviewApplyV16 checks the request against the current durable
 // review identity supplied by the provider. Schema validation alone cannot
@@ -47,12 +73,50 @@ func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
 		return false
 	}
 	for _, item := range page.Cases {
+		if !ValidManagedReviewCaseDigestsV16(item) {
+			return false
+		}
 		if item.Diff != nil && utf8.RuneCountInString(*item.Diff) > 4096 {
 			return false
 		}
 	}
 	encoded, err := json.Marshal(page)
 	return err == nil && len(encoded) <= MaxManagedReviewPageBytesV16
+}
+
+func ValidManagedReviewCaseDigestsV16(item generationv16.ManagedReviewCaseV16) bool {
+	seen, ok := validManagedAbsentSidesV16(item.AbsentSides)
+	if !ok {
+		return false
+	}
+	return ValidManagedBlockDigestV16(item.AcceptedDigest, seen["accepted"]) &&
+		ValidManagedBlockDigestV16(item.CurrentDigest, seen["current"]) &&
+		ValidManagedBlockDigestV16(item.GeneratedDigest, seen["generated"])
+}
+
+func ValidManagedRecordDigestsV16(item generationv16.ManagedTestRecordV16) bool {
+	seen, ok := validManagedAbsentSidesV16(item.AbsentSides)
+	if !ok || !ValidManagedBlockDigestV16(item.AcceptedDigest, seen["accepted"]) || !ValidManagedBlockDigestV16(item.CurrentDigest, seen["current"]) {
+		return false
+	}
+	if item.GeneratedDigest == nil {
+		return !seen["generated"]
+	}
+	return ValidManagedBlockDigestV16(*item.GeneratedDigest, seen["generated"])
+}
+
+func validManagedAbsentSidesV16(sides []string) (map[string]bool, bool) {
+	if len(sides) > 3 {
+		return nil, false
+	}
+	seen := make(map[string]bool, len(sides))
+	for _, side := range sides {
+		if side != "accepted" && side != "current" && side != "generated" || seen[side] {
+			return nil, false
+		}
+		seen[side] = true
+	}
+	return seen, true
 }
 
 func validManagedChoiceV16(choice generationv16.ManagedConflictChoiceV16) bool {

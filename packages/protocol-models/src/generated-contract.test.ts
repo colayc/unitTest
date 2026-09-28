@@ -102,7 +102,7 @@ import {
 } from "./index.js";
 import type { CoverageFileV16, CoverageFunctionV16, CoverageLineDetailV16, ManagedReviewApplyRequestV16 } from "./index.js";
 import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16 } from "./index.js";
-import { validateManagedReviewApplyV16, validateManagedReviewPageV16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16 } from "./index.js";
+import { validateManagedReviewApplyV16, validateManagedReviewPageV16, validateManagedReviewCaseDigestsV16, decodeManagedBlockDigestV16, ABSENT_BLOCK_DIGEST_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16 } from "./index.js";
 import type { ManagedReviewV16, ManagedReviewIDRequestV16 } from "./index.js";
 import { ManagedTestStatusV16 } from "./index.js";
 
@@ -157,6 +157,20 @@ test("protocol 1.6 review pages reject an escaped-byte budget overrun", () => {
   assert.ok(JSON.stringify(htmlEscaped).length < MAX_MANAGED_REVIEW_PAGE_BYTES_V16);
   assert.equal(validateManagedReviewPageV16(htmlEscaped), false, "Go's JSON encoder escapes HTML characters before the wire-byte check");
   assert.equal(validateManagedReviewPageV16({ ...small, cases: Array(33).fill(makeCase("small")) }), false);
+});
+
+test("protocol 1.6 absent-side sentinel round trips without confusing a real empty block", () => {
+  const digest = ABSENT_BLOCK_DIGEST_V16;
+  assert.equal(digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert.equal(decodeManagedBlockDigestV16(digest, true), undefined);
+  assert.equal(decodeManagedBlockDigestV16(digest, false), digest);
+  assert.throws(() => decodeManagedBlockDigestV16("a".repeat(64), true), /absent/i);
+  assert.throws(() => decodeManagedBlockDigestV16("INVALID", false), /digest/i);
+  const value = { caseId: "utc_" + "a".repeat(32), status: ManagedTestStatusV16.Conflicted, acceptedDigest: digest, currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), absentSides: ["accepted"] } as unknown as ManagedReviewV16["cases"][number];
+  assert.equal(validateManagedReviewCaseDigestsV16(value), true);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, absentSides: ["accepted", "accepted"] } as typeof value), false);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, acceptedDigest: "a".repeat(64) }), false);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, absentSides: undefined }), true);
 });
 
 test("protocol 1.5 generated models expose typed generation contracts", () => {

@@ -6,6 +6,7 @@ import type {
   ManagedTestRecordPageV16,
   ManagedTestStatusV16
 } from "@unit-test-ide/test-client";
+import { validateManagedReviewCaseDigestsV16 } from "@unit-test-ide/test-client";
 import { supportsManagedTests, type TrustState } from "./contracts.js";
 import type { ExtensionManagedProtocolClient, ExtensionProtocolClient } from "./protocol-client.js";
 
@@ -49,7 +50,7 @@ function managedClient(client: ExtensionProtocolClient | undefined): client is M
 }
 
 function checkCase(value: ManagedReviewCaseV16): void {
-  if (!CASE_ID.test(value.caseId) || !HEX_64.test(value.acceptedDigest) || !HEX_64.test(value.currentDigest) || !HEX_64.test(value.generatedDigest) || !STATUSES.has(value.status)) {
+  if (!CASE_ID.test(value.caseId) || !validateManagedReviewCaseDigestsV16(value) || !STATUSES.has(value.status)) {
     throw new Error("The managed review contains an invalid case or digest.");
   }
   if (value.diff !== undefined && (typeof value.diff !== "string" || value.diff.length > 32_768 || value.diff.includes("\0"))) {

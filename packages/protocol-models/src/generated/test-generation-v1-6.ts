@@ -162,6 +162,7 @@ export interface ManagedTestRecordPageV16 {
 }
 
 export interface ManagedTestRecordV16 {
+    absentSides?:     string[];
     acceptedDigest:   string;
     caseId:           string;
     currentDigest:    string;
@@ -205,6 +206,7 @@ export interface ManagedReviewV16 {
 }
 
 export interface ManagedReviewCaseV16 {
+    absentSides?:    string[];
     acceptedDigest:  string;
     caseId:          string;
     currentDigest:   string;

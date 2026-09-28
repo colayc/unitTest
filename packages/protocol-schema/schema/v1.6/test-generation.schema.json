@@ -211,6 +211,11 @@
     "managedStatus": { "title": "ManagedTestStatusV16", "enum": ["current", "stale", "conflicted", "orphaned", "invalid"] },
     "conflictChoice": { "title": "ManagedConflictChoiceV16", "enum": ["keep-current", "use-generated", "convert-to-manual"] },
     "managedCaseId": { "type": "string", "pattern": "^utc_[0-9a-f]{32}$" },
+    "absentBlockSides": {
+      "description": "A side listed here is absent, not a real block whose SHA-256 happens to equal the empty-byte digest. Its digest field MUST carry the v1.6 absent-block sentinel (SHA-256 of empty bytes). An unlisted side, including a real empty block, is present.",
+      "type": "array", "maxItems": 3, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(accepted|current|generated)$" }
+    },
     "managedRecordsRequest": {
       "title": "ManagedRecordsRequestV16", "type": "object", "additionalProperties": false,
       "required": ["workspaceGeneration", "coverageReportId", "projectId"],
@@ -219,7 +224,12 @@
     "managedRecord": {
       "title": "ManagedTestRecordV16", "type": "object", "additionalProperties": false,
       "required": ["caseId", "fileId", "functionId", "status", "acceptedDigest", "currentDigest"],
-      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "fileId": { "$ref": "#/$defs/id" }, "functionId": { "$ref": "#/$defs/id" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "reviewId": { "$ref": "#/$defs/id" } }
+      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "fileId": { "$ref": "#/$defs/id" }, "functionId": { "$ref": "#/$defs/id" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "absentSides": { "$ref": "#/$defs/absentBlockSides" }, "reviewId": { "$ref": "#/$defs/id" } },
+      "allOf": [
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "accepted" } } } }, "then": { "type": "object", "properties": { "acceptedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "current" } } } }, "then": { "type": "object", "properties": { "currentDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "generated" } } } }, "then": { "type": "object", "required": ["generatedDigest"], "properties": { "generatedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } }
+      ]
     },
     "managedRecordPage": {
       "title": "ManagedTestRecordPageV16", "type": "object", "additionalProperties": false,
@@ -238,7 +248,12 @@
     "reviewCase": {
       "title": "ManagedReviewCaseV16", "type": "object", "additionalProperties": false,
       "required": ["caseId", "status", "acceptedDigest", "currentDigest", "generatedDigest"],
-      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "diff": { "type": "string", "maxLength": 4096 } }
+      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "absentSides": { "$ref": "#/$defs/absentBlockSides" }, "diff": { "type": "string", "maxLength": 4096 } },
+      "allOf": [
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "accepted" } } } }, "then": { "type": "object", "properties": { "acceptedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "current" } } } }, "then": { "type": "object", "properties": { "currentDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "generated" } } } }, "then": { "type": "object", "properties": { "generatedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } }
+      ]
     },
     "managedReview": {
       "title": "ManagedReviewV16", "type": "object", "additionalProperties": false,

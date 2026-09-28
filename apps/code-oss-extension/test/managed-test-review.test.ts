@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { ManagedTestReviewController } from "../src/managed-test-review.js";
+import { ABSENT_BLOCK_DIGEST_V16 } from "@unit-test-ide/test-client";
 
 const generation = "a".repeat(64);
 const reportId = "b".repeat(32);
@@ -71,6 +72,36 @@ test("malformed preview digest and stale server review fail closed", async () =>
   await assert.rejects(() => f.controller.load(reviewId), /digest/i);
   f.setReview({ ...review, workspaceGeneration: "9".repeat(64) });
   await assert.rejects(() => f.controller.load(reviewId), /workspace/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("first-time review identifies absent ancestor and still sends only bound choices", async () => {
+  const f = fixture();
+  f.setReview({ ...review, cases: [{ ...review.cases[0], acceptedDigest: ABSENT_BLOCK_DIGEST_V16, absentSides: ["accepted"] }] });
+  const state = await f.controller.load(reviewId);
+  assert.deepEqual(state.review?.cases[0]?.absentSides, ["accepted"]);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  await f.controller.apply(reviewDigest);
+  assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [{ caseId, choice: "use-generated" }] }]);
+});
+
+test("review rejects malformed absent-side sentinel rather than accepting a fabricated ancestor", async () => {
+  const f = fixture();
+  for (const absentSides of [["accepted", "accepted"], ["wrong"]]) {
+    f.setReview({ ...review, cases: [{ ...review.cases[0], acceptedDigest: ABSENT_BLOCK_DIGEST_V16, absentSides }] });
+    await assert.rejects(() => f.controller.load(reviewId), /absent|digest/i);
+  }
+  f.setReview({ ...review, cases: [{ ...review.cases[0], acceptedDigest: "1".repeat(64), absentSides: ["accepted"] }] });
+  await assert.rejects(() => f.controller.load(reviewId), /absent|digest/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("v1.5 capability downgrade keeps managed review unavailable", async () => {
+  const f = fixture();
+  f.client.getCapabilities = async () => ({ testGeneration: true });
+  assert.equal(await f.controller.available(), false);
+  await assert.rejects(() => f.controller.load(reviewId), /unavailable/i);
   assert.equal(f.applied.length, 0);
 });
 

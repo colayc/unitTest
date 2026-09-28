@@ -211,7 +211,23 @@ func (s *generationService) GetManagedReviewPage(ctx context.Context, owner, rev
 		if len(c.CandidateID) != 36 || c.CandidateID[:4] != "utc_" || !validGenerationHex(c.CandidateID[4:]) || !validGenerationDigest(c.CurrentDigest) || !validGenerationDigest(c.GeneratedDigest) || c.AcceptedDigest != "" && !validGenerationDigest(c.AcceptedDigest) || !managedtest.ValidStatus(c.Status) {
 			return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
 		}
-		result.Cases = append(result.Cases, generationv16.ManagedReviewCaseV16{CaseID: c.CandidateID, Status: generationv16.ManagedTestStatusV16(c.Status), AcceptedDigest: c.AcceptedDigest, CurrentDigest: c.CurrentDigest, GeneratedDigest: c.GeneratedDigest})
+		accepted, acceptedAbsent, acceptedErr := protocol.EncodeManagedBlockDigestV16(c.AcceptedDigest)
+		current, currentAbsent, currentErr := protocol.EncodeManagedBlockDigestV16(c.CurrentDigest)
+		generated, generatedAbsent, generatedErr := protocol.EncodeManagedBlockDigestV16(c.GeneratedDigest)
+		if acceptedErr != nil || currentErr != nil || generatedErr != nil {
+			return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+		}
+		wire := generationv16.ManagedReviewCaseV16{CaseID: c.CandidateID, Status: generationv16.ManagedTestStatusV16(c.Status), AcceptedDigest: accepted, CurrentDigest: current, GeneratedDigest: generated}
+		if acceptedAbsent {
+			wire.AbsentSides = append(wire.AbsentSides, "accepted")
+		}
+		if currentAbsent {
+			wire.AbsentSides = append(wire.AbsentSides, "current")
+		}
+		if generatedAbsent {
+			wire.AbsentSides = append(wire.AbsentSides, "generated")
+		}
+		result.Cases = append(result.Cases, wire)
 	}
 	if page.NextCursor != "" {
 		result.NextCursor = &page.NextCursor

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { createGenerationDiffReview, createManagedCaseReview, diffDigest, readGenerationDiff, redactGenerationDiffPaths } from "../src/test-generation-diff.js";
 import type { TestGenerationRunV15 } from "@unit-test-ide/test-client";
+import { ABSENT_BLOCK_DIGEST_V16 } from "@unit-test-ide/test-client";
 
 const id = "a".repeat(32);
 const diff = "--- C:\\private\\workspace\\tests\\generated.cpp\n+++ C:\\private\\workspace\\tests\\generated.cpp\n@@ -0,0 +1 @@\n+TEST(foo)\n";
@@ -29,4 +30,10 @@ test("managed case review presents bounded exact diff and all three service dige
   assert.equal(model.content, "+TEST(foo)\n");
   assert.deepEqual(model.panes, { accepted: "1".repeat(64), current: "2".repeat(64), generated: "3".repeat(64) });
   assert.throws(() => createManagedCaseReview({ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) } as any), /preview/i);
+});
+
+test("managed preview labels absent ancestor separately from real empty block", () => {
+  const value = { caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: ABSENT_BLOCK_DIGEST_V16, currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff: "+TEST(foo)\n" } as any;
+  assert.equal(createManagedCaseReview({ ...value, absentSides: ["accepted"] }).panes.accepted, "No accepted ancestor");
+  assert.equal(createManagedCaseReview(value).panes.accepted, ABSENT_BLOCK_DIGEST_V16);
 });

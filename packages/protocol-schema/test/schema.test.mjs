@@ -136,6 +136,14 @@ test("protocol 1.6 validates paginated detail and managed-review responses", asy
   assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "" } }), false, "empty review cursor");
   const review = responses[5][1];
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, nextCursor: "opaque" } }), true, "review continuation response");
+  const emptyDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const firstRecord = { ...record, acceptedDigest: emptyDigest, absentSides: ["accepted"] };
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...metadata, items: [firstRecord] } }), true, "record absent ancestor");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...metadata, items: [{ ...record, absentSides: ["accepted"] }] } }), false, "record incorrect sentinel");
+  const firstTime = { ...review, cases: [{ ...review.cases[0], acceptedDigest: emptyDigest, absentSides: ["accepted"] }] };
+  assert.equal(message({ ...base, method: responses[5][0], payload: firstTime }), true, "first-time review absent ancestor");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], absentSides: ["accepted"] }] } }), false, "incorrect sentinel");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], acceptedDigest: emptyDigest, absentSides: ["accepted", "accepted"] }] } }), false, "duplicate absent side");
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: Array(33).fill(review.cases[0]) } }), false, "oversized review page");
 });
 

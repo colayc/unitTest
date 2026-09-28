@@ -375,5 +375,7 @@ export type { ArtifactMetadataV16 } from "./generated/artifact-v1-6.js";
 export { validateCoverageMetricV16, validateCoverageSummaryV16 } from "./coverage-v1-6-validation.js";
 export {
   validateManagedReviewApplyV16, validateManagedReviewPageV16,
+  validateManagedReviewCaseDigestsV16, decodeManagedBlockDigestV16, ABSENT_BLOCK_DIGEST_V16,
   MAX_MANAGED_REVIEW_PAGE_ITEMS_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16
 } from "./managed-review-v1-6-validation.js";
+export type { ManagedBlockSideV16 } from "./managed-review-v1-6-validation.js";

@@ -112,4 +112,5 @@ export type {
   TestSelection,
   WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
-export { CoverageDetailStatusV16, CoverageDetailReasonV16, ManagedTestStatusV16, ManagedConflictChoiceV16 } from "@unit-test-ide/protocol-models";
+export { CoverageDetailStatusV16, CoverageDetailReasonV16, ManagedTestStatusV16, ManagedConflictChoiceV16,
+  ABSENT_BLOCK_DIGEST_V16, decodeManagedBlockDigestV16, validateManagedReviewCaseDigestsV16 } from "@unit-test-ide/protocol-models";

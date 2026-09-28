@@ -9,6 +9,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/managedtest"
+	"unit-test-ide.local/test-service/internal/protocol"
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgenpublish"
@@ -143,5 +144,29 @@ func TestManagedReviewReadRejectsOversizedPageAndCancellation(t *testing.T) {
 	cancel()
 	if _, err := service.GetManagedReviewPage(ctx, owner, reviewID, "", 1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled read=%v", err)
+	}
+}
+
+func TestManagedReviewReadEncodesAbsentAcceptedDigestWithoutChangingStoredCandidate(t *testing.T) {
+	owner, reviewID, reportID := strings.Repeat("6", 64), strings.Repeat("8", 32), strings.Repeat("a", 32)
+	workspace, digest := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	caseID := "utc_" + strings.Repeat("d", 32)
+	f := &managedReadFixture{ready: true,
+		binding: managedtest.ReviewBinding{OwnerDigest: owner, RunID: strings.Repeat("e", 32), RunRevision: 1, ProjectID: "core", WorkspaceGeneration: workspace, ReportID: reportID, ToolchainID: "toolchain"},
+		page: managedtest.ReviewPage{ReviewID: reviewID, ReviewDigest: digest, WorkspaceGeneration: workspace, ReportID: reportID,
+			Cases: []managedtest.ReviewCase{{CandidateID: caseID, Status: managedtest.StatusConflicted, AcceptedDigest: "", CurrentDigest: digest, GeneratedDigest: digest}}},
+		index: coveragedetail.Index{ProjectID: "core", WorkspaceGeneration: workspace, ReportID: reportID, Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent}, Files: []coveragedetail.File{{ID: strings.Repeat("f", 32), Status: coveragedetail.StatusCurrent}}}}
+	service := &generationService{managedReviews: f, currentIndex: f, managedValidator: healthyManagedValidator(true)}
+	page, err := service.GetManagedReviewPage(context.Background(), owner, reviewID, "", 1)
+	if err != nil || len(page.Cases) != 1 {
+		t.Fatalf("first-time review page=%+v err=%v", page, err)
+	}
+	if page.Cases[0].AcceptedDigest != protocol.AbsentBlockDigestV16 || len(page.Cases[0].AbsentSides) != 1 || page.Cases[0].AbsentSides[0] != "accepted" || f.page.Cases[0].AcceptedDigest != "" {
+		t.Fatalf("absent ancestor not round-tripped: wire=%+v internal=%+v", page.Cases[0], f.page.Cases[0])
+	}
+	f.page.Cases[0].AcceptedDigest = protocol.AbsentBlockDigestV16 // A real empty accepted block is present.
+	page, err = service.GetManagedReviewPage(context.Background(), owner, reviewID, "", 1)
+	if err != nil || len(page.Cases[0].AbsentSides) != 0 || page.Cases[0].AcceptedDigest != protocol.AbsentBlockDigestV16 {
+		t.Fatalf("real empty block mislabelled absent: page=%+v err=%v", page, err)
 	}
 }

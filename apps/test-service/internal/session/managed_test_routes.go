@@ -158,7 +158,7 @@ func (s *Session) handleManagedTests(ctx context.Context, version string, reques
 		}
 		for _, item := range page.Items {
 			if len(item.CaseID) != 36 || item.CaseID[:4] != "utc_" || !validID(item.CaseID[4:]) ||
-				!validID(item.FileID) || !validID(item.FunctionID) || !validHash(item.AcceptedDigest) || !validHash(item.CurrentDigest) ||
+				!validID(item.FileID) || !validID(item.FunctionID) || !protocol.ValidManagedRecordDigestsV16(item) ||
 				!managedtest.ValidStatus(managedtest.Status(item.Status)) {
 				return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed record item is invalid", true))
 			}
