@@ -164,7 +164,7 @@ func (p *parser) file() (File, error) {
 	// A line's function_name is only a reliable association when it names
 	// exactly one retained function in this file. Duplicate names remain
 	// separate observations with no invented per-function line attribution.
-	byName := make(map[string]int, len(result.Observations))
+	byName := make(map[string][]int, len(result.Observations))
 	for index := range result.Observations {
 		function := &result.Observations[index]
 		function.File = result.RelativePath
@@ -172,18 +172,22 @@ func (p *parser) file() (File, error) {
 			if name == "" {
 				continue
 			}
-			if previous, exists := byName[name]; exists && previous != index {
-				byName[name] = -1
-			} else if !exists {
-				byName[name] = index
+			indices := byName[name]
+			if len(indices) == 0 || indices[len(indices)-1] != index {
+				byName[name] = append(indices, index)
 			}
 		}
 	}
 	for _, detail := range observations {
-		if index, exists := byName[detail.name]; exists && index >= 0 {
-			function := &result.Observations[index]
+		indices := byName[detail.name]
+		if len(indices) == 1 {
+			function := &result.Observations[indices[0]]
 			function.Lines = append(function.Lines, detail.line)
 			function.Branches = append(function.Branches, detail.branches...)
+		} else if len(indices) > 1 {
+			for _, index := range indices {
+				result.Observations[index].IncompleteReason = coveragedomain.ObservationIncompleteAttributionAmbiguous
+			}
 		}
 	}
 	ordinals := make(map[string]int64)

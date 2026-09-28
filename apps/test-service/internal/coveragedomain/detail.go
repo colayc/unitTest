@@ -19,6 +19,15 @@ type BranchObservation struct {
 	Count        int64
 }
 
+// ObservationIncompleteReason explains why parsed function detail cannot be
+// used as complete attribution. The zero value means no known limitation.
+type ObservationIncompleteReason string
+
+const (
+	ObservationIncompleteAttributionAmbiguous ObservationIncompleteReason = "attribution_ambiguous"
+	ObservationIncompleteLimit                ObservationIncompleteReason = "observation_limit"
+)
+
 type FunctionObservation struct {
 	QualifiedName        string
 	LinkageName          string
@@ -29,6 +38,7 @@ type FunctionObservation struct {
 	Lines                []LineObservation
 	Branches             []BranchObservation
 	InstantiationOrdinal int64
+	IncompleteReason     ObservationIncompleteReason
 }
 
 func (value FunctionObservation) HasExactRange() bool {

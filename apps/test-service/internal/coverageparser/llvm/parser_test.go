@@ -83,8 +83,18 @@ func TestParseLLVMBoundsExpandedPerFunctionLineObservations(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxLines = 9 // 4 segment tuples + 5 region tuples, but 10 retained line observations
 	got, err := Parse(strings.NewReader(encoded), limits)
-	if !errors.Is(err, ErrLimitExceeded) || !reflect.DeepEqual(got, Export{}) {
-		t.Fatalf("Parse() = %#v, %v; want bounded failure", got, err)
+	if err != nil {
+		t.Fatalf("valid aggregate rejected by observation budget: %v", err)
+	}
+	if len(got.Files) != 1 || got.Files[0].Functions != (Metric{Covered: 1, Total: 1}) ||
+		!reflect.DeepEqual(got.Files[0].Lines, []Line{{Number: 2, Count: 5}, {Number: 3, Count: 5}}) ||
+		len(got.Files[0].Observations) != 5 {
+		t.Fatalf("aggregate changed at detail bound: %#v", got)
+	}
+	if got.Files[0].Observations[4].IncompleteReason != coveragedomain.ObservationIncompleteLimit ||
+		len(got.Files[0].Observations[4].Lines) != 0 ||
+		got.Files[0].Observations[0].IncompleteReason != "" {
+		t.Fatalf("detail bound not explicit: %#v", got.Files[0].Observations)
 	}
 }
 

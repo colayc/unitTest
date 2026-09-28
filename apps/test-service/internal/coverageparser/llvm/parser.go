@@ -705,6 +705,7 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 	}
 	functions := make(map[string]functionState, len(raw.functions))
 	ordinals := make(map[string]int64, len(raw.functions))
+	detailLimited := false
 	for _, function := range raw.functions {
 		var identityRegion region
 		hasCodeRegion := false
@@ -746,6 +747,9 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 		// lines instead of expanding a potentially enormous source range.
 		lineCounts := make(map[int64]int64)
 		for _, candidate := range function.regions {
+			if detailLimited {
+				break
+			}
 			if candidate.kind != 0 {
 				continue
 			}
@@ -764,13 +768,19 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 				if line.Number > candidate.lineEnd || line.Number == candidate.lineEnd && candidate.columnEnd == 1 {
 					break
 				}
-				if err := p.increment(&p.observedLineVisits, p.limits.MaxLines); err != nil {
-					return Export{}, err
+				if p.observedLineVisits >= p.limits.MaxLines {
+					detailLimited = true
+					lineCounts = nil
+					break
 				}
+				p.observedLineVisits++
 				if count, exists := lineCounts[line.Number]; !exists || candidate.count > count {
 					lineCounts[line.Number] = candidate.count
 				}
 			}
+		}
+		if detailLimited {
+			observation.IncompleteReason = coveragedomain.ObservationIncompleteLimit
 		}
 		lineNumbers := make([]int64, 0, len(lineCounts))
 		for line := range lineCounts {

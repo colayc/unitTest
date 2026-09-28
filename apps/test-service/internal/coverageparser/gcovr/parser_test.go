@@ -58,6 +58,11 @@ func TestParseGCovrDetailFixtureKeepsOverloadsAndAmbiguousInstancesSeparate(t *t
 		len(file.Observations[2].Lines) != 0 || len(file.Observations[3].Lines) != 0 {
 		t.Fatalf("ambiguous inline instances were conflated: %#v", file.Observations[2:4])
 	}
+	if file.Observations[2].IncompleteReason != coveragedomain.ObservationIncompleteAttributionAmbiguous ||
+		file.Observations[3].IncompleteReason != coveragedomain.ObservationIncompleteAttributionAmbiguous ||
+		file.Observations[4].IncompleteReason != "" {
+		t.Fatalf("ambiguous lines indistinguishable from empty function: %#v", file.Observations[2:5])
+	}
 	if !file.Observations[4].HasExactRange() || len(file.Observations[4].Lines) != 0 {
 		t.Fatalf("empty function was fabricated: %#v", file.Observations[4])
 	}
