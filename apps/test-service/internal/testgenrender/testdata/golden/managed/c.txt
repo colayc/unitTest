@@ -1,0 +1,23 @@
+#include "unity.h"
+#include "include/choose.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+// unit-test-ide:managed-begin case=utc_32ebd393b73c16ed9149506ef93c9f4c function=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb symbol=choose
+void test_choose_returns_7_32ebd393b73c16ed9149506ef93c9f4c(void) {
+  // Arrange
+  // Act
+  const int32_t actual = choose(2);
+  // Assert
+  TEST_ASSERT_EQUAL_INT32(7, actual);
+}
+// unit-test-ide:managed-end case=utc_32ebd393b73c16ed9149506ef93c9f4c
+
+int main(void) {
+  UNITY_BEGIN();
+  RUN_TEST(test_choose_returns_7_32ebd393b73c16ed9149506ef93c9f4c);
+  return UNITY_END();
+}

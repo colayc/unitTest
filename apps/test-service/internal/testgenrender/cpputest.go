@@ -36,6 +36,10 @@ func renderCppUTest(r RenderRequest, fn analysis.Function, cases []derivedCase) 
 }
 
 func renderBody(b *strings.Builder, fn analysis.Function, c derivedCase, lang Language) error {
+	return renderBodySections(b, fn, c, lang, false)
+}
+
+func renderBodySections(b *strings.Builder, fn analysis.Function, c derivedCase, lang Language, managed bool) error {
 	args := make([]string, len(c.vector.Inputs))
 	locals := []string{}
 	for i, input := range c.vector.Inputs {
@@ -55,8 +59,14 @@ func renderBody(b *strings.Builder, fn analysis.Function, c derivedCase, lang La
 			args[i] = value
 		}
 	}
+	if managed {
+		b.WriteString("  // Arrange\n")
+	}
 	for _, line := range locals {
 		fmt.Fprintf(b, "  %s\n", line)
+	}
+	if managed {
+		b.WriteString("  // Act\n")
 	}
 	call := fmt.Sprintf("%s(%s)", fn.Name, strings.Join(args, ", "))
 	needsReturn := false
@@ -80,6 +90,9 @@ func renderBody(b *strings.Builder, fn analysis.Function, c derivedCase, lang La
 		}
 	} else {
 		fmt.Fprintf(b, "  %s;\n", call)
+	}
+	if managed {
+		b.WriteString("  // Assert\n")
 	}
 	for _, a := range c.assertions {
 		var typ analysis.Type
