@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -127,5 +128,128 @@ func TestValidatedCoverageIndexDoesNotChangeLegacyCoverageAndPaging(t *testing.T
 	second, err := s.ListCoverageFiles(ctx, pageQuery)
 	if err != nil || len(second.Items) != 1 || second.NextCursor != "" {
 		t.Fatalf("legacy second page = %#v, %v", second, err)
+	}
+}
+
+func TestValidatedCoverageIndexRejectsDeletedZeroSummarySource(t *testing.T) {
+	s := openTestStore(t)
+	index := attestedDetailFixture(t, s, 7240)
+	if index.Files[1].Summary != (coveragedomain.Summary{}) {
+		t.Fatal("fixture second source is not zero-summary")
+	}
+	if _, err := s.db.Exec(`DELETE FROM coverage_detail_files WHERE report_id=? AND file_id=?`, index.ReportID, index.Files[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	q := coveragedetail.CurrentIndexQuery{ProjectID: index.ProjectID, ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration}
+	if _, err := s.ReadValidatedCoverageIndex(context.Background(), q); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("surviving file falsely current after zero-summary source deletion: %v", err)
+	}
+}
+
+func TestValidatedCoverageIndexRejectsManifestSetDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(*testing.T, *Store, coveragedetail.Index)
+	}{
+		{"missing committed source", func(t *testing.T, s *Store, index coveragedetail.Index) {
+			if _, err := s.db.Exec(`DELETE FROM coverage_detail_manifest_files WHERE report_id=? AND relative_path='src/b.cpp'`, index.ReportID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"extra committed source", func(t *testing.T, s *Store, index coveragedetail.Index) {
+			if _, err := s.db.Exec(`INSERT INTO coverage_detail_manifest_files(report_id,relative_path,source_sha256) VALUES(?,'src/c.cpp',?)`, index.ReportID, strings.Repeat("c", 64)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"mutated committed digest", func(t *testing.T, s *Store, index coveragedetail.Index) {
+			if _, err := s.db.Exec(`UPDATE coverage_detail_manifest_files SET source_sha256=? WHERE report_id=? AND relative_path='src/b.cpp'`, strings.Repeat("c", 64), index.ReportID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"mutated indexed digest", func(t *testing.T, s *Store, index coveragedetail.Index) {
+			if _, err := s.db.Exec(`UPDATE coverage_detail_files SET source_sha256=? WHERE report_id=? AND relative_path='src/b.cpp'`, strings.Repeat("c", 64), index.ReportID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			index := attestedDetailFixture(t, s, 7250+i)
+			tc.edit(t, s, index)
+			q := coveragedetail.CurrentIndexQuery{ProjectID: index.ProjectID, ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration}
+			if _, err := s.ReadValidatedCoverageIndex(context.Background(), q); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("manifest drift accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestAttestedReadRejectsOversizedTextBeforeMaterialization(t *testing.T) {
+	s := openTestStore(t)
+	index := attestedDetailFixture(t, s, 7241)
+	if _, err := s.db.Exec(`UPDATE coverage_detail_functions SET name=? WHERE report_id=?`, strings.Repeat("x", 2<<20), index.ReportID); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := preflightAttestedRowSizes(ctx, tx, index.ReportID); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("oversized row preflight = %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	q := coveragedetail.CurrentIndexQuery{ProjectID: index.ProjectID, ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration}
+	if _, err := s.ReadValidatedCoverageIndex(ctx, q); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("oversized row read = %v", err)
+	}
+}
+
+func TestMigration020FailurePreservesLegacyCoverage(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil || len(migrations) < 20 || migrations[19].version != 20 {
+		t.Fatalf("migration 020 unavailable: %v, %d", err, len(migrations))
+	}
+	for _, mode := range []string{"upgrade", "optional-failure", "checksum-mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source-manifest.sqlite")
+			db := openConfiguredDatabase(t, path)
+			s := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, s, migrations[:19])
+			if mode == "optional-failure" {
+				if _, err := db.Exec(`CREATE TABLE coverage_detail_manifests(unexpected INTEGER)`); err != nil {
+					t.Fatal(err)
+				}
+			} else if mode == "checksum-mismatch" {
+				if err := s.applyMigration(ctx, migrations[19]); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=20`, strings.Repeat("0", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatalf("legacy service unavailable after %s: %v", mode, err)
+			}
+			defer reopened.Close()
+			if !reopened.CoverageDetailReady() || !reopened.ManagedTestsReady() {
+				t.Fatalf("legacy capabilities lost after %s", mode)
+			}
+			if _, err := reopened.GetCoverageReport(ctx, strings.Repeat("a", 32)); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("legacy report read after %s = %v", mode, err)
+			}
+			if reopened.attestationAvailable != (mode == "upgrade") {
+				t.Fatalf("attestation state after %s = %v", mode, reopened.attestationAvailable)
+			}
+		})
 	}
 }

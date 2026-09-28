@@ -23,7 +23,7 @@ const (
 // one read-only snapshot. It does not attest live source bytes; callers must
 // do that before using a returned current ID for generation.
 func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
-	if s != nil && !s.detailAvailable {
+	if s != nil && (!s.detailAvailable || !s.attestationAvailable || s.attestationInvalid) {
 		return coveragedetail.Index{}, task.ErrStorageUnavailable
 	}
 	if s == nil || ctx == nil || !validProjectID(q.ProjectID) || !lowerHex(q.ReportID, 32) || !lowerHex(q.WorkspaceGeneration, 64) {
@@ -34,6 +34,9 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 		return coveragedetail.Index{}, storageError("begin attested CoverageDetail read", err)
 	}
 	defer tx.Rollback()
+	if err := preflightAttestedRowSizes(ctx, tx, q.ReportID); err != nil {
+		return coveragedetail.Index{}, err
+	}
 	report, err := scanCoverageReport(tx.QueryRowContext(ctx, coverageReportSelect+` WHERE report_id=?`, q.ReportID))
 	if isNoRows(err) {
 		return coveragedetail.Index{}, task.ErrNotFound
@@ -74,6 +77,9 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 	if err := loadAttestedGaps(ctx, tx, &index); err != nil {
 		return coveragedetail.Index{}, err
 	}
+	if err := validateCoverageSourceManifest(ctx, tx, index); err != nil {
+		return coveragedetail.Index{}, err
+	}
 	if err := validateDetailIndex(index); err != nil || !validDetailReportSemantics(index, report) {
 		return coveragedetail.Index{}, storageError("validate attested CoverageDetail graph", err)
 	}
@@ -81,6 +87,28 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 		return coveragedetail.Index{}, storageError("commit attested CoverageDetail read", err)
 	}
 	return index, nil
+}
+
+// Check lengths inside SQLite before scanning attacker-corrupted optional
+// detail rows into Go strings or byte slices. The table/column expressions
+// are constants; the report ID is always bound as a parameter.
+func preflightAttestedRowSizes(ctx context.Context, tx *sql.Tx, reportID string) error {
+	checks := []struct{ table, oversize string }{
+		{"coverage_detail_reports", `length(CAST(project_id AS BLOB))>64 OR length(CAST(workspace_generation AS BLOB))>64 OR length(CAST(coverage_run_id AS BLOB))>32 OR length(CAST(toolchain_json AS BLOB))>4096 OR length(CAST(project_summary_json AS BLOB))>4096 OR length(CAST(project_delta_json AS BLOB))>4096 OR length(CAST(project_status AS BLOB))>16 OR length(cursor_key)>32`},
+		{"coverage_detail_files", `length(CAST(file_id AS BLOB))>32 OR length(CAST(relative_path AS BLOB))>4096 OR length(CAST(source_sha256 AS BLOB))>64 OR length(CAST(summary_json AS BLOB))>4096 OR length(CAST(delta_json AS BLOB))>4096 OR length(CAST(status AS BLOB))>16`},
+		{"coverage_detail_functions", `length(CAST(file_id AS BLOB))>32 OR length(CAST(function_id AS BLOB))>32 OR length(CAST(name AS BLOB))>8192 OR length(CAST(linkage_name AS BLOB))>8192 OR length(CAST(signature_digest AS BLOB))>64 OR length(CAST(summary_json AS BLOB))>4096 OR length(CAST(delta_json AS BLOB))>4096 OR length(CAST(status AS BLOB))>16`},
+		{"coverage_detail_reasons", `length(CAST(owner_kind AS BLOB))>16 OR length(CAST(owner_id AS BLOB))>32 OR length(CAST(reason AS BLOB))>128`},
+		{"coverage_detail_manifests", `length(CAST(project_id AS BLOB))>64 OR length(CAST(workspace_generation AS BLOB))>64 OR length(CAST(manifest_sha256 AS BLOB))>64`},
+		{"coverage_detail_manifest_files", `length(CAST(relative_path AS BLOB))>4096 OR length(CAST(source_sha256 AS BLOB))>64`},
+	}
+	for _, check := range checks {
+		var oversized int
+		query := `SELECT EXISTS(SELECT 1 FROM ` + check.table + ` WHERE report_id=? AND (` + check.oversize + `))`
+		if err := tx.QueryRowContext(ctx, query, reportID).Scan(&oversized); err != nil || oversized != 0 {
+			return storageError("attested CoverageDetail row size", err)
+		}
+	}
+	return nil
 }
 
 func loadAttestedFiles(ctx context.Context, tx *sql.Tx, index *coveragedetail.Index) error {

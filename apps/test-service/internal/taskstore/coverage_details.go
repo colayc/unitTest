@@ -139,6 +139,11 @@ func (s *Store) PutCoverageDetail(ctx context.Context, index coveragedetail.Inde
 			return storageError("insert CoverageDetail gap", err)
 		}
 	}
+	if s.attestationAvailable && !s.attestationInvalid {
+		if err := insertCoverageSourceManifest(ctx, tx, index); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return storageError("commit CoverageDetail", err)
 	}
