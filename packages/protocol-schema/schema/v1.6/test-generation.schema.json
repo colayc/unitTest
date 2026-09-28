@@ -265,7 +265,6 @@
         "workspaceGeneration": { "$ref": "#/$defs/digest" },
         "coverageReportId": { "$ref": "#/$defs/id" },
         "cases": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/reviewCase" } },
-        "previewArtifactDigest": { "$ref": "#/$defs/digest", "description": "Optional SHA-256 of the exact page preview manifest: UTF-8 managed-review-preview-v1 newline, reviewDigest newline, sorted c:caseId:SHA256(diff) newline entries, then sorted s:scaffoldKey:diffDigest newline entries. Without this verified field, diff text is display-unavailable and cannot authorize Apply." },
         "conflictKeys": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "oneOf": [{ "$ref": "#/$defs/managedCaseId" }, { "type": "string", "maxLength": 254, "pattern": "^(?!.*(?:/\\.{1,2}/|//))scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }] } },
         "scaffoldPreviews": { "type": "array", "maxItems": 200, "items": { "type": "object", "additionalProperties": false, "required": ["key", "diff", "diffDigest"], "properties": { "key": { "type": "string", "maxLength": 254, "pattern": "^(?!.*(?:/\\.{1,2}/|//))scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }, "diff": { "type": "string", "maxLength": 4096 }, "diffDigest": { "$ref": "#/$defs/digest" } } } },
         "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 }

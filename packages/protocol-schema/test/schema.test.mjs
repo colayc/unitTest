@@ -147,6 +147,8 @@ test("protocol 1.6 validates paginated detail and managed-review responses", asy
   for (const limit of [0, 33]) assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, limit } }), false, `review limit ${limit}`);
   assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "" } }), false, "empty review cursor");
   const review = responses[5][1];
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, previewArtifactDigest: digest } }), false,
+    "unbacked response-side preview proof is not part of the closed protocol");
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, nextCursor: "opaque" } }), true, "review continuation response");
   const emptyDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const firstRecord = { ...record, acceptedDigest: emptyDigest, absentSides: ["accepted"] };

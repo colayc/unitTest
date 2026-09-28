@@ -39,20 +39,19 @@ function fixture() {
   return { controller, client, applied, setTrust(value: typeof trust) { trust = value; }, setGeneration(value: string) { workspaceGeneration = value; }, setSession(value: any) { session = value; }, setReview(value: any) { serverReview = value; } };
 }
 
-test("review requires all conflicted cases to have a closed choice and sends no preview bytes", async () => {
+test("review records closed choices but cannot Apply without authoritative preview proof", async () => {
   const f = fixture();
   const model = await f.controller.load(reviewId);
   assert.equal(model.canApply, false);
   f.controller.markDisplayed(model.review!.reviewDigest);
-  await assert.rejects(() => f.controller.apply(model.review!.reviewDigest), /unresolved/i);
+  await assert.rejects(() => f.controller.apply(model.review!.reviewDigest), /preview unavailable/i);
   for (const choice of ["keep-current", "use-generated", "convert-to-manual"] as const) {
     f.controller.choose(caseId, choice);
-    assert.equal(f.controller.getState().canApply, true);
-    await f.controller.apply(model.review!.reviewDigest);
-    assert.deepEqual(f.applied.at(-1), { reviewId, reviewDigest, resolutions: [{ caseId, choice }] });
-    await f.controller.load(reviewId);
-    f.controller.markDisplayed(reviewDigest);
+    assert.equal(f.controller.getState().canApply, false);
+    assert.equal(f.controller.getState().choices[caseId], choice);
+    await assert.rejects(() => f.controller.apply(model.review!.reviewDigest), /preview unavailable/i);
   }
+  assert.equal(f.applied.length, 0);
 });
 
 test("stale digest, trust revocation and changed workspace or session cannot publish", async () => {
@@ -81,15 +80,15 @@ test("malformed preview digest and stale server review fail closed", async () =>
   assert.equal(f.applied.length, 0);
 });
 
-test("first-time review identifies absent ancestor and still sends only bound choices", async () => {
+test("first-time review identifies absent ancestor but cannot Apply", async () => {
   const f = fixture();
   f.setReview({ ...review, cases: [{ ...review.cases[0], acceptedDigest: ABSENT_BLOCK_DIGEST_V16, absentSides: ["accepted"] }] });
   const state = await f.controller.load(reviewId);
   assert.deepEqual(state.review?.cases[0]?.absentSides, ["accepted"]);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(caseId, "use-generated");
-  await f.controller.apply(reviewDigest);
-  assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [{ caseId, choice: "use-generated" }] }]);
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.deepEqual(f.applied, []);
 });
 
 test("review rejects malformed absent-side sentinel rather than accepting a fabricated ancestor", async () => {
@@ -111,15 +110,15 @@ test("v1.5 capability downgrade keeps managed review unavailable", async () => {
   assert.equal(f.applied.length, 0);
 });
 
-test("double apply and cancelled fetch do not send a second decision", async () => {
+test("repeated Apply attempts and cancelled fetch never send a decision", async () => {
   const f = fixture();
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(caseId, "keep-current");
   const [first, second] = await Promise.allSettled([f.controller.apply(reviewDigest), f.controller.apply(reviewDigest)]);
-  assert.equal(first.status, "fulfilled");
+  assert.equal(first.status, "rejected");
   assert.equal(second.status, "rejected");
-  assert.equal(f.applied.length, 1);
+  assert.equal(f.applied.length, 0);
   let release: (() => void) | undefined;
   f.client.getManagedReview = async () => { await new Promise<void>((resolve) => { release = resolve; }); return review; };
   const pending = f.controller.load(reviewId);
@@ -138,15 +137,15 @@ test("maintenance filtering preserves all five service statuses and never mutate
   assert.equal(f.applied.length, 0);
 });
 
-test("ordinary review needs no conflict choices but still requires the displayed digest", async () => {
+test("ordinary review still requires authoritative preview proof without conflict choices", async () => {
   const f = fixture();
   f.setReview({ ...review, cases: [{ ...review.cases[0], status: "current" }] });
   const loaded = await f.controller.load(reviewId);
   assert.equal(loaded.canApply, false);
   f.controller.markDisplayed(loaded.review!.reviewDigest);
-  assert.equal(f.controller.getState().canApply, true);
-  await f.controller.apply(loaded.review!.reviewDigest);
-  assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [] }]);
+  assert.equal(f.controller.getState().canApply, false);
+  await assert.rejects(() => f.controller.apply(loaded.review!.reviewDigest), /preview unavailable/i);
+  assert.deepEqual(f.applied, []);
 });
 
 test("digest-only review loads but cannot authorize Apply without a verified preview", async () => {
@@ -163,8 +162,21 @@ test("digest-only review loads but cannot authorize Apply without a verified pre
 
 test("fabricated or mismatched diff cannot authorize Apply without a manifest-bound preview artifact", async () => {
   const f = fixture();
-  const forged = { ...review, cases: [{ ...review.cases[0], diff: "+FABRICATED()\n" }] };
+  const forged = { ...review, cases: [{ ...review.cases[0]!, diff: "+FABRICATED()\n" }] };
   f.setReview(forged);
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  assert.equal(f.controller.getState().previewAvailable, false);
+  assert.equal(f.controller.getState().canApply, false);
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("fabricated diff and a matching self-asserted preview hash still cannot authorize Apply", async () => {
+  const f = fixture();
+  const forged = { ...review, cases: [{ ...review.cases[0]!, diff: "+FABRICATED()\n" }] };
+  f.setReview({ ...forged, previewArtifactDigest: artifactDigest(forged) });
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(caseId, "use-generated");
@@ -184,7 +196,7 @@ test("preview changed after display cannot dispatch even when review digest rema
   assert.equal(f.applied.length, 0);
 });
 
-test("returned review state cannot mutate verified preview bytes", async () => {
+test("returned review state cannot mutate held preview bytes", async () => {
   const f = fixture();
   const scaffold = "scaffold:tests/generated/src/a_test.cpp";
   const scaffoldDiff = "+TEST(scaffold)\n";
@@ -197,7 +209,7 @@ test("returned review state cannot mutate verified preview bytes", async () => {
   assert.equal(f.controller.getState().review!.scaffoldPreviews![0]!.diff, scaffoldDiff);
 });
 
-test("only service-advertised scaffold conflict keys can be chosen", async () => {
+test("only service-advertised scaffold conflict keys can be chosen, never applied", async () => {
   const f = fixture();
   const scaffold = "scaffold:tests/generated/src/a_test.cpp";
   const scaffoldDiff = "--- a/tests/generated/src/a_test.cpp\n+++ b/tests/generated/src/a_test.cpp\n";
@@ -209,12 +221,13 @@ test("only service-advertised scaffold conflict keys can be chosen", async () =>
   f.controller.choose(caseId, "keep-current");
   assert.equal(f.controller.getState().canApply, false);
   f.controller.choose(scaffold, "use-generated");
-  assert.equal(f.controller.getState().canApply, true);
-  await f.controller.apply(reviewDigest);
-  assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [{ caseId: scaffold, choice: "use-generated" }, { caseId, choice: "keep-current" }] }]);
+  assert.equal(f.controller.getState().canApply, false);
+  assert.equal(f.controller.getState().choices[scaffold], "use-generated");
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.deepEqual(f.applied, []);
 });
 
-test("multiple conflicts require independent choices and preserve their sorted identity", async () => {
+test("multiple conflicts preserve independent choices without dispatch", async () => {
   const f = fixture();
   const otherId = `utc_${"f".repeat(32)}`;
   const withSecondCase = { ...review, cases: [{ ...review.cases[0]!, caseId: otherId }, review.cases[0]!] };
@@ -224,73 +237,13 @@ test("multiple conflicts require independent choices and preserve their sorted i
   f.controller.choose(otherId, "keep-current");
   assert.equal(f.controller.getState().canApply, false);
   f.controller.choose(caseId, "convert-to-manual");
-  await f.controller.apply(reviewDigest);
-  assert.deepEqual(f.applied[0], { reviewId, reviewDigest, resolutions: [{ caseId, choice: "convert-to-manual" }, { caseId: otherId, choice: "keep-current" }] });
+  assert.deepEqual(f.controller.getState().choices, { [caseId]: "convert-to-manual", [otherId]: "keep-current" });
+  assert.equal(f.controller.getState().canApply, false);
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.deepEqual(f.applied, []);
 });
 
-test("reject during an in-flight apply cannot falsely claim that no write happened", async () => {
-  const f = fixture();
-  await f.controller.load(reviewId);
-  f.controller.markDisplayed(reviewDigest);
-  f.controller.choose(caseId, "use-generated");
-  let release: (() => void) | undefined;
-  f.client.applyManagedReview = async (input: unknown) => { f.applied.push(input); await new Promise<void>((resolve) => { release = resolve; }); return { reviewId, reviewDigest, applied: true }; };
-  const pending = f.controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.throws(() => f.controller.reject(), /applying/i);
-  await assert.rejects(() => f.controller.load(reviewId), /applying/i);
-  release!();
-  await pending;
-  assert.equal(f.applied.length, 1);
-});
-
-test("session invalidation after dispatch preserves a confirmed service response", async () => {
-  const f = fixture();
-  await f.controller.load(reviewId);
-  f.controller.markDisplayed(reviewDigest);
-  f.controller.choose(caseId, "use-generated");
-  let release: (() => void) | undefined;
-  f.client.applyManagedReview = async (input: unknown) => { f.applied.push(input); await new Promise<void>((resolve) => { release = resolve; }); return { reviewId, reviewDigest, applied: true }; };
-  const pending = f.controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  f.controller.invalidate();
-  assert.equal(f.controller.getState().review, undefined);
-  release!();
-  const outcome = await pending;
-  assert.equal(outcome.state, "confirmed");
-  assert.equal(f.applied.length, 1);
-});
-
-test("post-dispatch transport loss is uncertain, while pre-dispatch invalidation is cancelled", async () => {
-  const f = fixture();
-  await f.controller.load(reviewId);
-  f.controller.markDisplayed(reviewDigest);
-  f.controller.choose(caseId, "use-generated");
-  let release: (() => void) | undefined;
-  f.client.applyManagedReview = async (input: unknown) => { f.applied.push(input); await new Promise<void>((resolve) => { release = resolve; }); throw new Error("connection closed"); };
-  const pending = f.controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  f.controller.invalidate();
-  release!();
-  const outcome = await pending;
-  assert.deepEqual(outcome, { state: "uncertain", reviewId, reviewDigest });
-  assert.equal(f.applied.length, 1);
-
-  const other = fixture();
-  await other.controller.load(reviewId);
-  other.controller.markDisplayed(reviewDigest);
-  other.controller.choose(caseId, "use-generated");
-  let releaseFetch: (() => void) | undefined;
-  other.client.getManagedReview = async () => { await new Promise<void>((resolve) => { releaseFetch = resolve; }); return review; };
-  const preDispatch = other.controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  other.controller.invalidate();
-  releaseFetch!();
-  assert.equal((await preDispatch).state, "cancelled");
-  assert.equal(other.applied.length, 0);
-});
-
-test("Apply availability remains disabled until all choices are resolved and while applying", async () => {
+test("Apply availability stays disabled after choices and display without durable preview proof", async () => {
   const f = fixture();
   const ready: boolean[] = [];
   const controller = new ManagedTestReviewController({ readContext: () => ({ trust: "trusted", client: f.client, projectId: "core", workspaceGeneration: generation, coverageReportId: reportId }), onStateChanged: (state) => ready.push(state.canApply) });
@@ -299,34 +252,28 @@ test("Apply availability remains disabled until all choices are resolved and whi
   controller.choose(caseId, "keep-current");
   assert.equal(ready.at(-1), false);
   controller.markDisplayed(reviewDigest);
-  assert.equal(ready.at(-1), true);
-  let release: (() => void) | undefined;
-  f.client.applyManagedReview = async () => { await new Promise<void>((resolve) => { release = resolve; }); return { reviewId, reviewDigest, applied: true }; };
-  const pending = controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(ready.at(-1), false);
-  release!();
-  await pending;
+  await assert.rejects(() => controller.apply(reviewDigest), /preview unavailable/i);
   assert.equal(ready.at(-1), false);
+  assert.equal(f.applied.length, 0);
 });
 
-test("an invalidated in-flight Apply cannot block or clear a later workspace review", async () => {
+test("reject and workspace invalidation clear local choices without a write", async () => {
   const f = fixture();
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(caseId, "use-generated");
-  let release: (() => void) | undefined;
-  f.client.applyManagedReview = async () => { await new Promise<void>((resolve) => { release = resolve; }); return { reviewId, reviewDigest, applied: true }; };
-  const oldApply = f.controller.apply(reviewDigest);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  f.controller.reject();
+  assert.equal(f.controller.getState().review, undefined);
+  await f.controller.load(reviewId);
   f.controller.invalidate();
+  assert.equal(f.controller.getState().review, undefined);
   const newGeneration = "9".repeat(64);
   f.setGeneration(newGeneration);
   f.setReview({ ...review, workspaceGeneration: newGeneration });
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(caseId, "keep-current");
-  release!();
-  assert.equal((await oldApply).state, "confirmed");
-  assert.equal(f.controller.getState().canApply, true);
+  assert.equal(f.controller.getState().canApply, false);
+  assert.equal(f.applied.length, 0);
 });

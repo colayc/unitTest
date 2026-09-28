@@ -122,7 +122,7 @@ test("managed commands use only authoritative IDs and leave the v1.5 command set
   assert.equal(output.some((line) => line.includes("../wrong")), false);
 });
 
-test("managed review displays case diff and records choices but never applies without a separate explicit command", async () => {
+test("managed command delegates explicit Apply only when its review facade reports readiness", async () => {
   const fixture = setup();
   const calls: unknown[] = [];
   const reviewId = "c".repeat(32);
@@ -205,36 +205,29 @@ test("review command reports an in-flight Apply without throwing from local Reje
   assert.match(fixture.errors.at(-1)!, /already applying/i);
 });
 
-test("command reports post-dispatch workspace invalidation as confirmed or reconcile-required, never cancelled", async () => {
-  for (const response of ["confirmed", "lost"] as const) {
-    const fixture = setup();
-    const reviewId = "c".repeat(32);
-    const reviewDigest = "d".repeat(64);
-    const caseId = `utc_${"e".repeat(32)}`;
-    const generation = "a".repeat(64);
-    let release: (() => void) | undefined;
-    const diff = "+TEST(foo)\n";
-    const diffDigest = createHash("sha256").update(diff).digest("hex");
-    const previewArtifactDigest = createHash("sha256").update(`managed-review-preview-v1\n${reviewDigest}\nc:${caseId}:${diffDigest}\n`).digest("hex");
-    const client: any = {
-      getCapabilities: async () => ({ managedTests: true }),
-      getManagedReview: async () => ({ reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: "b".repeat(32), previewArtifactDigest, cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff }] }),
-      listManagedTests: async () => ({ workspaceGeneration: generation, coverageReportId: "b".repeat(32), items: [] }),
-      applyManagedReview: async () => { await new Promise<void>((resolve) => { release = resolve; }); if (response === "lost") throw new Error("connection lost"); return { reviewId, reviewDigest, applied: true }; }
-    };
-    const review = new ManagedTestReviewController({ readContext: () => ({ trust: "trusted", client, projectId: "core", workspaceGeneration: generation, coverageReportId: "b".repeat(32) }) });
-    await review.load(reviewId);
-    review.markDisplayed(reviewDigest);
-    review.choose(caseId, "use-generated");
-    const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
-    registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
-    const pending = fixture.handlers.get("unitTestIde.applyManagedReview")!();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    review.invalidate();
-    release!();
-    await pending;
-    assert.equal(fixture.errors.length, 0);
-    if (response === "confirmed") assert.match(fixture.info.at(-1)!, /applied/i);
-    else assert.match(fixture.info.at(-1)!, /uncertain|reconcile|verify/i);
-  }
+test("managed Apply command cannot dispatch a self-asserted preview", async () => {
+  const fixture = setup();
+  const reviewId = "c".repeat(32);
+  const reviewDigest = "d".repeat(64);
+  const caseId = `utc_${"e".repeat(32)}`;
+  const generation = "a".repeat(64);
+  const diff = "+FABRICATED()\n";
+  const diffDigest = createHash("sha256").update(diff).digest("hex");
+  const previewArtifactDigest = createHash("sha256").update(`managed-review-preview-v1\n${reviewDigest}\nc:${caseId}:${diffDigest}\n`).digest("hex");
+  let dispatched = 0;
+  const client: any = {
+    getCapabilities: async () => ({ managedTests: true }),
+    getManagedReview: async () => ({ reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: "b".repeat(32), previewArtifactDigest, cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff }] }),
+    listManagedTests: async () => ({ workspaceGeneration: generation, coverageReportId: "b".repeat(32), items: [] }),
+    applyManagedReview: async () => { dispatched++; return { reviewId, reviewDigest, applied: true }; }
+  };
+  const review = new ManagedTestReviewController({ readContext: () => ({ trust: "trusted", client, projectId: "core", workspaceGeneration: generation, coverageReportId: "b".repeat(32) }) });
+  await review.load(reviewId);
+  review.markDisplayed(reviewDigest);
+  review.choose(caseId, "use-generated");
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.applyManagedReview")!();
+  assert.equal(dispatched, 0);
+  assert.match(fixture.errors.at(-1)!, /review every managed-test change/i);
 });

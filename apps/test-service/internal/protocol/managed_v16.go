@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -103,39 +102,8 @@ func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
 			return false
 		}
 	}
-	if page.PreviewArtifactDigest != nil && !ValidManagedPreviewArtifactV16(page) {
-		return false
-	}
 	encoded, err := json.Marshal(page)
 	return err == nil && len(encoded) <= MaxManagedReviewPageBytesV16
-}
-
-// ValidManagedPreviewArtifactV16 verifies exact diff bytes against the
-// immutable review digest and this page's closed set of case/scaffold keys.
-func ValidManagedPreviewArtifactV16(page generationv16.ManagedReviewV16) bool {
-	if page.PreviewArtifactDigest == nil || !validLowerHex(*page.PreviewArtifactDigest, 64) {
-		return false
-	}
-	cases := make([]string, 0, len(page.Cases))
-	for _, item := range page.Cases {
-		if item.Diff == nil || *item.Diff == "" {
-			return false
-		}
-		sum := sha256.Sum256([]byte(*item.Diff))
-		cases = append(cases, "c:"+item.CaseID+":"+hex.EncodeToString(sum[:])+"\n")
-	}
-	scaffolds := make([]string, 0, len(page.ScaffoldPreviews))
-	for _, item := range page.ScaffoldPreviews {
-		if item.Diff == "" {
-			return false
-		}
-		scaffolds = append(scaffolds, "s:"+item.Key+":"+item.DiffDigest+"\n")
-	}
-	sort.Strings(cases)
-	sort.Strings(scaffolds)
-	manifest := "managed-review-preview-v1\n" + page.ReviewDigest + "\n" + strings.Join(cases, "") + strings.Join(scaffolds, "")
-	sum := sha256.Sum256([]byte(manifest))
-	return hex.EncodeToString(sum[:]) == *page.PreviewArtifactDigest
 }
 
 // ValidManagedScaffoldKeyV16 mirrors the closed v1.6 JSON-schema and TS
