@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
@@ -29,17 +30,163 @@ func detailStoreFixtureWithPrefix(t *testing.T, store *Store, number int, prefix
 	fileA, _ := coveragedetail.StableFileID(mutation.FinishCoverage.Run.Request.ProjectID, "src/a.cpp")
 	fileB, _ := coveragedetail.StableFileID(mutation.FinishCoverage.Run.Request.ProjectID, "src/b.cpp")
 	functionID, _ := coveragedetail.StableFunctionID(fileA, "linkage:_Z3foov")
-	gapID, _ := coveragedetail.StableGapID(report.ID, functionID, "line", coveragedomain.SourceLocation{Line: 2}, 0)
-	return coveragedetail.Index{
+	index := coveragedetail.Index{
 		WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration,
 		ProjectID:           mutation.FinishCoverage.Run.Request.ProjectID,
 		ReportID:            report.ID, RunID: report.RunID, Toolchain: report.Toolchain,
-		Project: coveragedetail.Project{Summary: report.Summary, Status: coveragedetail.StatusIncomplete, Reasons: []string{"attribution_ambiguous"}},
+		Project: coveragedetail.Project{Summary: report.Summary, Status: coveragedetail.StatusCurrent, Reasons: []string{}},
 		Files: []coveragedetail.File{
-			{ID: fileA, RelativePath: "src/a.cpp", SourceSHA256: strings.Repeat("a", 64), Status: coveragedetail.StatusCurrent, Reasons: []string{}, Functions: []coveragedetail.Function{{ID: functionID, Name: "foo", LinkageName: "_Z3foov", Start: coveragedomain.SourceLocation{Line: 1}, End: coveragedomain.SourceLocation{Line: 3}, Status: coveragedetail.StatusCurrent, Reasons: []string{}, Lines: []coveragedetail.Line{{Line: 1, Count: 1}, {Line: 2, Count: 0}}, Branches: []coveragedetail.Branch{{Line: 2, Column: 4, Ordinal: 0, Count: 0}}}}, Lines: []coveragedetail.Line{{Line: 1, Count: 1}, {Line: 2, Count: 0}}},
-			{ID: fileB, RelativePath: "src/b.cpp", SourceSHA256: strings.Repeat("b", 64), Status: coveragedetail.StatusIncomplete, Reasons: []string{"attribution_ambiguous"}},
+			{ID: fileA, RelativePath: "src/a.cpp", SourceSHA256: strings.Repeat("a", 64), Summary: report.Summary, Status: coveragedetail.StatusCurrent, Reasons: []string{}, Functions: []coveragedetail.Function{{ID: functionID, Name: "foo", LinkageName: "_Z3foov", Start: coveragedomain.SourceLocation{Line: 1}, End: coveragedomain.SourceLocation{Line: 12}, Summary: report.Summary, Status: coveragedetail.StatusCurrent, Reasons: []string{}}}},
+			{ID: fileB, RelativePath: "src/b.cpp", SourceSHA256: strings.Repeat("b", 64), Status: coveragedetail.StatusCurrent, Reasons: []string{}},
 		},
-		Gaps: []coveragedetail.Gap{{ID: gapID, FileID: fileA, FunctionID: functionID, Kind: "line", Location: coveragedomain.SourceLocation{Line: 2}}},
+	}
+	for line := int64(1); line <= 10; line++ {
+		count := int64(1)
+		if line > 8 {
+			count = 0
+		}
+		item := coveragedetail.Line{Line: line, Count: count}
+		index.Files[0].Lines = append(index.Files[0].Lines, item)
+		index.Files[0].Functions[0].Lines = append(index.Files[0].Functions[0].Lines, item)
+		if count == 0 {
+			id, _ := coveragedetail.StableGapID(report.ID, functionID, "line", coveragedomain.SourceLocation{Line: line}, 0)
+			index.Gaps = append(index.Gaps, coveragedetail.Gap{ID: id, FileID: fileA, FunctionID: functionID, Kind: "line", Location: coveragedomain.SourceLocation{Line: line}})
+		}
+	}
+	for ordinal := int64(0); ordinal < 4; ordinal++ {
+		count := int64(1)
+		if ordinal == 3 {
+			count = 0
+		}
+		branch := coveragedetail.Branch{Line: 1, Column: 1, Ordinal: ordinal, Count: count}
+		index.Files[0].Functions[0].Branches = append(index.Files[0].Functions[0].Branches, branch)
+		if count == 0 {
+			id, _ := coveragedetail.StableGapID(report.ID, functionID, "branch", coveragedomain.SourceLocation{Line: 1, Column: 1}, ordinal)
+			index.Gaps = append(index.Gaps, coveragedetail.Gap{ID: id, FileID: fileA, FunctionID: functionID, Kind: "branch", Location: coveragedomain.SourceLocation{Line: 1, Column: 1}, Ordinal: ordinal})
+		}
+	}
+	return index
+}
+
+func copyDetailIndex(value coveragedetail.Index) coveragedetail.Index {
+	copy := value
+	copy.Project.Reasons = append([]string{}, value.Project.Reasons...)
+	copy.Files = append([]coveragedetail.File{}, value.Files...)
+	for i := range copy.Files {
+		copy.Files[i].Reasons = append([]string{}, value.Files[i].Reasons...)
+		copy.Files[i].Lines = append([]coveragedetail.Line{}, value.Files[i].Lines...)
+		copy.Files[i].Functions = append([]coveragedetail.Function{}, value.Files[i].Functions...)
+		for j := range copy.Files[i].Functions {
+			copy.Files[i].Functions[j].Reasons = append([]string{}, value.Files[i].Functions[j].Reasons...)
+			copy.Files[i].Functions[j].Lines = append([]coveragedetail.Line{}, value.Files[i].Functions[j].Lines...)
+			copy.Files[i].Functions[j].Branches = append([]coveragedetail.Branch{}, value.Files[i].Functions[j].Branches...)
+		}
+	}
+	copy.Gaps = append([]coveragedetail.Gap{}, value.Gaps...)
+	return copy
+}
+
+func TestCoverageDetailRejectsContradictoryCanonicalIndex(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*coveragedetail.Index)
+	}{
+		{"project total contradicts files", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"detail_aggregate_mismatch"}
+			v.Project.Summary.Lines.Total--
+			v.Gaps = nil
+		}},
+		{"file count contradicts lines", func(v *coveragedetail.Index) { v.Files[0].Summary.Lines.Covered-- }},
+		{"function count contradicts observations", func(v *coveragedetail.Index) { v.Files[0].Functions[0].Summary.Branches.Covered-- }},
+		{"file line contradicts function line", func(v *coveragedetail.Index) { v.Files[0].Lines[0].Count = 0 }},
+		{"current file has incomplete function", func(v *coveragedetail.Index) {
+			v.Files[0].Functions[0].Status = coveragedetail.StatusIncomplete
+			v.Files[0].Functions[0].Reasons = []string{"attribution_ambiguous"}
+		}},
+		{"incomplete project publishes gaps", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"attribution_ambiguous"}
+		}},
+		{"gap points at covered line", func(v *coveragedetail.Index) {
+			v.Gaps[0].Location = coveragedomain.SourceLocation{Line: 1}
+			v.Gaps[0].ID, _ = coveragedetail.StableGapID(v.ReportID, v.Gaps[0].FunctionID, "line", v.Gaps[0].Location, 0)
+		}},
+		{"gap points at missing branch", func(v *coveragedetail.Index) {
+			v.Gaps[2].Ordinal = 9
+			v.Gaps[2].ID, _ = coveragedetail.StableGapID(v.ReportID, v.Gaps[2].FunctionID, "branch", v.Gaps[2].Location, 9)
+		}},
+		{"missing uncovered gap", func(v *coveragedetail.Index) { v.Gaps = v.Gaps[1:] }},
+		{"child reason not propagated", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"other_reason"}
+			v.Files[0].Status = coveragedetail.StatusIncomplete
+			v.Files[0].Reasons = []string{"attribution_ambiguous"}
+			v.Gaps = nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			index := detailStoreFixture(t, store, 7011)
+			bad := copyDetailIndex(index)
+			tc.mutate(&bad)
+			if err := store.PutCoverageDetail(ctx, bad); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("contradictory index accepted: %v", err)
+			}
+			if _, err := store.GetCoverageProject(ctx, index.ReportID); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("invalid index persisted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCoverageDetailValidatorAcceptsCanonicalBuildIndex(t *testing.T) {
+	report := coveragedomain.Report{
+		ID: strings.Repeat("a", 32), RunID: strings.Repeat("b", 32), TestRunID: strings.Repeat("c", 32), ArtifactID: strings.Repeat("d", 32),
+		SchemaVersion: coveragedomain.SchemaVersion10, CreatedAt: time.Now().UTC(),
+		Completeness: coveragedomain.Completeness{Outcome: coveragedomain.OutcomeAvailable},
+		Summary:      coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 1, Total: 1}, Lines: coveragedomain.Metric{Covered: 1, Total: 2}, Branches: coveragedomain.Metric{Covered: 0, Total: 1}},
+		Toolchain:    coverageToolchain(7012), Sources: []coveragedomain.SourceSnapshot{{URI: "src/a.cpp", SHA256: strings.Repeat("e", 64)}},
+	}
+	index, err := coveragedetail.Build(coveragedetail.BuildInput{WorkspaceGeneration: strings.Repeat("f", 64), ProjectID: "core", Report: report, Sources: report.Sources, Functions: []coveragedomain.FunctionObservation{{QualifiedName: "foo", File: "src/a.cpp", ExecutionCount: 1, Lines: []coveragedomain.LineObservation{{Line: 1, Count: 1}, {Line: 2, Count: 0}}, Branches: []coveragedomain.BranchObservation{{Line: 2, Column: 1, Ordinal: 0, HasOrdinal: true, Count: 0}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDetailIndex(index); err != nil {
+		t.Fatalf("canonical Build index rejected: %v", err)
+	}
+}
+
+func TestCoverageDetailRejectsMissingReportMismatchReason(t *testing.T) {
+	store := openTestStore(t)
+	index := detailStoreFixture(t, store, 7013)
+	index.Files = nil
+	index.Gaps = nil
+	index.Project.Summary = coveragedomain.Summary{}
+	index.Project.Status = coveragedetail.StatusIncomplete
+	index.Project.Reasons = []string{"other_reason"}
+	if err := store.PutCoverageDetail(context.Background(), index); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("missing aggregate mismatch reason = %v", err)
+	}
+}
+
+func TestCoverageDetailRejectsCurrentChildOfPartialReport(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mutation := coverageCompletionFixture(t, store, 7014, coveragedomain.OutcomePartial, "")
+	if _, _, err := store.Apply(ctx, mutation); err != nil {
+		t.Fatal(err)
+	}
+	report := mutation.FinishCoverage.Report
+	fileID, err := coveragedetail.StableFileID(mutation.FinishCoverage.Run.Request.ProjectID, "src/a.cpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := coveragedetail.Index{WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration, ProjectID: mutation.FinishCoverage.Run.Request.ProjectID, ReportID: report.ID, RunID: report.RunID, Toolchain: report.Toolchain, Project: coveragedetail.Project{Status: coveragedetail.StatusIncomplete, Reasons: []string{"detail_aggregate_mismatch", "test_crashed", "test_timed_out"}}, Files: []coveragedetail.File{{ID: fileID, RelativePath: "src/a.cpp", SourceSHA256: strings.Repeat("a", 64), Status: coveragedetail.StatusCurrent}}}
+	if err := store.PutCoverageDetail(ctx, index); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("partial report current child = %v", err)
 	}
 }
 
@@ -53,7 +200,7 @@ func TestCoverageDetailPersistsAndPages(t *testing.T) {
 	for _, tc := range []struct {
 		table string
 		want  int
-	}{{"coverage_detail_branches", 1}, {"coverage_detail_gaps", 1}, {"coverage_detail_reasons", 2}} {
+	}{{"coverage_detail_branches", 4}, {"coverage_detail_gaps", 3}, {"coverage_detail_reasons", 0}} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM `+tc.table+` WHERE report_id=?`, index.ReportID).Scan(&count); err != nil || count != tc.want {
 			t.Fatalf("%s count = %d, %v", tc.table, count, err)
@@ -85,13 +232,13 @@ func TestCoverageDetailPersistsAndPages(t *testing.T) {
 	}
 	lq.Cursor = lines.NextCursor
 	lines, err = store.ListCoverageLines(ctx, lq)
-	if err != nil || len(lines.Items) != 1 || lines.Items[0].Line != 2 || lines.NextCursor != "" {
+	if err != nil || len(lines.Items) != 1 || lines.Items[0].Line != 2 || lines.NextCursor == "" {
 		t.Fatalf("next lines = %#v, %v", lines, err)
 	}
 	lq.Cursor = ""
 	lq.Filter = "uncovered"
 	lines, err = store.ListCoverageLines(ctx, lq)
-	if err != nil || len(lines.Items) != 1 || lines.Items[0].Line != 2 {
+	if err != nil || len(lines.Items) != 1 || lines.Items[0].Line != 9 {
 		t.Fatalf("uncovered line filter = %#v, %v", lines, err)
 	}
 	q.Cursor = ""
@@ -153,7 +300,9 @@ func TestCoverageDetailRejectsDuplicateAndCorruptRowsAtomically(t *testing.T) {
 		t.Fatalf("duplicate file error = %v", err)
 	}
 	bad = index
-	bad.Project.Status = coveragedetail.StatusCurrent
+	bad.Files = append([]coveragedetail.File{}, index.Files...)
+	bad.Files[1].Status = coveragedetail.StatusIncomplete
+	bad.Files[1].Reasons = []string{"attribution_ambiguous"}
 	if err := store.PutCoverageDetail(ctx, bad); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("current project with incomplete file = %v", err)
 	}
@@ -197,7 +346,7 @@ func TestCoverageDetailPartialReportRemainsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := mutation.FinishCoverage.Report
-	index := coveragedetail.Index{WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration, ProjectID: mutation.FinishCoverage.Run.Request.ProjectID, ReportID: report.ID, RunID: report.RunID, Toolchain: report.Toolchain, Project: coveragedetail.Project{Summary: report.Summary, Status: coveragedetail.StatusIncomplete, Reasons: []string{"test_crashed", "test_timed_out"}}}
+	index := coveragedetail.Index{WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration, ProjectID: mutation.FinishCoverage.Run.Request.ProjectID, ReportID: report.ID, RunID: report.RunID, Toolchain: report.Toolchain, Project: coveragedetail.Project{Status: coveragedetail.StatusIncomplete, Reasons: []string{"detail_aggregate_mismatch", "test_crashed", "test_timed_out"}}}
 	if err := store.PutCoverageDetail(ctx, index); err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +371,13 @@ func TestCoverageDetailFunctionKeysetAndPageBounds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		index.Files[0].Functions = append(index.Files[0].Functions, coveragedetail.Function{ID: id, Name: "foo", Status: coveragedetail.StatusCurrent})
+		index.Files[0].Functions = append(index.Files[0].Functions, coveragedetail.Function{ID: id, Name: "foo", Status: coveragedetail.StatusIncomplete, Reasons: []string{"attribution_ambiguous"}})
 	}
+	index.Project.Status = coveragedetail.StatusIncomplete
+	index.Project.Reasons = []string{"attribution_ambiguous"}
+	index.Files[0].Status = coveragedetail.StatusIncomplete
+	index.Files[0].Reasons = []string{"attribution_ambiguous"}
+	index.Gaps = nil
 	if err := store.PutCoverageDetail(ctx, index); err != nil {
 		t.Fatal(err)
 	}
@@ -265,6 +419,11 @@ func TestCoverageDetailIncompleteDeltaAndForeignKeyCleanup(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	index := detailStoreFixture(t, store, 7004)
+	index.Project.Status = coveragedetail.StatusIncomplete
+	index.Project.Reasons = []string{"attribution_ambiguous"}
+	index.Files[1].Status = coveragedetail.StatusIncomplete
+	index.Files[1].Reasons = []string{"attribution_ambiguous"}
+	index.Gaps = nil
 	index.Project.Delta.Lines = coveragedetail.DeltaMetric{Covered: -1, Total: 2}
 	index.Files[0].Delta.Functions = coveragedetail.DeltaMetric{Covered: 1, Total: 0}
 	if err := store.PutCoverageDetail(ctx, index); err != nil {

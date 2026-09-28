@@ -70,7 +70,7 @@ func (s *Store) PutCoverageDetail(ctx context.Context, index coveragedetail.Inde
 		(index.Project.Status == coveragedetail.StatusCurrent && (report.Completeness.Outcome != coveragedomain.OutcomeAvailable || index.Project.Summary != report.Summary)) {
 		return task.ErrInvalidArgument
 	}
-	if err := validateDetailIndex(index); err != nil {
+	if err := validateDetailIndex(index); err != nil || !validDetailReportSemantics(index, report) {
 		return task.ErrInvalidArgument
 	}
 	_, _, toolchainJSON, err := encodeCoverageReportMetadata(report)
@@ -165,8 +165,13 @@ func validDetailLine(v coveragedetail.Line) bool {
 func validateDetailIndex(index coveragedetail.Index) error {
 	files, functions, gaps := map[string]bool{}, map[string]string{}, map[string]bool{}
 	paths := map[string]bool{}
+	expectedGaps := map[string]bool{}
+	projectSummary := coveragedomain.Summary{}
 	for _, f := range index.Files {
 		if index.Project.Status == coveragedetail.StatusCurrent && f.Status != coveragedetail.StatusCurrent {
+			return coveragedetail.ErrInvalidDetail
+		}
+		if !validDetailReasons(f.Status, f.Reasons) || !reasonsInclude(index.Project.Reasons, f.Reasons) {
 			return coveragedetail.ErrInvalidDetail
 		}
 		id, err := coveragedetail.StableFileID(index.ProjectID, f.RelativePath)
@@ -176,6 +181,9 @@ func validateDetailIndex(index coveragedetail.Index) error {
 		files[f.ID] = true
 		paths[f.RelativePath] = true
 		lineIDs := map[int64]bool{}
+		fileLineCounts := map[int64]int64{}
+		fileBranchCounts := map[[3]int64]int64{}
+		functionSummary := coveragedomain.Summary{}
 		for _, line := range f.Lines {
 			if !validDetailLine(line) || lineIDs[line.Line] {
 				return coveragedetail.ErrInvalidDetail
@@ -183,35 +191,177 @@ func validateDetailIndex(index coveragedetail.Index) error {
 			lineIDs[line.Line] = true
 		}
 		for _, fn := range f.Functions {
+			if f.Status == coveragedetail.StatusCurrent && fn.Status != coveragedetail.StatusCurrent || !validDetailReasons(fn.Status, fn.Reasons) || !reasonsInclude(f.Reasons, fn.Reasons) {
+				return coveragedetail.ErrInvalidDetail
+			}
 			if !lowerHex(fn.ID, 32) || functions[fn.ID] != "" || !validDetailStatus(fn.Status) || !validDetailSummary(fn.Summary) || !validDetailDelta(fn.Delta) {
+				return coveragedetail.ErrInvalidDetail
+			}
+			if fn.Status == coveragedetail.StatusCurrent && fn.Summary.Functions.Total != 1 || fn.Summary.Functions.Total > 1 {
 				return coveragedetail.ErrInvalidDetail
 			}
 			functions[fn.ID] = f.ID
 			lines := map[int64]bool{}
+			lineMetric := coveragedomain.Metric{}
 			for _, line := range fn.Lines {
 				if !validDetailLine(line) || lines[line.Line] {
 					return coveragedetail.ErrInvalidDetail
 				}
 				lines[line.Line] = true
+				lineMetric.Total++
+				if line.Count > 0 {
+					lineMetric.Covered++
+				}
+				if line.Count > fileLineCounts[line.Line] {
+					fileLineCounts[line.Line] = line.Count
+				} else if _, ok := fileLineCounts[line.Line]; !ok {
+					fileLineCounts[line.Line] = 0
+				}
+				if index.Project.Status == coveragedetail.StatusCurrent && line.Count == 0 {
+					id, err := coveragedetail.StableGapID(index.ReportID, fn.ID, "line", coveragedomain.SourceLocation{Line: line.Line}, 0)
+					if err != nil {
+						return coveragedetail.ErrInvalidDetail
+					}
+					expectedGaps[id] = true
+				}
 			}
 			branches := map[[3]int64]bool{}
+			branchMetric := coveragedomain.Metric{}
 			for _, b := range fn.Branches {
 				k := [3]int64{b.Line, b.Column, b.Ordinal}
 				if b.Line < 1 || b.Line > coveragedomain.MaxSafeInteger || b.Column < 0 || b.Column > coveragedomain.MaxSafeInteger || b.Ordinal < 0 || b.Ordinal > coveragedomain.MaxSafeInteger || b.Count < 0 || b.Count > coveragedomain.MaxSafeInteger || branches[k] {
 					return coveragedetail.ErrInvalidDetail
 				}
 				branches[k] = true
+				branchMetric.Total++
+				if b.Count > 0 {
+					branchMetric.Covered++
+				}
+				if b.Count > fileBranchCounts[k] {
+					fileBranchCounts[k] = b.Count
+				} else if _, ok := fileBranchCounts[k]; !ok {
+					fileBranchCounts[k] = 0
+				}
+				if index.Project.Status == coveragedetail.StatusCurrent && b.Count == 0 {
+					id, err := coveragedetail.StableGapID(index.ReportID, fn.ID, "branch", coveragedomain.SourceLocation{Line: b.Line, Column: b.Column}, b.Ordinal)
+					if err != nil {
+						return coveragedetail.ErrInvalidDetail
+					}
+					expectedGaps[id] = true
+				}
+			}
+			if fn.Summary.Lines != lineMetric || fn.Summary.Branches != branchMetric || fn.Summary.Functions.Total == 0 && (len(fn.Lines) > 0 || len(fn.Branches) > 0) {
+				return coveragedetail.ErrInvalidDetail
+			}
+			var err error
+			functionSummary, err = coveragedomain.AddSummary(functionSummary, fn.Summary)
+			if err != nil {
+				return coveragedetail.ErrInvalidDetail
 			}
 		}
+		if len(fileLineCounts) != len(f.Lines) {
+			return coveragedetail.ErrInvalidDetail
+		}
+		fileLines := coveragedomain.Metric{}
+		for _, line := range f.Lines {
+			if count, ok := fileLineCounts[line.Line]; !ok || count != line.Count {
+				return coveragedetail.ErrInvalidDetail
+			}
+			fileLines.Total++
+			if line.Count > 0 {
+				fileLines.Covered++
+			}
+		}
+		fileBranches := coveragedomain.Metric{}
+		for _, count := range fileBranchCounts {
+			fileBranches.Total++
+			if count > 0 {
+				fileBranches.Covered++
+			}
+		}
+		if f.Summary.Functions != functionSummary.Functions || f.Summary.Lines != fileLines || f.Summary.Branches != fileBranches {
+			return coveragedetail.ErrInvalidDetail
+		}
+		projectSummary, err = coveragedomain.AddSummary(projectSummary, f.Summary)
+		if err != nil {
+			return coveragedetail.ErrInvalidDetail
+		}
+	}
+	if index.Project.Summary != projectSummary || !validDetailReasons(index.Project.Status, index.Project.Reasons) {
+		return coveragedetail.ErrInvalidDetail
+	}
+	if index.Project.Status != coveragedetail.StatusCurrent && len(index.Gaps) != 0 {
+		return coveragedetail.ErrInvalidDetail
 	}
 	for _, g := range index.Gaps {
 		id, err := coveragedetail.StableGapID(index.ReportID, g.FunctionID, g.Kind, g.Location, g.Ordinal)
-		if err != nil || id != g.ID || gaps[g.ID] || !files[g.FileID] || functions[g.FunctionID] != g.FileID {
+		if err != nil || id != g.ID || gaps[g.ID] || !files[g.FileID] || functions[g.FunctionID] != g.FileID || !expectedGaps[g.ID] {
 			return coveragedetail.ErrInvalidDetail
 		}
 		gaps[g.ID] = true
 	}
+	if len(gaps) != len(expectedGaps) {
+		return coveragedetail.ErrInvalidDetail
+	}
 	return nil
+}
+
+func validDetailReasons(status coveragedetail.Status, reasons []string) bool {
+	if status == coveragedetail.StatusCurrent {
+		return len(reasons) == 0
+	}
+	return len(reasons) > 0
+}
+func reasonsInclude(parent, child []string) bool {
+	for _, reason := range child {
+		found := false
+		for _, candidate := range parent {
+			if reason == candidate {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func validDetailReportSemantics(index coveragedetail.Index, report coveragedomain.Report) bool {
+	if index.Project.Summary != report.Summary {
+		if index.Project.Status != coveragedetail.StatusIncomplete || !reasonsInclude(index.Project.Reasons, []string{"detail_aggregate_mismatch"}) {
+			return false
+		}
+		for _, file := range index.Files {
+			if file.Status != coveragedetail.StatusIncomplete || !reasonsInclude(file.Reasons, []string{"detail_aggregate_mismatch"}) {
+				return false
+			}
+		}
+	}
+	if report.Completeness.Outcome == coveragedomain.OutcomePartial {
+		if index.Project.Status != coveragedetail.StatusIncomplete {
+			return false
+		}
+		reasons := make([]string, 0, len(report.Completeness.Reasons))
+		for _, reason := range report.Completeness.Reasons {
+			reasons = append(reasons, string(reason))
+		}
+		if !reasonsInclude(index.Project.Reasons, reasons) {
+			return false
+		}
+		for _, file := range index.Files {
+			if file.Status != coveragedetail.StatusIncomplete || !reasonsInclude(file.Reasons, reasons) {
+				return false
+			}
+			for _, fn := range file.Functions {
+				if fn.Status != coveragedetail.StatusIncomplete || !reasonsInclude(fn.Reasons, reasons) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 func mustDetailJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 func insertDetailReasons(ctx context.Context, tx *sql.Tx, reportID, kind, id string, reasons []string) error {
