@@ -339,6 +339,12 @@ func newManagedFixture(t *testing.T) managedFixture {
 	f := newFixture(t)
 	registry := &managedRegistryFixture{records: map[string]managedtest.Record{}, pending: map[string]managedtest.Acceptance{}}
 	f.p.ManagedRegistry = registry
+	f.p.ManagedSelectionValidator = func(_ context.Context, selection ManagedSelection) ([]byte, error) {
+		if len(selection.Files) == 0 || !validHex(selection.SelectedOutputDigest, 64) {
+			return nil, ErrConflict
+		}
+		return []byte("validated-selected:" + selection.SelectedOutputDigest), nil
+	}
 	functionID := strings.Repeat("a", 32)
 	caseID, err := managedtest.StableCaseID("project", "src/a.cpp", functionID, "zero")
 	if err != nil {
@@ -578,6 +584,126 @@ func TestManagedKeepCurrentAdvancesAcceptedDigestWithoutRewritingFile(t *testing
 	}
 }
 
+func TestManagedSelectedBytesBindValidationReceiptAndRegistry(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	current := bytes.Replace(f.block, []byte("CHECK_TRUE(1)"), []byte("CHECK_TRUE(3)"), 1)
+	f.seedAccepted(t, current)
+	currentDoc, err := managedtest.ParseDocument(current, maxEditBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set.Managed.Records[0].AcceptedBlockDigest = currentDoc.Blocks[0].Digest
+	decision := f.decision(t)
+	decision.Resolutions[f.record.CaseID] = managedtest.KeepCurrent
+	var observed ManagedSelection
+	f.p.ManagedSelectionValidator = func(_ context.Context, selection ManagedSelection) ([]byte, error) {
+		observed = selection
+		return []byte("validated-current:" + selection.SelectedOutputDigest), nil
+	}
+	plan, err := f.p.PlanManaged(context.Background(), f.set, decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.Files) != 2 || !bytes.Equal(observed.Files[0].Content, current) || plan.ManagedSelectedOutputDigest != observed.SelectedOutputDigest || plan.ManagedValidationReceiptDigest == f.set.Managed.ValidationReceiptDigest {
+		t.Fatalf("resolved bytes were not validated and bound: %+v %+v", observed, plan)
+	}
+	receipt, err := f.p.PublishManaged(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := f.registry.Get(context.Background(), f.record.CaseID)
+	if err != nil || receipt.ManagedSelectedOutputDigest != plan.ManagedSelectedOutputDigest || receipt.ManagedValidationReceiptDigest != plan.ManagedValidationReceiptDigest || stored.ValidationReceiptDigest != plan.ManagedValidationReceiptDigest {
+		t.Fatalf("final validation lineage lost: receipt=%+v record=%+v err=%v", receipt, stored, err)
+	}
+}
+
+func TestManagedSelectionRequiresValidatorAndRejectsEmptyProof(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	f.p.ManagedSelectionValidator = nil
+	if _, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t)); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("missing validator accepted: %v", err)
+	}
+	f.p.ManagedSelectionValidator = func(context.Context, ManagedSelection) ([]byte, error) { return nil, nil }
+	if _, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("empty validation proof accepted: %v", err)
+	}
+}
+
+func TestManagedReadOnlyReceiptRejectsCMakeDriftAfterPublication(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	f.seedAccepted(t, f.block)
+	plan, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Edits) != 0 {
+		t.Fatal("expected read-only plan")
+	}
+	if _, err := f.p.PublishManaged(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "tests", "CMakeLists.txt"), []byte(f.before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.p.PublishManaged(context.Background(), plan); !errors.Is(err, ErrConflict) {
+		t.Fatalf("CMake drift accepted on retry: %v", err)
+	}
+}
+
+func TestManagedRecoveryRejectsTamperedFinalValidationLineage(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	plan, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := f.p.plans[plan.ConfirmationDigest]
+	a := prepared.managed.acceptances[0]
+	j := journalRecord{Version: 1, ConfirmationDigest: plan.ConfirmationDigest, Receipt: receiptFor(plan), ManagedAcceptances: []managedtest.Acceptance{a}}
+	for _, file := range prepared.files {
+		j.Files = append(j.Files, journalFile{Path: file.edit.Path, BeforeDigest: file.edit.BeforeDigest, AfterDigest: file.edit.AfterDigest, Before: file.before, Existed: file.existed, StageName: ".testgen-a.stage", BackupName: ".testgen-a.backup", HoldName: ".testgen-a.hold"})
+	}
+	if !validJournal(j) {
+		t.Fatal("valid managed journal rejected")
+	}
+	j.Receipt.ManagedSelectedOutputDigest = strings.Repeat("f", 64)
+	if validJournal(j) {
+		t.Fatal("tampered selected-output digest accepted")
+	}
+	j.Receipt = receiptFor(plan)
+	j.ManagedAcceptances[0].Record.ValidationReceiptDigest = strings.Repeat("f", 64)
+	if validJournal(j) {
+		t.Fatal("tampered final validation lineage accepted")
+	}
+}
+
+func TestManagedStagedBytesRereadImmediatelyBeforeCommit(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	plan, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.hooks.beforeRename = func(path string) {
+		if path != f.record.TestRelativePath {
+			return
+		}
+		stage := ".testgen-" + plan.ConfirmationDigest[:16] + "-a.stage"
+		if err := os.WriteFile(filepath.Join(f.root, "tests", "generated", "src", stage), []byte("tampered stage\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.p.PublishManaged(context.Background(), plan); !errors.Is(err, ErrConflict) {
+		t.Fatalf("tampered stage committed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(f.record.TestRelativePath))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tampered stage published: %v", err)
+	}
+}
+
 func addSecondManagedFile(t *testing.T, f *managedFixture) ManagedDecision {
 	t.Helper()
 	functionID := f.record.FunctionID
@@ -749,6 +875,65 @@ func TestManagedNoCMakeEditRejectsCommentOnlySourceReference(t *testing.T) {
 	}
 	if _, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("comment-only CMake ref accepted: %v", err)
+	}
+}
+
+func TestManagedNoCMakeEditRejectsCommentedOrQuotedCommand(t *testing.T) {
+	for _, fake := range []string{
+		"# target_sources(unit_tests PRIVATE \"generated/src/a.cpp_test.cpp\")\n",
+		"set(note \"target_sources(unit_tests PRIVATE \\\"generated/src/a.cpp_test.cpp\\\")\")\n",
+		"if(FALSE)\ntarget_sources(unit_tests PRIVATE \"generated/src/a.cpp_test.cpp\")\nendif()\n",
+	} {
+		t.Run(fake, func(t *testing.T) {
+			f := newManagedFixture(t)
+			defer f.close(t)
+			f.seedAccepted(t, f.block)
+			if err := os.WriteFile(filepath.Join(f.root, "tests", "CMakeLists.txt"), []byte(f.before+fake), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("fake CMake linkage accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedConvertToManualRequiresCurrentMarker(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	current := []byte("// user removed the managed marker and body\n")
+	f.seedAccepted(t, current)
+	decision := f.decision(t)
+	decision.Resolutions[f.record.CaseID] = managedtest.ConvertToManual
+	decision.Resolutions["scaffold:"+f.record.TestRelativePath] = managedtest.KeepCurrent
+	if _, err := f.p.PlanManaged(context.Background(), f.set, decision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("orphan conversion accepted: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(f.record.TestRelativePath)))
+	if err != nil || !bytes.Equal(got, current) {
+		t.Fatalf("orphan conversion changed current bytes: %q %v", got, err)
+	}
+}
+
+func TestManagedReadOnlyIdentityBindsCharacterizationAndTargets(t *testing.T) {
+	f := newManagedFixture(t)
+	defer f.close(t)
+	f.seedAccepted(t, f.block)
+	first, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set.CharacterizationIDs = []string{f.set.CaseIDs[0]}
+	second, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CandidateSetDigest == second.CandidateSetDigest || first.ConfirmationDigest == second.ConfirmationDigest || second.CharacterizationDigest == "" {
+		t.Fatalf("characterization replay: first=%+v second=%+v", first, second)
+	}
+	f.set.TestTarget = "bad target"
+	if _, err := f.p.PlanManaged(context.Background(), f.set, f.decision(t)); err == nil {
+		t.Fatalf("invalid zero-write target accepted: %v", err)
 	}
 }
 

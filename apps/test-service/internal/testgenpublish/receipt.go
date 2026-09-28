@@ -8,6 +8,8 @@ type Receipt struct {
 	Edits                                                                                             []PlannedEdit
 	ManagedReadOnly                                                                                   []PlannedEdit
 	ManagedReviewID, ManagedReviewDigest, ManagedDecisionDigest, ManagedEvidenceDigest                string
+	ManagedSelectedOutputDigest, ManagedValidationReceiptDigest                                       string
+	ManagedSelectedOutputs                                                                            []SelectedOutput
 }
 
 func (r Receipt) String() string { data, _ := json.Marshal(r); return string(data) }

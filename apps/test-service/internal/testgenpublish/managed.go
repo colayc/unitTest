@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -36,7 +35,7 @@ type preparedSource struct {
 }
 
 func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, decision ManagedDecision) (Plan, error) {
-	if p == nil || ctx == nil || p.ManagedRegistry == nil || candidate.Managed == nil ||
+	if p == nil || ctx == nil || p.ManagedRegistry == nil || p.ManagedSelectionValidator == nil || candidate.Managed == nil ||
 		!validHex(candidate.Managed.ReviewID, 32) || !validHex(decision.ReviewID, 32) ||
 		!validHex(decision.ReviewDigest, 64) || decision.ReviewID != candidate.Managed.ReviewID ||
 		!validHex(candidate.Managed.ValidationReceiptDigest, 64) || len(candidate.Managed.ValidationReceipt) == 0 || len(candidate.Managed.ValidationReceipt) > 1<<20 || digest(candidate.Managed.ValidationReceipt) != candidate.Managed.ValidationReceiptDigest || candidate.Managed.ToolchainID == "" ||
@@ -45,6 +44,9 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 		return Plan{}, ErrInvalidPlan
 	}
 	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
+	if _, _, err := candidateIdentity(candidate, nil); err != nil {
 		return Plan{}, err
 	}
 	if err := p.verify(ctx, candidate.SnapshotDigest); err != nil {
@@ -83,6 +85,7 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 		}
 	}
 	resolved := make([]testgenrender.StagedFile, 0, len(candidate.Files))
+	selectedFiles := make([]testgenrender.StagedFile, 0, len(candidate.Files)+1)
 	reviews := make([]managedtest.Review, 0, len(candidate.Managed.Inputs))
 	publication := &managedPublication{}
 	seenPaths, seenCases, required := map[string]bool{}, map[string]bool{}, map[string]bool{}
@@ -140,6 +143,7 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 		if err != nil {
 			return Plan{}, ErrConflict
 		}
+		selectedFiles = append(selectedFiles, testgenrender.StagedFile{Path: generated.Path, Content: bytes.Clone(merged), AfterDigest: digest(merged)})
 		for _, block := range output.Blocks {
 			if seenCases[block.CaseID] && !recordAccepted(input.Accepted, block.CaseID) {
 				return Plan{}, ErrInvalidPlan
@@ -210,8 +214,12 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 	cmakeEdited := false
 	for _, file := range candidate.Files {
 		if cmakePath(file.Path) {
+			if file.Path != candidate.Managed.CMakePath {
+				return Plan{}, ErrInvalidPlan
+			}
 			cmakeEdited = true
 			resolved = append(resolved, file)
+			selectedFiles = append(selectedFiles, testgenrender.StagedFile{Path: file.Path, Content: bytes.Clone(file.Content), AfterDigest: file.AfterDigest})
 		}
 	}
 	if !cmakePath(candidate.Managed.CMakePath) {
@@ -229,6 +237,23 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 			}
 		}
 		publication.sources = append(publication.sources, preparedSource{candidate.Managed.CMakePath, digest(cmake), identity})
+		selectedFiles = append(selectedFiles, testgenrender.StagedFile{Path: candidate.Managed.CMakePath, Content: cmake, AfterDigest: digest(cmake)})
+	}
+	selectedOutputs, selectedDigest, err := managedSelectedOutputs(selectedFiles)
+	if err != nil {
+		return Plan{}, err
+	}
+	validationFiles := make([]testgenrender.StagedFile, len(selectedFiles))
+	for i, file := range selectedFiles {
+		validationFiles[i] = testgenrender.StagedFile{Path: file.Path, Content: bytes.Clone(file.Content), AfterDigest: file.AfterDigest}
+	}
+	validationReceipt, err := p.ManagedSelectionValidator(ctx, ManagedSelection{RunID: candidate.RunID, SnapshotDigest: candidate.SnapshotDigest, ToolchainID: candidate.Managed.ToolchainID, SelectedOutputDigest: selectedDigest, Files: validationFiles})
+	if err != nil || len(validationReceipt) == 0 || len(validationReceipt) > 1<<20 {
+		return Plan{}, ErrConflict
+	}
+	validationDigest := digest([]byte("managed-selection-validation-v1\x00" + selectedDigest + digest(validationReceipt)))
+	for i := range publication.acceptances {
+		publication.acceptances[i].Record.ValidationReceiptDigest = validationDigest
 	}
 	candidate.Files = resolved
 	candidate.Diff = ""
@@ -242,17 +267,24 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 		}
 		originalConfirmation = base.ConfirmationDigest
 	} else {
-		if !validHex(candidate.RunID, 32) || !validHex(candidate.SnapshotDigest, 64) || len(publication.readonly) == 0 || len(candidate.CaseIDs) == 0 {
+		if len(publication.readonly) == 0 {
 			return Plan{}, ErrInvalidPlan
 		}
-		base = PublishPlan{RunID: candidate.RunID, SnapshotDigest: candidate.SnapshotDigest, DiffDigest: digest(nil), CandidateSetDigest: digest([]byte("managed-readonly-v1\x00" + candidate.RunID + candidate.SnapshotDigest + candidate.TestTarget + candidate.ProductionTarget + candidate.FrameworkTarget))}
+		setDigest, charDigest, err := candidateIdentity(candidate, nil)
+		if err != nil {
+			return Plan{}, err
+		}
+		base = PublishPlan{RunID: candidate.RunID, SnapshotDigest: candidate.SnapshotDigest, DiffDigest: digest(nil), CandidateSetDigest: setDigest, CharacterizationDigest: charDigest}
 	}
 	base.ManagedReadOnly = append([]PlannedEdit(nil), publication.readonly...)
+	base.ManagedSelectedOutputs = selectedOutputs
+	base.ManagedSelectedOutputDigest = selectedDigest
+	base.ManagedValidationReceiptDigest = validationDigest
 	decisionDigest := digestManagedDecision(decision)
 	evidenceDigest := digestManagedEvidence(candidate.Managed)
 	base.ManagedReviewID, base.ManagedReviewDigest, base.ManagedDecisionDigest, base.ManagedEvidenceDigest = decision.ReviewID, decision.ReviewDigest, decisionDigest, evidenceDigest
 	readonlyEncoded, _ := json.Marshal(base.ManagedReadOnly)
-	base.CandidateSetDigest = digest([]byte("managed-candidate-v1\x00" + base.CandidateSetDigest + decision.ReviewDigest + decisionDigest + evidenceDigest + digest(readonlyEncoded)))
+	base.CandidateSetDigest = digest([]byte("managed-candidate-v1\x00" + base.CandidateSetDigest + decision.ReviewDigest + decisionDigest + evidenceDigest + digest(readonlyEncoded) + selectedDigest + validationDigest))
 	base.ConfirmationDigest = digest([]byte("managed-confirmation-v1\x00" + base.CandidateSetDigest + base.DiffDigest))
 	for i := range publication.acceptances {
 		publication.acceptances[i].AcceptanceID = digest([]byte(base.ConfirmationDigest + publication.acceptances[i].Record.CaseID))[:32]
@@ -282,14 +314,43 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 }
 
 func managedCMakeLinked(cmake string, set CandidateSet, ref string) bool {
+	commands, ok := parseCMakeCommands(cmake)
+	if !ok {
+		return false
+	}
 	if set.FrameworkTarget == "CppUTest" {
-		return strings.Contains(cmake, fmt.Sprintf("target_sources(%s PRIVATE \"%s\")", set.TestTarget, ref))
+		return cmakeHasCommand(commands, "target_sources", set.TestTarget, "PRIVATE", ref)
 	}
 	if (set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && validHex(set.SymbolID, 64) {
 		generated := set.TestTarget + "_generated_" + set.SymbolID[:12]
-		return strings.Contains(cmake, fmt.Sprintf("add_executable(%s \"%s\")", generated, ref)) && strings.Contains(cmake, fmt.Sprintf("target_link_libraries(%s PRIVATE %s %s)", generated, set.ProductionTarget, set.FrameworkTarget))
+		return cmakeHasCommand(commands, "add_executable", generated, ref) && cmakeHasCommand(commands, "target_link_libraries", generated, "PRIVATE", set.ProductionTarget, set.FrameworkTarget)
 	}
 	return false
+}
+
+func managedSelectedOutputs(files []testgenrender.StagedFile) ([]SelectedOutput, string, error) {
+	if len(files) < 2 || len(files) > maxFiles {
+		return nil, "", ErrInvalidPlan
+	}
+	outputs := make([]SelectedOutput, 0, len(files))
+	seen := map[string]bool{}
+	cmakeCount := 0
+	for _, file := range files {
+		if !generatedTestPath(file.Path) && !cmakePath(file.Path) || seen[strings.ToLower(file.Path)] || len(file.Content) == 0 || len(file.Content) > maxEditBytes || digest(file.Content) != file.AfterDigest {
+			return nil, "", ErrInvalidPlan
+		}
+		if cmakePath(file.Path) {
+			cmakeCount++
+		}
+		seen[strings.ToLower(file.Path)] = true
+		outputs = append(outputs, SelectedOutput{file.Path, file.AfterDigest})
+	}
+	if cmakeCount != 1 {
+		return nil, "", ErrInvalidPlan
+	}
+	sort.Slice(outputs, func(i, j int) bool { return outputs[i].Path < outputs[j].Path })
+	encoded, _ := json.Marshal(outputs)
+	return outputs, digest(append([]byte("managed-selected-v1\x00"), encoded...)), nil
 }
 
 func recordAccepted(records []managedtest.Record, id string) bool {
@@ -375,9 +436,10 @@ func mergeManagedReview(current managedtest.Document, generated []byte, review m
 		next, hasGenerated := gen[block.CaseID]
 		switch {
 		case op.Conflict && choice == managedtest.ConvertToManual:
-			if hasCurrent {
-				out.Write(old.Body)
+			if !hasCurrent {
+				return nil, ErrConflict
 			}
+			out.Write(old.Body)
 		case op.Conflict && choice == managedtest.KeepCurrent:
 			if hasCurrent {
 				out.Write(current.Bytes[old.StartByte:old.EndByte])
@@ -410,8 +472,7 @@ func mergeManagedReview(current managedtest.Document, generated []byte, review m
 		if op.Conflict {
 			choice := choices[block.CaseID]
 			if choice == managedtest.ConvertToManual {
-				out.Write(block.Body)
-				continue
+				return nil, ErrConflict
 			}
 			if useGeneratedScaffold && choice != managedtest.KeepCurrent || !useGeneratedScaffold && choice != managedtest.UseGenerated {
 				continue

@@ -51,7 +51,11 @@ type PublishPlan struct {
 	Edits                                                                              []PlannedEdit
 	ManagedReadOnly                                                                    []PlannedEdit
 	ManagedReviewID, ManagedReviewDigest, ManagedDecisionDigest, ManagedEvidenceDigest string
+	ManagedSelectedOutputDigest, ManagedValidationReceiptDigest                        string
+	ManagedSelectedOutputs                                                             []SelectedOutput
 }
+
+type SelectedOutput struct{ Path, Digest string }
 
 type preparedFile struct {
 	edit     PlannedEdit
@@ -221,6 +225,45 @@ func (p *Publisher) plan(ctx context.Context, set CandidateSet, managed bool) (P
 	if set.Diff != "" && set.Diff != diff.String() {
 		return PublishPlan{}, ErrInvalidPlan
 	}
+	setDigest, charDigest, err := candidateIdentity(set, edits)
+	if err != nil {
+		return PublishPlan{}, err
+	}
+	public := PublishPlan{RunID: set.RunID, CandidateSetDigest: setDigest, SnapshotDigest: set.SnapshotDigest, Diff: diff.String(), DiffDigest: digest([]byte(diff.String())), CharacterizationDigest: charDigest, Edits: edits}
+	confirmation, _ := json.Marshal(struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, CharacterizationDigest string }{public.RunID, public.CandidateSetDigest, public.SnapshotDigest, public.DiffDigest, public.CharacterizationDigest})
+	public.ConfirmationDigest = digest(confirmation)
+	p.mu.Lock()
+	p.plans[public.ConfirmationDigest] = preparedPlan{public: public, files: files}
+	p.mu.Unlock()
+	return public, nil
+}
+
+// candidateIdentity is shared by edited and read-only managed plans. A
+// read-only decision must not get a weaker candidate/characterization key.
+func candidateIdentity(set CandidateSet, edits []PlannedEdit) (string, string, error) {
+	if !validHex(set.RunID, 32) || !validHex(set.SnapshotDigest, 64) || len(set.CaseIDs) == 0 || len(set.CaseIDs) > 1000 ||
+		!identifier.MatchString(set.TestTarget) || !identifier.MatchString(set.ProductionTarget) || !identifier.MatchString(set.FrameworkTarget) ||
+		set.TestTarget == set.ProductionTarget || set.TestTarget == set.FrameworkTarget || set.ProductionTarget == set.FrameworkTarget ||
+		(set.FrameworkTarget != "CppUTest" && set.FrameworkTarget != "Unity" && set.FrameworkTarget != "unity") ||
+		((set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !validHex(set.SymbolID, 64)) {
+		return "", "", ErrInvalidPlan
+	}
+	seen := map[string]bool{}
+	for _, id := range set.CaseIDs {
+		if !validHex(id, 32) || seen[id] {
+			return "", "", ErrInvalidPlan
+		}
+		seen[id] = true
+	}
+	chars := append([]string(nil), set.CharacterizationIDs...)
+	charSeen := map[string]bool{}
+	for _, id := range chars {
+		if !seen[id] || charSeen[id] {
+			return "", "", ErrInvalidPlan
+		}
+		charSeen[id] = true
+	}
+	sort.Strings(chars)
 	charDigest := ""
 	if len(chars) > 0 {
 		encoded, _ := json.Marshal(chars)
@@ -236,14 +279,7 @@ func (p *Publisher) plan(ctx context.Context, set CandidateSet, managed bool) (P
 	}{set.RunID, set.SnapshotDigest, set.TestTarget, set.ProductionTarget, set.FrameworkTarget, set.SymbolID, append([]string(nil), set.CaseIDs...), identityEdits, charDigest}
 	sort.Strings(identity.CaseIDs)
 	encoded, _ := json.Marshal(identity)
-	setDigest := digest(encoded)
-	public := PublishPlan{RunID: set.RunID, CandidateSetDigest: setDigest, SnapshotDigest: set.SnapshotDigest, Diff: diff.String(), DiffDigest: digest([]byte(diff.String())), CharacterizationDigest: charDigest, Edits: edits}
-	confirmation, _ := json.Marshal(struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, CharacterizationDigest string }{public.RunID, public.CandidateSetDigest, public.SnapshotDigest, public.DiffDigest, public.CharacterizationDigest})
-	public.ConfirmationDigest = digest(confirmation)
-	p.mu.Lock()
-	p.plans[public.ConfirmationDigest] = preparedPlan{public: public, files: files}
-	p.mu.Unlock()
-	return public, nil
+	return digest(encoded), charDigest, nil
 }
 
 func cmakeSourceRef(cmake, test string) (string, bool) {

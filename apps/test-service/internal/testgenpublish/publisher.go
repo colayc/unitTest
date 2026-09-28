@@ -16,9 +16,19 @@ import (
 	"strings"
 	"sync"
 	"unit-test-ide.local/test-service/internal/managedtest"
+	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
 type SnapshotVerifier func(context.Context, string) error
+
+// ManagedSelectionValidator validates the exact post-resolution test and CMake
+// bytes. Runtime integrations must compile/run the selected set and return a
+// bounded validation receipt; absence of this callback fails managed planning.
+type ManagedSelectionValidator func(context.Context, ManagedSelection) ([]byte, error)
+type ManagedSelection struct {
+	RunID, SnapshotDigest, ToolchainID, SelectedOutputDigest string
+	Files                                                    []testgenrender.StagedFile
+}
 type AcceptRequest struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string }
 type publisherHooks struct {
 	fail               func(string) error
@@ -40,6 +50,7 @@ type Publisher struct {
 		managedtest.AcceptanceJournal
 		managedtest.RetirementRegistry
 	}
+	ManagedSelectionValidator ManagedSelectionValidator
 }
 
 type journalFile struct {
@@ -287,6 +298,9 @@ func (p *Publisher) accept(ctx context.Context, req AcceptRequest, managed bool)
 	if managed && p.verifyManagedSources(plan.managed.sources) != nil {
 		return Receipt{}, ErrConflict
 	}
+	if managed && !validManagedSelectedReceipt(receiptFor(plan.public)) {
+		return Receipt{}, ErrConflict
+	}
 	if err := p.verifyCurrent(plan.files, false); err != nil {
 		return Receipt{}, err
 	}
@@ -448,7 +462,7 @@ func matchesReceiptRequest(p Receipt, r AcceptRequest) bool {
 	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
 }
 func receiptFor(p PublishPlan) Receipt {
-	return Receipt{RunID: p.RunID, CandidateSetDigest: p.CandidateSetDigest, SnapshotDigest: p.SnapshotDigest, DiffDigest: p.DiffDigest, ConfirmationDigest: p.ConfirmationDigest, CharacterizationDigest: p.CharacterizationDigest, Edits: append([]PlannedEdit(nil), p.Edits...), ManagedReadOnly: append([]PlannedEdit(nil), p.ManagedReadOnly...), ManagedReviewID: p.ManagedReviewID, ManagedReviewDigest: p.ManagedReviewDigest, ManagedDecisionDigest: p.ManagedDecisionDigest, ManagedEvidenceDigest: p.ManagedEvidenceDigest}
+	return Receipt{RunID: p.RunID, CandidateSetDigest: p.CandidateSetDigest, SnapshotDigest: p.SnapshotDigest, DiffDigest: p.DiffDigest, ConfirmationDigest: p.ConfirmationDigest, CharacterizationDigest: p.CharacterizationDigest, Edits: append([]PlannedEdit(nil), p.Edits...), ManagedReadOnly: append([]PlannedEdit(nil), p.ManagedReadOnly...), ManagedReviewID: p.ManagedReviewID, ManagedReviewDigest: p.ManagedReviewDigest, ManagedDecisionDigest: p.ManagedDecisionDigest, ManagedEvidenceDigest: p.ManagedEvidenceDigest, ManagedSelectedOutputDigest: p.ManagedSelectedOutputDigest, ManagedValidationReceiptDigest: p.ManagedValidationReceiptDigest, ManagedSelectedOutputs: append([]SelectedOutput(nil), p.ManagedSelectedOutputs...)}
 }
 func matchesReceipt(r Receipt, p PublishPlan) bool { return r.String() == receiptFor(p).String() }
 func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
@@ -476,7 +490,67 @@ func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
 			return ErrConflict
 		}
 	}
+	if r.ManagedReviewDigest != "" {
+		if !validManagedSelectedReceipt(r) {
+			return ErrConflict
+		}
+		for _, output := range r.ManagedSelectedOutputs {
+			data, _, exists, _, err := p.readTarget(output.Path)
+			if err != nil || !exists || digest(data) != output.Digest {
+				return ErrConflict
+			}
+		}
+	}
 	return nil
+}
+
+func validManagedSelectedReceipt(r Receipt) bool {
+	if !validHex(r.ManagedSelectedOutputDigest, 64) || !validHex(r.ManagedValidationReceiptDigest, 64) || len(r.ManagedSelectedOutputs) < 2 || len(r.ManagedSelectedOutputs) > maxFiles {
+		return false
+	}
+	seen := map[string]bool{}
+	cmake := 0
+	for i, output := range r.ManagedSelectedOutputs {
+		if !generatedTestPath(output.Path) && !cmakePath(output.Path) || !validHex(output.Digest, 64) || seen[strings.ToLower(output.Path)] || i > 0 && r.ManagedSelectedOutputs[i-1].Path >= output.Path {
+			return false
+		}
+		seen[strings.ToLower(output.Path)] = true
+		if cmakePath(output.Path) {
+			cmake++
+		}
+	}
+	if cmake != 1 || len(r.Edits)+len(r.ManagedReadOnly) < len(r.ManagedSelectedOutputs)-1 || len(r.Edits)+len(r.ManagedReadOnly) > len(r.ManagedSelectedOutputs) {
+		return false
+	}
+	for _, edit := range append(append([]PlannedEdit(nil), r.Edits...), r.ManagedReadOnly...) {
+		match := false
+		for _, output := range r.ManagedSelectedOutputs {
+			if output.Path == edit.Path && output.Digest == edit.AfterDigest {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	for _, output := range r.ManagedSelectedOutputs {
+		if cmakePath(output.Path) {
+			continue
+		}
+		matched := false
+		for _, edit := range append(append([]PlannedEdit(nil), r.Edits...), r.ManagedReadOnly...) {
+			if edit.Path == output.Path && edit.AfterDigest == output.Digest {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	encoded, _ := json.Marshal(r.ManagedSelectedOutputs)
+	return digest(append([]byte("managed-selected-v1\x00"), encoded...)) == r.ManagedSelectedOutputDigest
 }
 func (p *Publisher) verifyCurrent(files []preparedFile, after bool) error {
 	for _, file := range files {
@@ -585,6 +659,10 @@ func (p *Publisher) commitFile(item *journalFile, file preparedFile) error {
 	}
 	stageIdentity, err := parent.Lstat(item.StageName)
 	if err != nil || linked(stageIdentity) || !stageIdentity.Mode().IsRegular() {
+		return ErrConflict
+	}
+	stagedBytes, err := p.readRelative(parent, item.StageName)
+	if err != nil || digest(stagedBytes) != item.AfterDigest {
 		return ErrConflict
 	}
 	// Link is exclusive: a user-created destination during the rename window is
@@ -1099,7 +1177,7 @@ func validJournal(j journalRecord) bool {
 	if !validHex(j.ConfirmationDigest, 64) || j.Receipt.ConfirmationDigest != j.ConfirmationDigest || len(j.Files)+len(j.Receipt.ManagedReadOnly) == 0 || len(j.Files)+len(j.Receipt.ManagedReadOnly) > maxFiles {
 		return false
 	}
-	managedFields := j.Receipt.ManagedReviewID != "" || j.Receipt.ManagedReviewDigest != "" || j.Receipt.ManagedDecisionDigest != "" || j.Receipt.ManagedEvidenceDigest != "" || len(j.Receipt.ManagedReadOnly) > 0
+	managedFields := j.Receipt.ManagedReviewID != "" || j.Receipt.ManagedReviewDigest != "" || j.Receipt.ManagedDecisionDigest != "" || j.Receipt.ManagedEvidenceDigest != "" || j.Receipt.ManagedSelectedOutputDigest != "" || j.Receipt.ManagedValidationReceiptDigest != "" || len(j.Receipt.ManagedSelectedOutputs) > 0 || len(j.Receipt.ManagedReadOnly) > 0
 	if managedFields != (len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0) || len(j.Receipt.Edits) != len(j.Files) {
 		return false
 	}
@@ -1131,12 +1209,12 @@ func validJournal(j journalRecord) bool {
 		return false
 	}
 	if len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0 {
-		if !validHex(j.Receipt.ManagedReviewID, 32) || !validHex(j.Receipt.ManagedReviewDigest, 64) || !validHex(j.Receipt.ManagedDecisionDigest, 64) || !validHex(j.Receipt.ManagedEvidenceDigest, 64) {
+		if !validHex(j.Receipt.ManagedReviewID, 32) || !validHex(j.Receipt.ManagedReviewDigest, 64) || !validHex(j.Receipt.ManagedDecisionDigest, 64) || !validHex(j.Receipt.ManagedEvidenceDigest, 64) || !validManagedSelectedReceipt(j.Receipt) {
 			return false
 		}
 		seenCases := map[string]bool{}
 		for _, a := range j.ManagedAcceptances {
-			if !managedtest.ValidAcceptance(a) || a.ReviewDigest != j.Receipt.ManagedReviewDigest || seenCases[a.Record.CaseID] {
+			if !managedtest.ValidAcceptance(a) || a.ReviewDigest != j.Receipt.ManagedReviewDigest || a.Record.ValidationReceiptDigest != j.Receipt.ManagedValidationReceiptDigest || seenCases[a.Record.CaseID] {
 				return false
 			}
 			seenCases[a.Record.CaseID] = true
