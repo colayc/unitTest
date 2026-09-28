@@ -28,8 +28,12 @@ test("display-only diff redaction removes absolute workspace paths without chang
 test("managed case review presents bounded exact diff and all three service digests", () => {
   const model = createManagedCaseReview({ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff: "+TEST(foo)\n" } as any);
   assert.equal(model.content, "+TEST(foo)\n");
+  assert.equal(model.previewAvailable, true);
   assert.deepEqual(model.panes, { accepted: "1".repeat(64), current: "2".repeat(64), generated: "3".repeat(64) });
-  assert.throws(() => createManagedCaseReview({ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) } as any), /preview/i);
+  const digestOnly = createManagedCaseReview({ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) } as any);
+  assert.equal(digestOnly.previewAvailable, false);
+  assert.match(digestOnly.content, /preview unavailable/i);
+  assert.match(createManagedCaseReview({ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff: "" } as any).content, /preview unavailable/i);
 });
 
 test("managed preview labels absent ancestor separately from real empty block", () => {

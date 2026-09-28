@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/protocol"
@@ -19,6 +20,105 @@ type managedReviewPageBackend struct {
 	owner, cursor string
 	limit         int
 	page          generationv16.ManagedReviewV16
+}
+
+type managedRunReadBackend struct {
+	*liveManagedBackend
+	owner  string
+	getRun generationv16.TestGenerationRunV16
+	page   generationv16.TestGenerationCandidatePageV16
+}
+
+func (b *managedRunReadBackend) ListManagedTargets(_ context.Context, owner string, _ generationv16.TestGenerationTargetListRequestV16) (generationv16.TestGenerationTargetListV16, error) {
+	b.owner = owner
+	return generationv16.TestGenerationTargetListV16{Items: []generationv16.TestGenerationTargetV16{}}, nil
+}
+func (b *managedRunReadBackend) GetManagedRun(_ context.Context, owner, _ string) (generationv16.TestGenerationRunV16, error) {
+	b.owner = owner
+	return b.getRun, nil
+}
+func (b *managedRunReadBackend) CancelManagedRun(_ context.Context, owner, _ string) (generationv16.TestGenerationRunV16, error) {
+	b.owner = owner
+	return b.getRun, nil
+}
+func (b *managedRunReadBackend) ReplayManagedEvents(_ context.Context, owner string, _ generationv16.TestGenerationEventReplayRequestV16) (generationv16.TestGenerationEventPageV16, error) {
+	b.owner = owner
+	return generationv16.TestGenerationEventPageV16{Items: []generationv16.TestGenerationProgressEventV16{}, NextAfterSequence: 0}, nil
+}
+func (b *managedRunReadBackend) ListManagedCandidates(_ context.Context, owner string, _ generationv16.TestGenerationCandidateListRequestV16) (generationv16.TestGenerationCandidatePageV16, error) {
+	b.owner = owner
+	return b.page, nil
+}
+
+func TestReadyManagedRunRoutesReadImmediatelyAfterStart(t *testing.T) {
+	backend := &managedRunReadBackend{liveManagedBackend: &liveManagedBackend{managedStartResolverBackend: &managedStartResolverBackend{managedGenerationBackend: &managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}, gapID: strings.Repeat("3", 32)}},
+		getRun: generationv16.TestGenerationRunV16{RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core", WorkspaceGeneration: strings.Repeat("2", 64), State: generationv16.Queued, CreatedAt: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)},
+		page:   generationv16.TestGenerationCandidatePageV16{Items: []generationv16.TestGenerationCandidateV16{}}}
+	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, backend, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+	s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16}}))
+	inputs := []struct {
+		method  string
+		payload map[string]any
+	}{
+		{"testGeneration/targets/list", map[string]any{"projectId": "core", "workspaceGeneration": strings.Repeat("2", 64)}},
+		{"testGeneration/runs/get", map[string]any{"runId": strings.Repeat("a", 32)}},
+		{"testGeneration/runs/cancel", map[string]any{"runId": strings.Repeat("a", 32)}},
+		{"testGeneration/events/replay", map[string]any{"runId": strings.Repeat("a", 32), "afterSequence": 0}},
+		{"testGeneration/candidates/list", map[string]any{"runId": strings.Repeat("a", 32)}},
+	}
+	for _, input := range inputs {
+		result := s.Handle(context.Background(), requestVersion(t, protocol.Version16, input.method, input.payload))
+		if result.Response.Error != nil {
+			t.Errorf("%s: %#v", input.method, result.Response.Error)
+		}
+	}
+	if backend.owner == "" {
+		t.Fatal("authenticated owner was not forwarded")
+	}
+}
+
+func TestManagedRunRoutesRejectInvalidProviderPayloadsAndUnsafeInputs(t *testing.T) {
+	backend := &managedRunReadBackend{liveManagedBackend: &liveManagedBackend{managedStartResolverBackend: &managedStartResolverBackend{managedGenerationBackend: &managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}}},
+		getRun: generationv16.TestGenerationRunV16{RunID: strings.Repeat("f", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core", WorkspaceGeneration: strings.Repeat("2", 64), State: generationv16.Queued, CreatedAt: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)},
+		page:   generationv16.TestGenerationCandidatePageV16{Items: []generationv16.TestGenerationCandidateV16{}}}
+	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, backend, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+	s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16}}))
+	runID := strings.Repeat("a", 32)
+	got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/runs/get", map[string]any{"runId": runID}))
+	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
+		t.Fatalf("wrong run identity=%#v", got.Response)
+	}
+	backend.getRun.RunID = runID
+	backend.getRun.State = "unknown"
+	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/runs/get", map[string]any{"runId": runID}))
+	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
+		t.Fatalf("unknown run state=%#v", got.Response)
+	}
+	previewText := "wrong text"
+	backend.getRun.State = generationv16.AwaitingConfirmation
+	backend.getRun.Preview = &generationv16.TestGenerationPreviewV16{CandidateSetDigest: strings.Repeat("1", 64), DiffDigest: strings.Repeat("2", 64), ConfirmationDigest: strings.Repeat("3", 64), Diff: &previewText}
+	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/runs/get", map[string]any{"runId": runID}))
+	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
+		t.Fatalf("unverified preview=%#v", got.Response)
+	}
+	for _, input := range []struct {
+		method  string
+		payload map[string]any
+	}{
+		{"testGeneration/events/replay", map[string]any{"runId": runID, "afterSequence": 9007199254740992}},
+		{"testGeneration/candidates/list", map[string]any{"runId": runID, "limit": 201}},
+		{"testGeneration/targets/list", map[string]any{"projectId": "core", "workspaceGeneration": strings.Repeat("2", 64), "cursor": ""}},
+	} {
+		got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, input.method, input.payload))
+		if got.Response.Error == nil || got.Response.Error.Code != "INVALID_MESSAGE" {
+			t.Errorf("%s unsafe request=%#v", input.method, got.Response)
+		}
+	}
+	backend.page.Items = []generationv16.TestGenerationCandidateV16{{CandidateID: strings.Repeat("c", 32), Kind: "unknown"}}
+	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/candidates/list", map[string]any{"runId": runID}))
+	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
+		t.Fatalf("unknown candidate kind=%#v", got.Response)
+	}
 }
 
 type managedStartResolverBackend struct {
@@ -63,7 +163,7 @@ func TestExplicitManagedRecordsRouteRequiresBoundedProvider(t *testing.T) {
 
 func (b *liveManagedBackend) StartManaged(_ context.Context, _ string, _ generationv16.TestGenerationStartRequestV16) (generationv16.TestGenerationRunV16, error) {
 	b.starts++
-	return generationv16.TestGenerationRunV16{RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core", WorkspaceGeneration: strings.Repeat("2", 64), State: generationv16.Queued}, nil
+	return generationv16.TestGenerationRunV16{RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core", WorkspaceGeneration: strings.Repeat("2", 64), State: generationv16.Queued, CreatedAt: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)}, nil
 }
 func (b *liveManagedBackend) ManagedApplyReady() bool { return true }
 func (b *liveManagedBackend) ApplyManagedReview(_ context.Context, request managedtest.ApplyRequest) (testgendomain.Run, error) {

@@ -143,6 +143,34 @@ test("ordinary review needs no conflict choices but still requires the displayed
   assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [] }]);
 });
 
+test("digest-only review loads but cannot authorize Apply without a verified preview", async () => {
+  const f = fixture();
+  f.setReview({ ...review, cases: [{ ...review.cases[0], diff: undefined }] });
+  const loaded = await f.controller.load(reviewId);
+  assert.equal(loaded.review?.cases[0]?.diff, undefined);
+  f.controller.choose(caseId, "keep-current");
+  f.controller.markDisplayed(reviewDigest);
+  assert.equal(f.controller.getState().canApply, false);
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("only service-advertised scaffold conflict keys can be chosen", async () => {
+  const f = fixture();
+  const scaffold = "scaffold:tests/generated/src/a_test.cpp";
+  const scaffoldDiff = "--- a/tests/generated/src/a_test.cpp\n+++ b/tests/generated/src/a_test.cpp\n";
+  f.setReview({ ...review, conflictKeys: [caseId, scaffold], scaffoldPreviews: [{ key: scaffold, diff: scaffoldDiff, diffDigest: digest(scaffoldDiff) }] });
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  assert.throws(() => f.controller.choose("scaffold:tests/generated/other_test.cpp", "keep-current"), /invalid/i);
+  f.controller.choose(caseId, "keep-current");
+  assert.equal(f.controller.getState().canApply, false);
+  f.controller.choose(scaffold, "use-generated");
+  assert.equal(f.controller.getState().canApply, true);
+  await f.controller.apply(reviewDigest);
+  assert.deepEqual(f.applied, [{ reviewId, reviewDigest, resolutions: [{ caseId: scaffold, choice: "use-generated" }, { caseId, choice: "keep-current" }] }]);
+});
+
 test("multiple conflicts require independent choices and preserve their sorted identity", async () => {
   const f = fixture();
   const otherId = `utc_${"f".repeat(32)}`;

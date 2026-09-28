@@ -198,10 +198,12 @@ export interface ManagedRecordsRequestV16 {
  */
 export interface ManagedReviewV16 {
     cases:               ManagedReviewCaseV16[];
+    conflictKeys?:       string[];
     coverageReportId:    string;
     nextCursor?:         string;
     reviewDigest:        string;
     reviewId:            string;
+    scaffoldPreviews?:   ScaffoldPreview[];
     workspaceGeneration: string;
 }
 
@@ -213,6 +215,12 @@ export interface ManagedReviewCaseV16 {
     diff?:           string;
     generatedDigest: string;
     status:          ManagedTestStatusV16;
+}
+
+export interface ScaffoldPreview {
+    diff:       string;
+    diffDigest: string;
+    key:        string;
 }
 
 export interface ManagedReviewApplyRequestV16 {
@@ -244,6 +252,10 @@ export interface ManagedReviewIDRequestV16 {
     reviewId: string;
 }
 
+/**
+ * Managed runs bind exact changes to managedTests/reviews/get; preview is optional and must
+ * never be fabricated from digests.
+ */
 export interface TestGenerationRunV16 {
     candidateCount?:     number;
     createdAt:           Date;

@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -69,11 +71,32 @@ func ValidManagedReviewApplyV16(request generationv16.ManagedReviewApplyRequestV
 // The provider must issue a nextCursor and return fewer cases rather than
 // truncate or emit a page that could approach the 2 MiB wire ceiling.
 func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
-	if len(page.Cases) > MaxManagedReviewPageItemsV16 {
+	if len(page.Cases) > MaxManagedReviewPageItemsV16 || len(page.ConflictKeys) > 200 || len(page.ScaffoldPreviews) > 200 {
 		return false
 	}
+	keys := make(map[string]bool, len(page.ConflictKeys))
+	for _, key := range page.ConflictKeys {
+		caseID := strings.HasPrefix(key, "utc_") && len(key) == 36 && validLowerHex(key[4:], 32)
+		scaffold := strings.HasPrefix(key, "scaffold:") && managedtest.ValidTestPath(strings.TrimPrefix(key, "scaffold:"))
+		if (!caseID && !scaffold) || keys[key] {
+			return false
+		}
+		keys[key] = true
+	}
+	previews := make(map[string]bool, len(page.ScaffoldPreviews))
+	for _, preview := range page.ScaffoldPreviews {
+		if !keys[preview.Key] || !strings.HasPrefix(preview.Key, "scaffold:") || previews[preview.Key] || len(preview.Diff) == 0 || len(preview.Diff) > 32768 || !utf8.ValidString(preview.Diff) || strings.ContainsRune(preview.Diff, 0) {
+			return false
+		}
+		sum := sha256.Sum256([]byte(preview.Diff))
+		if !validLowerHex(preview.DiffDigest, 64) || hex.EncodeToString(sum[:]) != preview.DiffDigest {
+			return false
+		}
+		previews[preview.Key] = true
+	}
 	for _, item := range page.Cases {
-		if !ValidManagedReviewCaseDigestsV16(item) {
+		if !ValidManagedReviewCaseDigestsV16(item) || !strings.HasPrefix(item.CaseID, "utc_") || len(item.CaseID) != 36 || !validLowerHex(item.CaseID[4:], 32) ||
+			item.Status == generationv16.Conflicted && page.ConflictKeys != nil && !keys[item.CaseID] {
 			return false
 		}
 		if item.Diff != nil && utf8.RuneCountInString(*item.Diff) > 4096 {

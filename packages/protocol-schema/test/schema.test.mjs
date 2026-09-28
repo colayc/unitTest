@@ -123,6 +123,8 @@ test("protocol 1.6 validates paginated detail and managed-review responses", asy
     ["managedTests/reviews/apply", { reviewId: id, reviewDigest: digest, applied: true }]
   ];
   const base = { protocolVersion: "1.6", kind: "response", messageId: id, requestId: id, sentAt: "2026-09-28T00:00:00Z" };
+  const managedRun = { runId: id, taskId: id, workspaceGeneration: digest, projectId: "core", state: "awaiting_confirmation", createdAt: "2026-09-28T00:00:00Z", lastSequence: 1, candidateCount: 1 };
+  assert.equal(message({ ...base, method: "testGeneration/runs/get", payload: managedRun }), true, "managed awaiting run uses a separate durable review, not a fabricated v1.5 preview");
   for (const [method, payload] of responses) assert.equal(message({ ...base, method, payload }), true, `${method}: ${JSON.stringify(message.errors)}`);
   assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, relativePath: "../secret.cpp" }] } }), false, "traversal path");
   assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, source: "int secret;" }] } }), false, "unknown file key");

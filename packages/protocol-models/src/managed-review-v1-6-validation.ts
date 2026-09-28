@@ -9,6 +9,7 @@ export const ABSENT_BLOCK_DIGEST_V16 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4
 const id32 = /^[0-9a-f]{32}$/;
 const digest64 = /^[0-9a-f]{64}$/;
 const caseId = /^utc_[0-9a-f]{32}$/;
+const scaffoldKey = /^scaffold:tests\/generated\/[A-Za-z0-9_./-]{1,220}_test\.(?:c|cpp)$/;
 const choices = new Set<string>(Object.values(ManagedConflictChoiceV16));
 const blockSides = ["accepted", "current", "generated"] as const;
 export type ManagedBlockSideV16 = typeof blockSides[number];
@@ -37,16 +38,24 @@ export function validateManagedReviewApplyV16(
   if (!id32.test(request.reviewId) || !id32.test(currentReviewId) ||
       !digest64.test(request.reviewDigest) || !digest64.test(currentDigest) ||
       request.reviewId !== currentReviewId || request.reviewDigest !== currentDigest ||
-      request.resolutions.length < 1 || request.resolutions.length > 200) return false;
+      request.resolutions.length > 200) return false;
   const seen = new Set<string>();
   for (const resolution of request.resolutions) {
-    if (!caseId.test(resolution.caseId) || !choices.has(resolution.choice) || seen.has(resolution.caseId)) return false;
+    if (!(caseId.test(resolution.caseId) || validScaffoldConflictKeyV16(resolution.caseId)) || !choices.has(resolution.choice) || seen.has(resolution.caseId)) return false;
     seen.add(resolution.caseId);
   }
   return true;
 }
 
+export function validScaffoldConflictKeyV16(value: string): boolean {
+  if (!scaffoldKey.test(value)) return false;
+  const path = value.slice("scaffold:".length);
+  return !path.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
 export function validateManagedReviewPageV16(page: ManagedReviewV16): boolean {
+  if (page.conflictKeys !== undefined && (page.conflictKeys.length > 200 || new Set(page.conflictKeys).size !== page.conflictKeys.length ||
+      page.conflictKeys.some((key) => !(caseId.test(key) || validScaffoldConflictKeyV16(key))))) return false;
   if (page.cases.length > MAX_MANAGED_REVIEW_PAGE_ITEMS_V16) return false;
   if (page.cases.some((item) => !validateManagedReviewCaseDigestsV16(item))) return false;
   if (page.cases.some((item) => item.diff !== undefined && [...item.diff].length > 4096)) return false;

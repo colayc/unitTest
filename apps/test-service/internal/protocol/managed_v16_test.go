@@ -1,6 +1,8 @@
 package protocol_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -108,6 +110,28 @@ func TestV16ReviewPageRejectsIncorrectOrDuplicateAbsentSides(t *testing.T) {
 	page.Cases[0].AbsentSides = nil // SHA(empty) can also be a real present block.
 	if !protocol.ValidManagedReviewPageV16(page) {
 		t.Fatal("real empty block rejected")
+	}
+}
+
+func TestV16ReviewPageBindsAdvertisedScaffoldPreview(t *testing.T) {
+	id, digest := strings.Repeat("a", 32), strings.Repeat("b", 64)
+	key := "scaffold:tests/generated/src/a_test.cpp"
+	diff := "--- current/tests/generated/src/a_test.cpp\n+++ generated/tests/generated/src/a_test.cpp\n"
+	sum := sha256.Sum256([]byte(diff))
+	page := generationv16.ManagedReviewV16{ReviewID: id, ReviewDigest: digest, WorkspaceGeneration: digest, CoverageReportID: id,
+		Cases:        []generationv16.ManagedReviewCaseV16{{CaseID: "utc_" + id, Status: generationv16.Conflicted, AcceptedDigest: digest, CurrentDigest: digest, GeneratedDigest: digest}},
+		ConflictKeys: []string{"utc_" + id, key}, ScaffoldPreviews: []generationv16.ScaffoldPreview{{Key: key, Diff: diff, DiffDigest: hex.EncodeToString(sum[:])}}}
+	if !protocol.ValidManagedReviewPageV16(page) {
+		t.Fatal("valid advertised scaffold preview rejected")
+	}
+	page.ScaffoldPreviews[0].DiffDigest = digest
+	if protocol.ValidManagedReviewPageV16(page) {
+		t.Fatal("unverified scaffold preview accepted")
+	}
+	page.ScaffoldPreviews = nil
+	page.ConflictKeys = []string{"scaffold:tests/generated/../escape_test.cpp"}
+	if protocol.ValidManagedReviewPageV16(page) {
+		t.Fatal("unsafe scaffold key accepted")
 	}
 }
 

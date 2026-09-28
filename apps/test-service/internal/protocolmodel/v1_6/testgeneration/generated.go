@@ -133,10 +133,12 @@ type ManagedRecordsRequestV16 struct {
 // with nextCursor rather than truncating cases.
 type ManagedReviewV16 struct {
 	Cases               []ManagedReviewCaseV16 `json:"cases"`
+	ConflictKeys        []string               `json:"conflictKeys,omitempty"`
 	CoverageReportID    string                 `json:"coverageReportId"`
 	NextCursor          *string                `json:"nextCursor,omitempty"`
 	ReviewDigest        string                 `json:"reviewDigest"`
 	ReviewID            string                 `json:"reviewId"`
+	ScaffoldPreviews    []ScaffoldPreview      `json:"scaffoldPreviews,omitempty"`
 	WorkspaceGeneration string                 `json:"workspaceGeneration"`
 }
 
@@ -148,6 +150,12 @@ type ManagedReviewCaseV16 struct {
 	Diff            *string              `json:"diff,omitempty"`
 	GeneratedDigest string               `json:"generatedDigest"`
 	Status          ManagedTestStatusV16 `json:"status"`
+}
+
+type ScaffoldPreview struct {
+	Diff       string `json:"diff"`
+	DiffDigest string `json:"diffDigest"`
+	Key        string `json:"key"`
 }
 
 type ManagedReviewApplyRequestV16 struct {
@@ -173,6 +181,8 @@ type ManagedReviewIDRequestV16 struct {
 	ReviewID string  `json:"reviewId"`
 }
 
+// Managed runs bind exact changes to managedTests/reviews/get; preview is optional and must
+// never be fabricated from digests.
 type TestGenerationRunV16 struct {
 	CandidateCount      *int64                    `json:"candidateCount,omitempty"`
 	CreatedAt           time.Time                 `json:"createdAt"`

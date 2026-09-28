@@ -156,6 +156,7 @@
     },
     "run": {
       "title": "TestGenerationRunV16", "type": "object", "additionalProperties": false,
+      "description": "Managed runs bind exact changes to managedTests/reviews/get; preview is optional and must never be fabricated from digests.",
       "required": ["runId", "taskId", "workspaceGeneration", "projectId", "state", "createdAt", "lastSequence"],
       "properties": {
         "runId": { "$ref": "#/$defs/id" }, "taskId": { "$ref": "#/$defs/id" },
@@ -167,8 +168,7 @@
         "preview": { "$ref": "#/$defs/preview" }
       },
       "allOf": [
-        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } },
-        { "if": { "properties": { "state": { "enum": ["awaiting_confirmation", "accepted"] } } }, "then": { "required": ["preview"] } }
+        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } }
       ]
     },
     "preview": {
@@ -265,6 +265,8 @@
         "workspaceGeneration": { "$ref": "#/$defs/digest" },
         "coverageReportId": { "$ref": "#/$defs/id" },
         "cases": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/reviewCase" } },
+        "conflictKeys": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "oneOf": [{ "$ref": "#/$defs/managedCaseId" }, { "type": "string", "maxLength": 250, "pattern": "^scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }] } },
+        "scaffoldPreviews": { "type": "array", "maxItems": 200, "items": { "type": "object", "additionalProperties": false, "required": ["key", "diff", "diffDigest"], "properties": { "key": { "type": "string", "maxLength": 250, "pattern": "^scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }, "diff": { "type": "string", "maxLength": 4096 }, "diffDigest": { "$ref": "#/$defs/digest" } } } },
         "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
       }
     },

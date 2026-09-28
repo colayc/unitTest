@@ -594,15 +594,31 @@ export function registerManagedTestCommands(
       for (const item of loaded.review?.cases ?? []) {
         const display = createManagedCaseReview(item);
         output.appendLine(`${display.title} [${item.status}] accepted=${display.panes.accepted} current=${display.panes.current} generated=${display.panes.generated}`);
-        if (host.openManagedCaseDiff) await host.openManagedCaseDiff(display.title, redactGenerationDiffPaths(display.content));
-        else if (host.openGenerationDiff) await host.openGenerationDiff(display.title, redactGenerationDiffPaths(display.content));
-        else output.appendLine(redactGenerationDiffPaths(display.content));
+        if (display.previewAvailable) {
+          if (host.openManagedCaseDiff) await host.openManagedCaseDiff(display.title, redactGenerationDiffPaths(display.content));
+          else if (host.openGenerationDiff) await host.openGenerationDiff(display.title, redactGenerationDiffPaths(display.content));
+          else output.appendLine(redactGenerationDiffPaths(display.content));
+        } else {
+          output.appendLine(display.content);
+          await host.showInformationMessage?.("Unit Test: Managed review preview unavailable; Apply remains disabled.");
+        }
         if (item.status !== "conflicted") continue;
         const choice = await host.pickManagedConflictChoice?.(item.caseId, MANAGED_CHOICES);
         if (choice !== undefined) review.choose(item.caseId, choice);
       }
+      for (const preview of loaded.review?.scaffoldPreviews ?? []) {
+        const title = `Managed scaffold ${preview.key}`;
+        if (host.openManagedCaseDiff) await host.openManagedCaseDiff(title, redactGenerationDiffPaths(preview.diff));
+        else if (host.openGenerationDiff) await host.openGenerationDiff(title, redactGenerationDiffPaths(preview.diff));
+        else output.appendLine(redactGenerationDiffPaths(preview.diff));
+        const choice = await host.pickManagedConflictChoice?.(preview.key, MANAGED_CHOICES);
+        if (choice !== undefined) review.choose(preview.key, choice);
+      }
+      if (loaded.review?.conflictKeys?.some((key) => key.startsWith("scaffold:") && !loaded.review?.scaffoldPreviews?.some((preview) => preview.key === key))) {
+        await host.showInformationMessage?.("Unit Test: Managed scaffold preview unavailable; Apply remains disabled.");
+      }
       if (loaded.review) review.markDisplayed(loaded.review.reviewDigest);
-      if (!review.getState().canApply) await host.showInformationMessage?.("Unit Test: Resolve every managed-test conflict before Apply.");
+      if (!review.getState().canApply) await host.showInformationMessage?.("Unit Test: Resolve every managed-test conflict and inspect every available preview before Apply; unavailable previews keep Apply disabled.");
     } catch (error) {
       try { review.reject(); } catch { /* An Apply already in flight cannot be revoked here. */ }
       await host.showErrorMessage(redactServiceError(error, []).message);

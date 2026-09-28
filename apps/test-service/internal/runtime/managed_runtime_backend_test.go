@@ -16,6 +16,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/managedtest"
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
+	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testgendomain"
@@ -150,6 +151,43 @@ func managedBackendFixture(t *testing.T) (*ManagedRuntimeProvider, *managedReadF
 	driver := &managedBackendDriverFixture{ready: true}
 	provider := newManagedRuntimeProvider(ManagedRuntimeConfig{Base: base, CurrentIndex: reads, Reviews: reads, Publisher: &managedPublisherFixture{ready: true}, Validator: healthyManagedValidator(true), Baseline: managedBaselineFixture(true), Receipts: managedReceiptFixture(true), Driver: driver})
 	return provider, reads, driver
+}
+
+func TestManagedRuntimeProviderImplementsTypedRunReads(t *testing.T) {
+	var _ session.ManagedRunReadBackend = (*ManagedRuntimeProvider)(nil)
+	provider, reads, _ := managedBackendFixture(t)
+	owner := strings.Repeat("6", 64)
+	run := awaitingManagedRun(t, provider, reads, owner)
+	got, err := provider.GetManagedRun(context.Background(), owner, run.ID)
+	if err != nil || got.RunID != run.ID || got.ProjectID != reads.index.ProjectID || got.WorkspaceGeneration != reads.index.WorkspaceGeneration || got.State != generationv16.AwaitingConfirmation {
+		t.Fatalf("managed run read=%+v, %v", got, err)
+	}
+	if _, err := provider.GetManagedRun(context.Background(), strings.Repeat("7", 64), run.ID); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("cross-owner read=%v", err)
+	}
+	page, err := provider.ReplayManagedEvents(context.Background(), owner, generationv16.TestGenerationEventReplayRequestV16{RunID: run.ID, AfterSequence: 0})
+	if err != nil || page.NextAfterSequence < 0 {
+		t.Fatalf("managed events=%+v, %v", page, err)
+	}
+	_, err = provider.ListManagedCandidates(context.Background(), owner, generationv16.TestGenerationCandidateListRequestV16{RunID: run.ID})
+	if err != nil {
+		t.Fatalf("managed candidates=%v", err)
+	}
+}
+
+func TestManagedRunReadRejectsWorkspaceAndReportDrift(t *testing.T) {
+	provider, reads, _ := managedBackendFixture(t)
+	owner := strings.Repeat("6", 64)
+	run := awaitingManagedRun(t, provider, reads, owner)
+	reads.index.Files[0].SourceSHA256 = strings.Repeat("f", 64)
+	if _, err := provider.GetManagedRun(context.Background(), owner, run.ID); !errors.Is(err, testgendomain.ErrStaleSnapshot) {
+		t.Fatalf("source drift=%v", err)
+	}
+	reads.index.Files[0].SourceSHA256 = run.Request.SourceDigest
+	reads.index.ReportID = strings.Repeat("e", 32)
+	if _, err := provider.ReplayManagedEvents(context.Background(), owner, generationv16.TestGenerationEventReplayRequestV16{RunID: run.ID, AfterSequence: 0}); err == nil {
+		t.Fatal("report drift yielded events")
+	}
 }
 
 func TestManagedRuntimeProviderNeedsExplicitDependencies(t *testing.T) {

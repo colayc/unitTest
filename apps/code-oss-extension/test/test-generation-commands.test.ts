@@ -155,20 +155,41 @@ test("coverage tree context supplies authoritative file and function IDs to mana
   assert.deepEqual(starts, [{ scope: "file", fileId: "1".repeat(32) }, { scope: "symbol", functionId: "2".repeat(32) }]);
 });
 
-test("a preview display failure revokes Apply rather than leaving an unseen review armed", async () => {
+test("a digest-only review stays visible but never arms Apply", async () => {
   const fixture = setup();
   let rejected = 0;
   const review: any = {
     available: async () => true,
     load: async () => ({ review: { reviewId: "c".repeat(32), reviewDigest: "d".repeat(64), cases: [{ caseId: `utc_${"a".repeat(32)}`, status: "current", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, canApply: true }),
+    markDisplayed: () => undefined,
     reject: () => { rejected++; },
     getState: () => ({ review: undefined, canApply: false })
   };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
   registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
   await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId: "c".repeat(32) });
-  assert.equal(rejected, 1);
-  assert.match(fixture.errors.at(-1)!, /preview/i);
+  assert.equal(rejected, 0);
+  assert.equal(fixture.errors.length, 0);
+  assert.ok(fixture.info.some((message) => /preview unavailable/i.test(message)));
+});
+
+test("digest-only managed review says preview unavailable and never opens an exact diff", async () => {
+  const fixture = setup();
+  const opened: string[] = [];
+  const review: any = {
+    available: async () => true,
+    load: async () => ({ review: { reviewId: "c".repeat(32), reviewDigest: "d".repeat(64), cases: [{ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, canApply: false }),
+    markDisplayed: () => undefined,
+    choose: () => undefined,
+    reject: () => undefined,
+    getState: () => ({ canApply: false, previewAvailable: false })
+  };
+  const host: any = { ...fixture.host, openManagedCaseDiff: async (_title: string, diff: string) => { opened.push(diff); } };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId: "c".repeat(32) });
+  assert.deepEqual(opened, []);
+  assert.ok(fixture.info.some((message) => /preview unavailable/i.test(message)));
 });
 
 test("review command reports an in-flight Apply without throwing from local Reject", async () => {

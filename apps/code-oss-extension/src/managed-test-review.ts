@@ -7,6 +7,7 @@ import type {
   ManagedTestStatusV16
 } from "@unit-test-ide/test-client";
 import { validateManagedReviewCaseDigestsV16 } from "@unit-test-ide/test-client";
+import { createHash } from "node:crypto";
 import { supportsManagedTests, type TrustState } from "./contracts.js";
 import type { ExtensionManagedProtocolClient, ExtensionProtocolClient } from "./protocol-client.js";
 
@@ -28,6 +29,7 @@ export interface ManagedReviewState {
   readonly choices: Readonly<Record<string, ManagedChoice>>;
   readonly canApply: boolean;
   readonly applying: boolean;
+  readonly previewAvailable: boolean;
 }
 
 export type ManagedApplyOutcome =
@@ -42,6 +44,7 @@ type BoundContext = ManagedReviewContext & { client: ManagedClient; projectId: s
 const HEX_32 = /^[0-9a-f]{32}$/;
 const HEX_64 = /^[0-9a-f]{64}$/;
 const CASE_ID = /^utc_[0-9a-f]{32}$/;
+const SCAFFOLD_KEY = /^scaffold:tests\/generated\/[A-Za-z0-9_./-]{1,220}_test\.(?:c|cpp)$/;
 const CHOICES = new Set<string>(["keep-current", "use-generated", "convert-to-manual"]);
 const STATUSES = new Set<string>(["current", "stale", "conflicted", "orphaned", "invalid"]);
 
@@ -56,7 +59,10 @@ function checkCase(value: ManagedReviewCaseV16): void {
   if (value.diff !== undefined && (typeof value.diff !== "string" || value.diff.length > 32_768 || value.diff.includes("\0"))) {
     throw new Error("The managed review preview is invalid.");
   }
-  if (value.status === "conflicted" && !value.diff) throw new Error("The conflicted case has no review preview.");
+}
+
+function validScaffoldKey(value: string): boolean {
+  return SCAFFOLD_KEY.test(value) && !value.slice("scaffold:".length).split("/").some((part) => !part || part === "." || part === "..");
 }
 
 export class ManagedTestReviewController {
@@ -64,6 +70,7 @@ export class ManagedTestReviewController {
   #binding: BoundContext | undefined;
   #review: ManagedReviewV16 | undefined;
   #choices = new Map<string, ManagedChoice>();
+  #requiredKeys = new Set<string>();
   #applying = false;
   #applyToken = 0;
   #displayed = false;
@@ -72,11 +79,14 @@ export class ManagedTestReviewController {
 
   getState(): ManagedReviewState {
     const review = this.#review;
+    const previewAvailable = !!review && review.cases.every((item) => !!item.diff) &&
+      [...this.#requiredKeys].filter((key) => key.startsWith("scaffold:")).every((key) => review.scaffoldPreviews?.some((preview) => preview.key === key));
     return {
       review: review ? { ...review, cases: review.cases.map((item) => ({ ...item })) } : undefined,
       choices: Object.fromEntries(this.#choices),
-      canApply: !!review && this.#displayed && !this.#applying && this.#currentBinding() && review.cases.every((item) => item.status !== "conflicted" || this.#choices.has(item.caseId)),
-      applying: this.#applying
+      canApply: !!review && previewAvailable && this.#displayed && !this.#applying && this.#currentBinding() && [...this.#requiredKeys].every((key) => this.#choices.has(key)),
+      applying: this.#applying,
+      previewAvailable
     };
   }
 
@@ -111,6 +121,8 @@ export class ManagedTestReviewController {
     let cursor: string | undefined;
     let anchor: ManagedReviewV16 | undefined;
     const seenCursors = new Set<string>();
+    const conflictKeys = new Set<string>();
+    const scaffoldPreviews: NonNullable<ManagedReviewV16["scaffoldPreviews"]> = [];
     do {
       const page = await context.client.getManagedReview({ reviewId, limit: 100, ...(cursor ? { cursor } : {}) });
       this.#assertEpoch(epoch);
@@ -118,6 +130,17 @@ export class ManagedTestReviewController {
       if (page.reviewId !== reviewId || !HEX_64.test(page.reviewDigest) || page.workspaceGeneration !== context.workspaceGeneration || page.coverageReportId !== context.coverageReportId ||
         (anchor && page.reviewDigest !== anchor.reviewDigest)) throw new Error("The managed review digest or workspace is stale.");
       for (const item of page.cases) checkCase(item);
+      for (const key of page.conflictKeys ?? page.cases.filter((item) => item.status === "conflicted").map((item) => item.caseId)) {
+        if (!(CASE_ID.test(key) || validScaffoldKey(key)) || conflictKeys.has(key)) throw new Error("The managed review conflict keys are invalid or duplicated.");
+        conflictKeys.add(key);
+      }
+      for (const preview of page.scaffoldPreviews ?? []) {
+        if (!validScaffoldKey(preview.key) || !preview.diff || preview.diff.length > 32_768 || preview.diff.includes("\0") ||
+          createHash("sha256").update(preview.diff).digest("hex") !== preview.diffDigest || scaffoldPreviews.some((item) => item.key === preview.key)) {
+          throw new Error("The managed scaffold preview is invalid.");
+        }
+        scaffoldPreviews.push(preview);
+      }
       cases.push(...page.cases);
       if (cases.length > 10_000 || new Set(cases.map((item) => item.caseId)).size !== cases.length) throw new Error("Managed review cases are ambiguous or unbounded.");
       anchor ??= page;
@@ -126,15 +149,19 @@ export class ManagedTestReviewController {
       if (cursor) seenCursors.add(cursor);
     } while (cursor);
     if (!anchor || cases.length === 0) throw new Error("The managed review is empty.");
+    if (conflictKeys.size > 200 || cases.some((item) => item.status === "conflicted" && !conflictKeys.has(item.caseId)) ||
+      [...conflictKeys].some((key) => CASE_ID.test(key) && !cases.some((item) => item.caseId === key && item.status === "conflicted")) ||
+      scaffoldPreviews.some((item) => !conflictKeys.has(item.key))) throw new Error("The managed review conflicts are inconsistent.");
     this.#binding = context;
-    this.#review = { ...anchor, cases, nextCursor: undefined };
+    this.#requiredKeys = conflictKeys;
+    this.#review = { ...anchor, cases, conflictKeys: [...conflictKeys], scaffoldPreviews, nextCursor: undefined };
     this.#notify();
     return this.getState();
   }
 
   choose(caseId: string, choice: ManagedChoice): ManagedReviewState {
     if (this.#applying) throw new Error("A managed review is already applying.");
-    if (!CHOICES.has(choice) || !this.#review?.cases.some((item) => item.caseId === caseId && item.status === "conflicted")) throw new Error("The managed review choice is invalid.");
+    if (!CHOICES.has(choice) || !this.#requiredKeys.has(caseId)) throw new Error("The managed review choice is invalid.");
     if (!this.#currentBinding()) throw new Error("The managed review is stale for this workspace or session.");
     this.#choices.set(caseId, choice);
     this.#notify();
@@ -170,7 +197,8 @@ export class ManagedTestReviewController {
     if (!review || !binding || !this.#currentBinding()) throw new Error("The managed review is stale for this workspace or session.");
     if (displayedReviewDigest !== review.reviewDigest) throw new Error("The displayed managed review digest is stale.");
     if (!this.#displayed) throw new Error("The managed review preview has not been displayed.");
-    if (!review.cases.every((item) => item.status !== "conflicted" || this.#choices.has(item.caseId))) throw new Error("The managed review has unresolved conflicts.");
+    if (!this.getState().previewAvailable) throw new Error("The managed review preview unavailable for Apply.");
+    if (![...this.#requiredKeys].every((key) => this.#choices.has(key))) throw new Error("The managed review has unresolved conflicts.");
     const epoch = this.#epoch;
     const applyToken = ++this.#applyToken;
     this.#applying = true;
@@ -214,7 +242,7 @@ export class ManagedTestReviewController {
     return context as BoundContext;
   }
 
-  #clear(): void { this.#binding = undefined; this.#review = undefined; this.#choices.clear(); this.#displayed = false; this.#notify(); }
+  #clear(): void { this.#binding = undefined; this.#review = undefined; this.#choices.clear(); this.#requiredKeys.clear(); this.#displayed = false; this.#notify(); }
   #notify(): void { this.options.onStateChanged?.(this.getState()); }
   #assertEpoch(epoch: number): void { if (epoch !== this.#epoch) throw new Error("The managed review was cancelled or became stale."); }
   #sameContext(expected: ManagedReviewContext): boolean {
