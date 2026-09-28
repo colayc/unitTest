@@ -511,7 +511,7 @@ func validCoverage(value SelectedCoverage) bool {
 	var total coveragedomain.Summary
 	previous := ""
 	for _, file := range value.Files {
-		if !validDigest(file.ID) || file.ID <= previous {
+		if !validHexN(file.ID, 32) || file.ID <= previous {
 			return false
 		}
 		if _, err := coveragedomain.NewSummary(file.Summary); err != nil {
@@ -532,7 +532,7 @@ func validCoverage(value SelectedCoverage) bool {
 	functionCounts := map[string]coveragedomain.Metric{}
 	for _, function := range value.Functions {
 		_, knownFile := files[function.FileID]
-		if !validDigest(function.ID) || function.ID <= previous || !knownFile {
+		if !validHexN(function.ID, 32) || !validHexN(function.FileID, 32) || function.ID <= previous || !knownFile {
 			return false
 		}
 		if _, err := coveragedomain.NewSummary(function.Summary); err != nil {

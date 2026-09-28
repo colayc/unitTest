@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
@@ -101,7 +102,15 @@ func selectedFixture(t *testing.T) (*SelectedValidator, testgenpublish.ManagedSe
 	}
 	metric := coveragedomain.Metric{Covered: 2, Total: 3}
 	summary := coveragedomain.Summary{Functions: metric, Lines: metric, Branches: metric}
-	baseline := SelectedCoverage{Project: summary, Files: []SelectedFileCoverage{{ID: strings.Repeat("a", 64), Summary: summary}}, Functions: []SelectedFunctionCoverage{{ID: strings.Repeat("b", 64), FileID: strings.Repeat("a", 64), Summary: summary}}}
+	fileID, err := coveragedetail.StableFileID("project", "main.cpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionID, err := coveragedetail.StableFunctionID(fileID, "main()")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := SelectedCoverage{Project: summary, Files: []SelectedFileCoverage{{ID: fileID, Summary: summary}}, Functions: []SelectedFunctionCoverage{{ID: functionID, FileID: fileID, Summary: summary}}}
 	trusted := &SelectionContext{SnapshotDigest: strings.Repeat("1", 64), ToolchainID: "trusted-toolchain", SourceDigest: sourceDigest, Baseline: baseline}
 	runner := &selectedFixtureRunner{coverage: baseline}
 	commands := map[SelectedPhase]SelectedCommand{}
@@ -112,7 +121,7 @@ func selectedFixture(t *testing.T) (*SelectedValidator, testgenpublish.ManagedSe
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := []testgenrender.StagedFile{{Path: "tests/generated/main_test.cpp", Content: []byte("// unit-test-ide:managed-begin case=utc_" + strings.Repeat("a", 32) + " function=" + strings.Repeat("b", 32) + " symbol=main\nvoid test_main() {}\n// unit-test-ide:managed-end case=utc_" + strings.Repeat("a", 32) + "\n")}, {Path: "tests/CMakeLists.txt", Content: []byte("add_executable(test_main main_test.cpp)\n")}}
+	files := []testgenrender.StagedFile{{Path: "tests/generated/main_test.cpp", Content: []byte("// unit-test-ide:managed-begin case=utc_" + strings.Repeat("a", 32) + " function=" + functionID + " symbol=main\nvoid test_main() {}\n// unit-test-ide:managed-end case=utc_" + strings.Repeat("a", 32) + "\n")}, {Path: "tests/CMakeLists.txt", Content: []byte("add_executable(test_main main_test.cpp)\n")}}
 	for i := range files {
 		files[i].AfterDigest = selectedTestSHA(files[i].Content)
 	}
@@ -305,6 +314,31 @@ func TestSelectedValidatorRejectsFunctionSummaryOutsideFile(t *testing.T) {
 	runner.coverage = trusted.Baseline
 	if _, err := v.Validate(context.Background(), selection); err == nil || len(runner.called) != 0 {
 		t.Fatalf("inconsistent baseline accepted: err=%v calls=%v", err, runner.called)
+	}
+}
+
+func TestSelectedValidatorAcceptsStableDetailIDsAndRejectsDigestShapedIDs(t *testing.T) {
+	v, selection, runner, trusted := selectedFixture(t)
+	receipt, err := v.Validate(context.Background(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body SelectedReceipt
+	if err := json.Unmarshal(receipt, &body); err != nil {
+		t.Fatal(err)
+	}
+	fileID, _ := coveragedetail.StableFileID("project", "main.cpp")
+	functionID, _ := coveragedetail.StableFunctionID(fileID, "main()")
+	if body.Coverage.Files[0].ID != fileID || body.Coverage.Functions[0].ID != functionID {
+		t.Fatalf("coverage IDs are not stable detail IDs: %+v", body.Coverage)
+	}
+	v, selection, runner, trusted = selectedFixture(t)
+	trusted.Baseline.Files[0].ID = strings.Repeat("a", 64)
+	trusted.Baseline.Functions[0].FileID = trusted.Baseline.Files[0].ID
+	trusted.Baseline.Functions[0].ID = strings.Repeat("b", 64)
+	runner.coverage = trusted.Baseline
+	if _, err := v.Validate(context.Background(), selection); err == nil || len(runner.called) != 0 {
+		t.Fatalf("64-hex pseudo-IDs accepted: err=%v calls=%v", err, runner.called)
 	}
 }
 
