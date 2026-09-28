@@ -64,6 +64,15 @@ type Review struct {
 	Preview         ReviewPreview      `json:"preview"`
 }
 
+// ApplyRequest carries only an authenticated review identity and closed
+// conflict decisions. No source bytes or workspace paths cross the route.
+type ApplyRequest struct {
+	Owner        string
+	ReviewID     string
+	ReviewDigest string
+	Resolutions  map[string]ConflictChoice
+}
+
 // Digest binds the exact preimage, generated candidate, sorted operations and
 // displayed preview. The caller must compare it afresh before publishing.
 func (r Review) Digest() string {

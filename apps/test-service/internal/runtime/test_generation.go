@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
@@ -32,6 +33,14 @@ type GenerationDriver interface {
 	ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error
 	ProjectCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error)
 	CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error)
+}
+
+// ManagedValidationDriver is deliberately separate from GenerationDriver:
+// v1.5 producers need not implement it, and digest-only candidate validation
+// cannot stand in for compiling, running and measuring the exact selected
+// post-resolution test/CMake file set.
+type ManagedValidationDriver interface {
+	ValidateManagedSelection(context.Context, testgenpublish.ManagedSelection) ([]byte, error)
 }
 
 type GenerationStageResult struct {
@@ -95,6 +104,21 @@ func newGenerationService(config GenerationServiceConfig) (*generationService, e
 }
 
 func (s *generationService) TestGenerationReady() bool { return s != nil }
+
+// No production driver currently supplies a source-attested current-index
+// resolver and durable review lookup in addition to selected-output
+// validation. Until all three are wired, v1.6 managed methods stay closed.
+func (s *generationService) ManagedTestsReady() bool { return false }
+
+func (s *generationService) ListManagedTests(context.Context, managedtest.Query) (managedtest.Page, error) {
+	return managedtest.Page{}, task.ErrStorageUnavailable
+}
+func (s *generationService) GetManagedReview(context.Context, string, string) (managedtest.Review, error) {
+	return managedtest.Review{}, task.ErrStorageUnavailable
+}
+func (s *generationService) ApplyManagedReview(context.Context, managedtest.ApplyRequest) (testgendomain.Run, error) {
+	return testgendomain.Run{}, task.ErrStorageUnavailable
+}
 
 func (s *generationService) ListTestGenerationTargets(ctx context.Context, owner string, input generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error) {
 	if s == nil || !validGenerationOwner(owner) || ctx == nil {

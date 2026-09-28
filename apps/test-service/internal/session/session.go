@@ -466,11 +466,14 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		return s.handleCoverageDetail(ctx, responseVersion, request, provider)
 	}
 	if managedTestMethod(request.Method) {
-		return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed detail routes are not initialized", false))
+		if s.negotiatedVersion != protocol.Version16 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.6", false))
+		}
+		return s.handleManagedTests(ctx, responseVersion, request)
 	}
 	if generationMethod(request.Method) {
 		if s.negotiatedVersion == protocol.Version16 {
-			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "v1.6 generation route is not initialized", false))
+			return s.handleManagedGeneration(ctx, responseVersion, request)
 		}
 		if s.negotiatedVersion != protocol.Version15 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.5", false))

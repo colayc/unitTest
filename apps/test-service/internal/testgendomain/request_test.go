@@ -3,7 +3,58 @@ package testgendomain
 import (
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/coveragedetail"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
+
+func TestManagedTargetResolvesOnlyExactCurrentIndexIDs(t *testing.T) {
+	report := strings.Repeat("a", 32)
+	generation := strings.Repeat("b", 64)
+	fileID, err := coveragedetail.StableFileID("project", "src/classify.c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionID, err := coveragedetail.StableFunctionID(fileID, "classify(int)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapID, err := coveragedetail.StableGapID(report, functionID, "line", coveragedomain.SourceLocation{Line: 12}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := coveragedetail.Index{WorkspaceGeneration: generation, ProjectID: "project", ReportID: report,
+		Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent},
+		Files: []coveragedetail.File{{ID: fileID, RelativePath: "src/classify.c", SourceSHA256: strings.Repeat("c", 64), Status: coveragedetail.StatusCurrent,
+			Functions: []coveragedetail.Function{{ID: functionID, Name: "classify", Status: coveragedetail.StatusCurrent}}}},
+		Gaps: []coveragedetail.Gap{{ID: gapID, FileID: fileID, FunctionID: functionID, Kind: "line", Location: coveragedomain.SourceLocation{Line: 12}}},
+	}
+	for _, tc := range []struct {
+		scope Scope
+		id    string
+	}{{ScopeSymbol, functionID}, {ScopeFile, fileID}, {ScopeCoverageGap, gapID}} {
+		got, err := ResolveManagedTarget(ManagedSelector{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: tc.scope, ID: tc.id}, index)
+		if err != nil || got.FileID != fileID || got.File != "src/classify.c" || (tc.scope != ScopeFile && got.FunctionID != functionID) {
+			t.Fatalf("%s resolution = %#v, %v", tc.scope, got, err)
+		}
+	}
+	for _, bad := range []ManagedSelector{
+		{ProjectID: "project", WorkspaceGeneration: strings.Repeat("d", 64), CoverageReportID: report, Scope: ScopeSymbol, ID: functionID},
+		{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: strings.Repeat("e", 32), Scope: ScopeSymbol, ID: functionID},
+		{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: ScopeSymbol, ID: strings.Repeat("f", 32)},
+		{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: ScopeSymbol, ID: functionID, SymbolText: "fn:forged"},
+		{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: ScopeFile, ID: fileID, FilePath: "src/forged.c"},
+		{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: ScopeCoverageGap, ID: gapID, GapLine: 12},
+	} {
+		if got, err := ResolveManagedTarget(bad, index); err == nil {
+			t.Fatalf("unsafe selector resolved: %#v", got)
+		}
+	}
+	index.Files[0].Status = coveragedetail.StatusStale
+	if got, err := ResolveManagedTarget(ManagedSelector{ProjectID: "project", WorkspaceGeneration: generation, CoverageReportID: report, Scope: ScopeSymbol, ID: functionID}, index); err == nil {
+		t.Fatalf("stale source resolved: %#v", got)
+	}
+}
 
 func validRequest() Request {
 	return Request{

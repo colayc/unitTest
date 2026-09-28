@@ -4,12 +4,95 @@ import (
 	"errors"
 	"math"
 	"strings"
+
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 )
 
 var ErrInvalid = errors.New("invalid test generation value")
 var ErrStaleSnapshot = errors.New("stale test generation snapshot")
 
 type Scope string
+
+// ManagedSelector carries service-issued IDs only. The extra fields are
+// deliberately rejected so internal callers cannot accidentally bind a
+// display label, path, or coordinate supplied by a client.
+type ManagedSelector struct {
+	ProjectID, WorkspaceGeneration, CoverageReportID string
+	Scope                                            Scope
+	ID                                               string
+	SymbolText, FilePath                             string
+	GapLine, GapColumn, GapOrdinal                   int64
+}
+
+type ManagedTarget struct {
+	FileID, FunctionID, GapID        string
+	File, FunctionName, SourceDigest string
+}
+
+// ResolveManagedTarget requires an already source-attested current index from
+// the trusted coverage provider. IDs alone do not authorize stale reads.
+func ResolveManagedTarget(selector ManagedSelector, index coveragedetail.Index) (ManagedTarget, error) {
+	if !validProjectID(selector.ProjectID) || !validDigest(selector.WorkspaceGeneration) ||
+		!validID(selector.CoverageReportID) || !validID(selector.ID) ||
+		selector.SymbolText != "" || selector.FilePath != "" || selector.GapLine != 0 || selector.GapColumn != 0 || selector.GapOrdinal != 0 ||
+		selector.ProjectID != index.ProjectID || selector.WorkspaceGeneration != index.WorkspaceGeneration || selector.CoverageReportID != index.ReportID || index.Project.Status != coveragedetail.StatusCurrent {
+		return ManagedTarget{}, ErrStaleSnapshot
+	}
+	var gap *coveragedetail.Gap
+	if selector.Scope == ScopeCoverageGap {
+		for i := range index.Gaps {
+			candidate := &index.Gaps[i]
+			if candidate.ID != selector.ID {
+				continue
+			}
+			if gap != nil {
+				return ManagedTarget{}, ErrStaleSnapshot
+			}
+			gap = candidate
+		}
+		if gap == nil || gap.Kind != "line" && gap.Kind != "branch" {
+			return ManagedTarget{}, ErrStaleSnapshot
+		}
+		stable, err := coveragedetail.StableGapID(index.ReportID, gap.FunctionID, gap.Kind, gap.Location, gap.Ordinal)
+		if err != nil || stable != gap.ID {
+			return ManagedTarget{}, ErrStaleSnapshot
+		}
+	}
+	var found *ManagedTarget
+	for _, file := range index.Files {
+		stable, err := coveragedetail.StableFileID(index.ProjectID, file.RelativePath)
+		if err != nil || stable != file.ID {
+			return ManagedTarget{}, ErrStaleSnapshot
+		}
+		if file.Status != coveragedetail.StatusCurrent || !validDigest(file.SourceSHA256) {
+			continue
+		}
+		if selector.Scope == ScopeFile && file.ID == selector.ID {
+			if found != nil {
+				return ManagedTarget{}, ErrStaleSnapshot
+			}
+			found = &ManagedTarget{FileID: file.ID, File: file.RelativePath, SourceDigest: file.SourceSHA256}
+		}
+		for _, function := range file.Functions {
+			match := selector.Scope == ScopeSymbol && function.ID == selector.ID || gap != nil && function.ID == gap.FunctionID && file.ID == gap.FileID
+			if !match || function.Status != coveragedetail.StatusCurrent || !validID(function.ID) || function.Name == "" {
+				continue
+			}
+			if found != nil {
+				return ManagedTarget{}, ErrStaleSnapshot
+			}
+			value := ManagedTarget{FileID: file.ID, FunctionID: function.ID, File: file.RelativePath, FunctionName: function.Name, SourceDigest: file.SourceSHA256}
+			if gap != nil {
+				value.GapID = gap.ID
+			}
+			found = &value
+		}
+	}
+	if found == nil || selector.Scope != ScopeFile && selector.Scope != ScopeSymbol && selector.Scope != ScopeCoverageGap {
+		return ManagedTarget{}, ErrStaleSnapshot
+	}
+	return *found, nil
+}
 
 const (
 	ScopeSymbol      Scope = "symbol"

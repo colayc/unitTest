@@ -37,6 +37,30 @@ type generationDriverFixture struct {
 
 const fixtureGenerationDiff = "--- a/tests/generated/classify_test.cpp\n+++ b/tests/generated/classify_test.cpp\n@@ -0,0 +1 @@\n+TEST(classify, generated) {}\n--- a/CMakeLists.txt\n+++ b/CMakeLists.txt\n@@ -1 +1,2 @@\n add_executable(tests)\n+target_sources(tests PRIVATE tests/generated/classify_test.cpp)\n"
 
+func TestGenerationServiceDoesNotAdvertiseManagedTestsWithoutSelectedOutputValidation(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service, err := newGenerationService(GenerationServiceConfig{
+		Store: store, Driver: &generationDriverFixture{complete: true}, Publisher: &generationPublisherFixture{complete: true},
+		Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return r.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+		VerifyProcess:  func(context.Context, string, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if service.ManagedTestsReady() {
+		t.Fatal("managed capability advertised without an exact selected-output compile/test/coverage validator")
+	}
+}
+
 func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
