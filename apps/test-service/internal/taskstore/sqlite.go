@@ -21,6 +21,8 @@ type Store struct {
 	attestationInvalid   bool
 	managedAvailable     bool
 	managedInvalid       bool
+	reviewAvailable      bool
+	reviewInvalid        bool
 }
 
 func Open(path string) (*Store, error) {

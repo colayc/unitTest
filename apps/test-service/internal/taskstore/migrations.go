@@ -60,6 +60,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			if current.version == 20 && !s.attestationInvalid {
 				s.attestationAvailable = true
 			}
+			if current.version == 21 && !s.reviewInvalid {
+				s.reviewAvailable = true
+			}
 			continue
 		}
 		if err := s.applyMigration(ctx, current); err != nil {
@@ -77,6 +80,10 @@ func (s *Store) migrate(ctx context.Context) error {
 				s.attestationAvailable = false
 				break
 			}
+			if current.version == 21 {
+				s.reviewAvailable = false
+				break
+			}
 			return err
 		}
 		if current.version == 16 {
@@ -87,6 +94,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		if current.version == 20 {
 			s.attestationAvailable = true
+		}
+		if current.version == 21 {
+			s.reviewAvailable = true
 		}
 	}
 	return s.reconcileGenerationRecords(ctx)
@@ -257,6 +267,11 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 			}
 			if version == 20 {
 				s.attestationInvalid = true
+				applied[version] = true
+				continue
+			}
+			if version == 21 {
+				s.reviewInvalid = true
 				applied[version] = true
 				continue
 			}
