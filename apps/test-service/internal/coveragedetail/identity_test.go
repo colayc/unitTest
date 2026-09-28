@@ -48,3 +48,22 @@ func TestStableIdentitiesIgnoreLocationButRejectUnsafePaths(t *testing.T) {
 		t.Fatal("accepted invalid line")
 	}
 }
+
+func TestStableFunctionIdentityDoesNotUseSourceRange(t *testing.T) {
+	input := detailInput()
+	first, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Functions[0].Start.Line = 99
+	input.Functions[0].End.Line = 101
+	input.Functions[1].Start.Line = 102
+	input.Functions[1].End.Line = 110
+	second, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Files[0].Functions[0].ID != second.Files[0].Functions[0].ID {
+		t.Fatal("source movement changed stable function ID")
+	}
+}

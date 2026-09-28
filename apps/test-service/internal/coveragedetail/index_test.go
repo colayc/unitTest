@@ -1,6 +1,7 @@
 package coveragedetail
 
 import (
+	"math/rand"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,48 @@ import (
 
 func detailReport() coveragedomain.Report {
 	return coveragedomain.Report{ID: strings.Repeat("a", 32), RunID: strings.Repeat("b", 32), TestRunID: strings.Repeat("c", 32), SchemaVersion: coveragedomain.SchemaVersion10, CreatedAt: time.Now(), Completeness: coveragedomain.Completeness{Outcome: coveragedomain.OutcomeAvailable}, Toolchain: coveragedomain.ToolchainSnapshot{Platform: coveragedomain.PlatformLinux, Architecture: coveragedomain.ArchitectureX64, Compiler: coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyGCC, Version: "15"}, Driver: coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: "15"}, Collector: coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"}, NormalizerVersion: "1", InstrumentationFingerprint: strings.Repeat("d", 64)}, ArtifactID: strings.Repeat("e", 32), Sources: []coveragedomain.SourceSnapshot{{URI: "src/a.cpp", SHA256: strings.Repeat("1", 64)}, {URI: "src/b.cpp", SHA256: strings.Repeat("2", 64)}}}
+}
+
+func TestBuildSummaryInvariantsAcrossObservationPermutations(t *testing.T) {
+	input := detailInput()
+	want, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(7))
+	for iteration := 0; iteration < 50; iteration++ {
+		rng.Shuffle(len(input.Functions), func(i, j int) { input.Functions[i], input.Functions[j] = input.Functions[j], input.Functions[i] })
+		got, err := Build(input)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("iteration %d changed deterministic index: %v", iteration, err)
+		}
+		for _, summary := range []coveragedomain.Summary{got.Project.Summary, got.Files[0].Summary, got.Files[1].Summary, got.Files[0].Functions[0].Summary} {
+			if _, err := coveragedomain.NewSummary(summary); err != nil {
+				t.Fatalf("unsafe or covered>total summary: %#v", summary)
+			}
+		}
+	}
+}
+
+func TestBuildRejectsUnsafeCountsAndMetricOverflow(t *testing.T) {
+	for name, mutate := range map[string]func(*BuildInput){
+		"execution negative":             func(v *BuildInput) { v.Functions[0].ExecutionCount = -1 },
+		"execution unsafe":               func(v *BuildInput) { v.Functions[0].ExecutionCount = coveragedomain.MaxSafeInteger + 1 },
+		"line count unsafe":              func(v *BuildInput) { v.Functions[0].Lines[0].Count = coveragedomain.MaxSafeInteger + 1 },
+		"branch count negative":          func(v *BuildInput) { v.Functions[0].Branches[0].Count = -1 },
+		"reported covered exceeds total": func(v *BuildInput) { v.Report.Summary.Lines = coveragedomain.Metric{Covered: 4, Total: 3} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := detailInput()
+			mutate(&input)
+			if _, err := Build(input); err == nil {
+				t.Fatal("accepted unsafe count")
+			}
+		})
+	}
+	if _, err := addMetric(coveragedomain.Metric{Covered: coveragedomain.MaxSafeInteger, Total: coveragedomain.MaxSafeInteger}, coveragedomain.Metric{Covered: 1, Total: 1}); err == nil {
+		t.Fatal("accepted safe-integer aggregation overflow")
+	}
 }
 
 func detailInput() BuildInput {
@@ -85,6 +128,64 @@ func TestBuildQualifiedDisplayNameIsOrderIndependent(t *testing.T) {
 	}
 	if first.Files[0].Functions[0].Name != "zz::foo" {
 		t.Fatalf("display name = %q", first.Files[0].Functions[0].Name)
+	}
+}
+
+func TestBuildCanonicalizesAllMergedFunctionMetadata(t *testing.T) {
+	for _, qualified := range []bool{true, false} {
+		input := detailInput()
+		input.Functions[0].LinkageName = "  _ZN2ns3fooEv\t"
+		input.Functions[1].LinkageName = "_ZN2ns3fooEv"
+		if qualified {
+			input.Functions[0].QualifiedName = "  ns::foo\t"
+			input.Functions[1].QualifiedName = "ns::foo"
+		} else {
+			input.Functions[0].QualifiedName = ""
+			input.Functions[1].QualifiedName = ""
+		}
+		first, err := Build(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Functions[0], input.Functions[1] = input.Functions[1], input.Functions[0]
+		second, err := Build(input)
+		if err != nil || !reflect.DeepEqual(first, second) {
+			t.Fatalf("qualified=%v: emission order changed index: %v", qualified, err)
+		}
+		fn := first.Files[0].Functions[0]
+		if fn.LinkageName != "_ZN2ns3fooEv" {
+			t.Fatalf("qualified=%v: linkage=%q", qualified, fn.LinkageName)
+		}
+		wantName := "ns::foo"
+		if !qualified {
+			wantName = "_ZN2ns3fooEv"
+		}
+		if fn.Name != wantName {
+			t.Fatalf("qualified=%v: name=%q, want %q", qualified, fn.Name, wantName)
+		}
+	}
+}
+
+func TestBuildRejectsUnsafeObservationMetadata(t *testing.T) {
+	for name, mutate := range map[string]func(*coveragedomain.FunctionObservation){
+		"invalid qualified utf8": func(v *coveragedomain.FunctionObservation) { v.QualifiedName = string([]byte{0xff}) },
+		"qualified nul":          func(v *coveragedomain.FunctionObservation) { v.QualifiedName = "safe\x00unsafe" },
+		"qualified oversized":    func(v *coveragedomain.FunctionObservation) { v.QualifiedName = strings.Repeat("x", 8193) },
+		"linkage oversized":      func(v *coveragedomain.FunctionObservation) { v.LinkageName = strings.Repeat("x", 8193) },
+		"signature malformed":    func(v *coveragedomain.FunctionObservation) { v.SignatureDigest = "not-a-digest" },
+		"signature oversized":    func(v *coveragedomain.FunctionObservation) { v.SignatureDigest = strings.Repeat("a", 8193) },
+		"ordinal negative":       func(v *coveragedomain.FunctionObservation) { v.InstantiationOrdinal = -1 },
+		"ordinal unsafe": func(v *coveragedomain.FunctionObservation) {
+			v.InstantiationOrdinal = coveragedomain.MaxSafeInteger + 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := detailInput()
+			mutate(&input.Functions[0])
+			if _, err := Build(input); err == nil {
+				t.Fatal("accepted unsafe observation metadata")
+			}
+		})
 	}
 }
 

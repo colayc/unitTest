@@ -3,6 +3,8 @@ package coveragedetail
 import (
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
 
 func TestBuildDeltaRequiresCompatibleBaseline(t *testing.T) {
@@ -35,5 +37,51 @@ func TestBuildDeltaRequiresCompatibleBaseline(t *testing.T) {
 	input.Report.ID = "another-report"
 	if _, err := Build(input); err == nil {
 		t.Fatal("accepted invalid report identity")
+	}
+}
+
+func TestBuildDeltaRejectsSourceAndCompletenessIncompatibility(t *testing.T) {
+	baseInput := detailInput()
+	baseline, err := Build(baseInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*BuildInput){
+		"digest changed": func(v *BuildInput) {
+			v.Report.Sources[0].SHA256 = strings.Repeat("3", 64)
+			v.Sources = append([]coveragedomain.SourceSnapshot(nil), v.Report.Sources...)
+		},
+		"source set changed": func(v *BuildInput) {
+			v.Report.Sources = v.Report.Sources[:1]
+			v.Sources = append([]coveragedomain.SourceSnapshot(nil), v.Report.Sources...)
+			v.Functions = v.Functions[:2]
+			v.Report.Summary = coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 1, Total: 1}, Lines: coveragedomain.Metric{Covered: 1, Total: 2}, Branches: coveragedomain.Metric{Covered: 1, Total: 2}}
+		},
+		"current incomplete": func(v *BuildInput) { v.Functions[0].IncompleteReason = coveragedomain.ObservationIncompleteLimit },
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := detailInput()
+			input.Report.ID = strings.Repeat("9", 32)
+			mutate(&input)
+			withoutBaseline, err := Build(input)
+			if err != nil {
+				t.Fatalf("candidate invalid before baseline comparison: %v", err)
+			}
+			if name != "current incomplete" && withoutBaseline.Project.Status != StatusCurrent {
+				t.Fatalf("candidate status = %q, want current", withoutBaseline.Project.Status)
+			}
+			input.Baseline = &baseline
+			if _, err := Build(input); err == nil {
+				t.Fatal("accepted incompatible baseline")
+			}
+		})
+	}
+	input := detailInput()
+	incomplete := baseline
+	incomplete.Project.Status = StatusIncomplete
+	input.Baseline = &incomplete
+	input.Report.ID = strings.Repeat("9", 32)
+	if _, err := Build(input); err == nil {
+		t.Fatal("accepted incomplete baseline")
 	}
 }

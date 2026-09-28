@@ -3,7 +3,9 @@ package coveragedetail
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
@@ -82,6 +84,11 @@ func Build(input BuildInput) (Index, error) {
 	}
 	functions := make(map[string]map[string]*functionAccum, len(index.Files))
 	for _, observation := range input.Functions {
+		var err error
+		observation, err = canonicalObservation(observation)
+		if err != nil {
+			return Index{}, err
+		}
 		if !validNavigationRange(observation.Start, observation.End) {
 			return Index{}, ErrInvalidDetail
 		}
@@ -325,14 +332,28 @@ func Build(input BuildInput) (Index, error) {
 }
 
 func semanticKey(value coveragedomain.FunctionObservation) string {
-	key := value.LinkageName
+	kind, key := "linkage", value.LinkageName
 	if key == "" {
-		key = value.QualifiedName
+		kind, key = "qualified", value.QualifiedName
 	}
-	if value.SignatureDigest != "" {
-		key += " #signature=" + value.SignatureDigest
+	return kind + ":" + strconv.Itoa(len(key)) + ":" + key + ":signature:" + value.SignatureDigest
+}
+
+func canonicalObservation(value coveragedomain.FunctionObservation) (coveragedomain.FunctionObservation, error) {
+	if value.InstantiationOrdinal < 0 || value.InstantiationOrdinal > coveragedomain.MaxSafeInteger {
+		return coveragedomain.FunctionObservation{}, ErrInvalidDetail
 	}
-	return strings.Join(strings.Fields(key), " ")
+	for _, field := range []string{value.QualifiedName, value.LinkageName, value.SignatureDigest} {
+		if len(field) > 8192 || !utf8.ValidString(field) || strings.ContainsRune(field, 0) {
+			return coveragedomain.FunctionObservation{}, ErrInvalidDetail
+		}
+	}
+	if value.SignatureDigest != "" && !validHex(value.SignatureDigest, 64) {
+		return coveragedomain.FunctionObservation{}, ErrInvalidDetail
+	}
+	value.QualifiedName = strings.Join(strings.Fields(value.QualifiedName), " ")
+	value.LinkageName = strings.Join(strings.Fields(value.LinkageName), " ")
+	return value, nil
 }
 
 func rangeLess(aStart, aEnd, bStart, bEnd coveragedomain.SourceLocation) bool {
