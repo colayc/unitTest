@@ -197,14 +197,21 @@ export interface ManagedRecordsRequestV16 {
  * with nextCursor rather than truncating cases.
  */
 export interface ManagedReviewV16 {
-    cases:               ManagedReviewCaseV16[];
-    conflictKeys?:       string[];
-    coverageReportId:    string;
-    nextCursor?:         string;
-    reviewDigest:        string;
-    reviewId:            string;
-    scaffoldPreviews?:   ScaffoldPreview[];
-    workspaceGeneration: string;
+    cases:            ManagedReviewCaseV16[];
+    conflictKeys?:    string[];
+    coverageReportId: string;
+    nextCursor?:      string;
+    /**
+     * Optional SHA-256 of the exact page preview manifest: UTF-8 managed-review-preview-v1
+     * newline, reviewDigest newline, sorted c:caseId:SHA256(diff) newline entries, then sorted
+     * s:scaffoldKey:diffDigest newline entries. Without this verified field, diff text is
+     * display-unavailable and cannot authorize Apply.
+     */
+    previewArtifactDigest?: string;
+    reviewDigest:           string;
+    reviewId:               string;
+    scaffoldPreviews?:      ScaffoldPreview[];
+    workspaceGeneration:    string;
 }
 
 export interface ManagedReviewCaseV16 {

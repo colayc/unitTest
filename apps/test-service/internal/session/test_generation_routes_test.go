@@ -13,6 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/protocol"
 	capabilitiesv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/capabilities"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
+	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
@@ -94,6 +95,68 @@ func (b *managedGenerationBackend) GetManagedReview(context.Context, string, str
 func (b *managedGenerationBackend) ApplyManagedReview(context.Context, managedtest.ApplyRequest) (testgendomain.Run, error) {
 	return testgendomain.Run{}, task.ErrStorageUnavailable
 }
+func (b *managedGenerationBackend) StartManaged(context.Context, string, generationv16.TestGenerationStartRequestV16) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) ResolveManagedStart(context.Context, string, generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error) {
+	return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) ListManagedTargets(context.Context, string, generationv16.TestGenerationTargetListRequestV16) (generationv16.TestGenerationTargetListV16, error) {
+	return generationv16.TestGenerationTargetListV16{Items: []generationv16.TestGenerationTargetV16{}}, nil
+}
+func (b *managedGenerationBackend) GetManagedRun(context.Context, string, string) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) CancelManagedRun(context.Context, string, string) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) ReplayManagedEvents(context.Context, string, generationv16.TestGenerationEventReplayRequestV16) (generationv16.TestGenerationEventPageV16, error) {
+	return generationv16.TestGenerationEventPageV16{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) ListManagedCandidates(context.Context, string, generationv16.TestGenerationCandidateListRequestV16) (generationv16.TestGenerationCandidatePageV16, error) {
+	return generationv16.TestGenerationCandidatePageV16{}, task.ErrStorageUnavailable
+}
+
+type partialManagedGenerationBackend struct{ *generationBackend }
+
+func (*partialManagedGenerationBackend) ManagedTestsReady() bool { return true }
+func (*partialManagedGenerationBackend) ListManagedTests(context.Context, managedtest.Query) (managedtest.Page, error) {
+	return managedtest.Page{}, task.ErrStorageUnavailable
+}
+func (*partialManagedGenerationBackend) GetManagedReview(context.Context, string, string) (managedtest.Review, error) {
+	return managedtest.Review{}, task.ErrStorageUnavailable
+}
+func (*partialManagedGenerationBackend) ApplyManagedReview(context.Context, managedtest.ApplyRequest) (testgendomain.Run, error) {
+	return testgendomain.Run{}, task.ErrStorageUnavailable
+}
+
+type startOnlyManagedBackend struct {
+	*partialManagedGenerationBackend
+}
+
+func (*startOnlyManagedBackend) StartManaged(context.Context, string, generationv16.TestGenerationStartRequestV16) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+
+type readOnlyManagedBackend struct {
+	*partialManagedGenerationBackend
+}
+
+func (*readOnlyManagedBackend) ListManagedTargets(context.Context, string, generationv16.TestGenerationTargetListRequestV16) (generationv16.TestGenerationTargetListV16, error) {
+	return generationv16.TestGenerationTargetListV16{}, nil
+}
+func (*readOnlyManagedBackend) GetManagedRun(context.Context, string, string) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+func (*readOnlyManagedBackend) CancelManagedRun(context.Context, string, string) (generationv16.TestGenerationRunV16, error) {
+	return generationv16.TestGenerationRunV16{}, task.ErrStorageUnavailable
+}
+func (*readOnlyManagedBackend) ReplayManagedEvents(context.Context, string, generationv16.TestGenerationEventReplayRequestV16) (generationv16.TestGenerationEventPageV16, error) {
+	return generationv16.TestGenerationEventPageV16{}, task.ErrStorageUnavailable
+}
+func (*readOnlyManagedBackend) ListManagedCandidates(context.Context, string, generationv16.TestGenerationCandidateListRequestV16) (generationv16.TestGenerationCandidatePageV16, error) {
+	return generationv16.TestGenerationCandidatePageV16{}, task.ErrStorageUnavailable
+}
 
 func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t *testing.T) {
 	coverage := &coverageBackend{fakeBackend: &fakeBackend{}}
@@ -147,10 +210,25 @@ func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t 
 	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
 		t.Fatalf("unready managed generation backend falsely negotiated v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
 	}
+	active = session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, &partialManagedGenerationBackend{generationBackend: generation}, &detailProvider{true}, &managedProvider{true})
+	result = active.Handle(context.Background(), request)
+	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
+		t.Fatalf("partial managed generation backend advertised v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
+	}
+	for name, backend := range map[string]session.GenerationBackend{
+		"start-only": &startOnlyManagedBackend{&partialManagedGenerationBackend{generationBackend: generation}},
+		"read-only":  &readOnlyManagedBackend{&partialManagedGenerationBackend{generationBackend: generation}},
+	} {
+		partial := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, backend, &detailProvider{true}, &managedProvider{true})
+		response := partial.Handle(context.Background(), request)
+		if response.Response.Error != nil || partial.NegotiatedVersion() != protocol.Version15 {
+			t.Fatalf("%s provider falsely advertised v1.6: %#v, %q", name, response.Response, partial.NegotiatedVersion())
+		}
+	}
 	active = session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, &managedGenerationBackend{generationBackend: generation, ready: true}, &detailProvider{true}, &managedProvider{true})
 	result = active.Handle(context.Background(), request)
 	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version16 {
-		t.Fatalf("managed generation backend did not negotiate v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
+		t.Fatalf("complete provider failed v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
 	}
 	capability := active.Handle(context.Background(), requestVersion(t, protocol.Version16, "capabilities/get", map[string]any{}))
 	var value map[string]any

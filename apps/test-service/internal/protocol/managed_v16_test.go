@@ -152,3 +152,36 @@ func TestV16RecordDigestGuardRejectsIncorrectAbsence(t *testing.T) {
 		t.Fatal("absent generated side without digest accepted")
 	}
 }
+
+func TestV16ScaffoldKeyClosedCanonicalPath(t *testing.T) {
+	for _, key := range []string{"scaffold:tests/generated/a_test.c", "scaffold:tests/generated/src/a_test.cpp"} {
+		if !protocol.ValidManagedScaffoldKeyV16(key) {
+			t.Fatalf("valid key rejected: %q", key)
+		}
+	}
+	for _, key := range []string{"scaffold:tests/generated/é_test.c", "scaffold:tests/generated/a%20b_test.c", "scaffold:tests/generated/../a_test.c", "scaffold:tests/generated/./a_test.c", "scaffold:tests/generated/" + strings.Repeat("a", 221) + "_test.c"} {
+		if protocol.ValidManagedScaffoldKeyV16(key) {
+			t.Fatalf("invalid key accepted: %q", key)
+		}
+	}
+}
+
+func TestV16ReviewPreviewArtifactBindsExactDiffToManifest(t *testing.T) {
+	id, digest, diff := strings.Repeat("a", 32), strings.Repeat("b", 64), "+TEST(foo)\n"
+	caseID := "utc_" + id
+	page := generationv16.ManagedReviewV16{ReviewID: id, ReviewDigest: digest, WorkspaceGeneration: digest, CoverageReportID: id,
+		Cases: []generationv16.ManagedReviewCaseV16{{CaseID: caseID, Status: generationv16.Current, AcceptedDigest: digest, CurrentDigest: digest, GeneratedDigest: digest, Diff: &diff}}}
+	diffSum := sha256.Sum256([]byte(diff))
+	manifest := "managed-review-preview-v1\n" + digest + "\nc:" + caseID + ":" + hex.EncodeToString(diffSum[:]) + "\n"
+	sum := sha256.Sum256([]byte(manifest))
+	artifact := hex.EncodeToString(sum[:])
+	page.PreviewArtifactDigest = &artifact
+	if !protocol.ValidManagedReviewPageV16(page) {
+		t.Fatal("valid artifact rejected")
+	}
+	forged := "+FABRICATED()\n"
+	page.Cases[0].Diff = &forged
+	if protocol.ValidManagedReviewPageV16(page) {
+		t.Fatal("fabricated diff accepted with stale artifact digest")
+	}
+}

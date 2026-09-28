@@ -11,10 +11,16 @@ const reviewDigest = "d".repeat(64);
 const caseId = `utc_${"e".repeat(32)}`;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const generated = "+TEST(foo)\n";
-const review = {
+function artifactDigest(value: { reviewDigest: string; cases: { caseId: string; diff?: string }[]; scaffoldPreviews?: { key: string; diffDigest: string }[] }): string {
+  const cases = value.cases.map((item) => `c:${item.caseId}:${digest(item.diff ?? "")}\n`).sort();
+  const scaffolds = (value.scaffoldPreviews ?? []).map((item) => `s:${item.key}:${item.diffDigest}\n`).sort();
+  return digest(`managed-review-preview-v1\n${value.reviewDigest}\n${cases.join("")}${scaffolds.join("")}`);
+}
+const reviewBody = {
   reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: reportId,
   cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: digest(generated), diff: generated }]
 };
+const review = { ...reviewBody, previewArtifactDigest: artifactDigest(reviewBody) };
 
 function fixture() {
   const applied: unknown[] = [];
@@ -155,11 +161,48 @@ test("digest-only review loads but cannot authorize Apply without a verified pre
   assert.equal(f.applied.length, 0);
 });
 
+test("fabricated or mismatched diff cannot authorize Apply without a manifest-bound preview artifact", async () => {
+  const f = fixture();
+  const forged = { ...review, cases: [{ ...review.cases[0], diff: "+FABRICATED()\n" }] };
+  f.setReview(forged);
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  assert.equal(f.controller.getState().previewAvailable, false);
+  assert.equal(f.controller.getState().canApply, false);
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview unavailable/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("preview changed after display cannot dispatch even when review digest remains unchanged", async () => {
+  const f = fixture();
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  f.setReview({ ...review, cases: [{ ...review.cases[0], diff: "+CHANGED()\n" }] });
+  await assert.rejects(() => f.controller.apply(reviewDigest), /preview|stale/i);
+  assert.equal(f.applied.length, 0);
+});
+
+test("returned review state cannot mutate verified preview bytes", async () => {
+  const f = fixture();
+  const scaffold = "scaffold:tests/generated/src/a_test.cpp";
+  const scaffoldDiff = "+TEST(scaffold)\n";
+  const withScaffold = { ...review, conflictKeys: [caseId, scaffold], scaffoldPreviews: [{ key: scaffold, diff: scaffoldDiff, diffDigest: digest(scaffoldDiff) }] };
+  f.setReview({ ...withScaffold, previewArtifactDigest: artifactDigest(withScaffold) });
+  const state = await f.controller.load(reviewId);
+  (state.review!.cases[0] as any).diff = "+FABRICATED()\n";
+  (state.review!.scaffoldPreviews![0] as any).diff = "+FABRICATED()\n";
+  assert.equal(f.controller.getState().review!.cases[0]!.diff, generated);
+  assert.equal(f.controller.getState().review!.scaffoldPreviews![0]!.diff, scaffoldDiff);
+});
+
 test("only service-advertised scaffold conflict keys can be chosen", async () => {
   const f = fixture();
   const scaffold = "scaffold:tests/generated/src/a_test.cpp";
   const scaffoldDiff = "--- a/tests/generated/src/a_test.cpp\n+++ b/tests/generated/src/a_test.cpp\n";
-  f.setReview({ ...review, conflictKeys: [caseId, scaffold], scaffoldPreviews: [{ key: scaffold, diff: scaffoldDiff, diffDigest: digest(scaffoldDiff) }] });
+  const withScaffold = { ...review, conflictKeys: [caseId, scaffold], scaffoldPreviews: [{ key: scaffold, diff: scaffoldDiff, diffDigest: digest(scaffoldDiff) }] };
+  f.setReview({ ...withScaffold, previewArtifactDigest: artifactDigest(withScaffold) });
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   assert.throws(() => f.controller.choose("scaffold:tests/generated/other_test.cpp", "keep-current"), /invalid/i);
@@ -174,7 +217,8 @@ test("only service-advertised scaffold conflict keys can be chosen", async () =>
 test("multiple conflicts require independent choices and preserve their sorted identity", async () => {
   const f = fixture();
   const otherId = `utc_${"f".repeat(32)}`;
-  f.setReview({ ...review, cases: [{ ...review.cases[0], caseId: otherId }, review.cases[0]] });
+  const withSecondCase = { ...review, cases: [{ ...review.cases[0]!, caseId: otherId }, review.cases[0]!] };
+  f.setReview({ ...withSecondCase, previewArtifactDigest: artifactDigest(withSecondCase) });
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
   f.controller.choose(otherId, "keep-current");

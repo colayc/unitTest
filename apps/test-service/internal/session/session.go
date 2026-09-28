@@ -294,7 +294,10 @@ func NewWithManagedDetails(token, platform, transport string, backend Backend, c
 
 func (s *Session) detailsReady() bool {
 	managedGeneration, ok := s.generationBackend.(ManagedGenerationBackend)
-	return s.coverageBackend != nil && ok && managedGeneration.TestGenerationReady() && managedGeneration.ManagedTestsReady() &&
+	_, canResolveStart := s.generationBackend.(ManagedStartResolverBackend)
+	_, canStart := s.generationBackend.(ManagedStartBackend)
+	_, canRead := s.generationBackend.(ManagedRunReadBackend)
+	return s.coverageBackend != nil && ok && canResolveStart && canStart && canRead && managedGeneration.TestGenerationReady() && managedGeneration.ManagedTestsReady() &&
 		s.coverageDetails != nil && s.coverageDetails.CoverageDetailsReady() &&
 		s.managedTests != nil && s.managedTests.ManagedTestsReady()
 }

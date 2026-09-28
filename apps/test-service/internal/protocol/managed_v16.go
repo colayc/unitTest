@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
-	"unit-test-ide.local/test-service/internal/managedtest"
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 )
 
@@ -55,7 +55,7 @@ func ValidManagedReviewApplyV16(request generationv16.ManagedReviewApplyRequestV
 	seen := make(map[string]struct{}, len(request.Resolutions))
 	for _, resolution := range request.Resolutions {
 		caseID := len(resolution.CaseID) == 36 && strings.HasPrefix(resolution.CaseID, "utc_") && validLowerHex(resolution.CaseID[4:], 32)
-		scaffold := strings.HasPrefix(resolution.CaseID, "scaffold:") && managedtest.ValidTestPath(strings.TrimPrefix(resolution.CaseID, "scaffold:"))
+		scaffold := ValidManagedScaffoldKeyV16(resolution.CaseID)
 		if (!caseID && !scaffold) || !validManagedChoiceV16(resolution.Choice) {
 			return false
 		}
@@ -77,7 +77,7 @@ func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
 	keys := make(map[string]bool, len(page.ConflictKeys))
 	for _, key := range page.ConflictKeys {
 		caseID := strings.HasPrefix(key, "utc_") && len(key) == 36 && validLowerHex(key[4:], 32)
-		scaffold := strings.HasPrefix(key, "scaffold:") && managedtest.ValidTestPath(strings.TrimPrefix(key, "scaffold:"))
+		scaffold := ValidManagedScaffoldKeyV16(key)
 		if (!caseID && !scaffold) || keys[key] {
 			return false
 		}
@@ -85,7 +85,7 @@ func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
 	}
 	previews := make(map[string]bool, len(page.ScaffoldPreviews))
 	for _, preview := range page.ScaffoldPreviews {
-		if !keys[preview.Key] || !strings.HasPrefix(preview.Key, "scaffold:") || previews[preview.Key] || len(preview.Diff) == 0 || len(preview.Diff) > 32768 || !utf8.ValidString(preview.Diff) || strings.ContainsRune(preview.Diff, 0) {
+		if !keys[preview.Key] || !ValidManagedScaffoldKeyV16(preview.Key) || previews[preview.Key] || len(preview.Diff) == 0 || len(preview.Diff) > 32768 || !utf8.ValidString(preview.Diff) || strings.ContainsRune(preview.Diff, 0) {
 			return false
 		}
 		sum := sha256.Sum256([]byte(preview.Diff))
@@ -103,8 +103,76 @@ func ValidManagedReviewPageV16(page generationv16.ManagedReviewV16) bool {
 			return false
 		}
 	}
+	if page.PreviewArtifactDigest != nil && !ValidManagedPreviewArtifactV16(page) {
+		return false
+	}
 	encoded, err := json.Marshal(page)
 	return err == nil && len(encoded) <= MaxManagedReviewPageBytesV16
+}
+
+// ValidManagedPreviewArtifactV16 verifies exact diff bytes against the
+// immutable review digest and this page's closed set of case/scaffold keys.
+func ValidManagedPreviewArtifactV16(page generationv16.ManagedReviewV16) bool {
+	if page.PreviewArtifactDigest == nil || !validLowerHex(*page.PreviewArtifactDigest, 64) {
+		return false
+	}
+	cases := make([]string, 0, len(page.Cases))
+	for _, item := range page.Cases {
+		if item.Diff == nil || *item.Diff == "" {
+			return false
+		}
+		sum := sha256.Sum256([]byte(*item.Diff))
+		cases = append(cases, "c:"+item.CaseID+":"+hex.EncodeToString(sum[:])+"\n")
+	}
+	scaffolds := make([]string, 0, len(page.ScaffoldPreviews))
+	for _, item := range page.ScaffoldPreviews {
+		if item.Diff == "" {
+			return false
+		}
+		scaffolds = append(scaffolds, "s:"+item.Key+":"+item.DiffDigest+"\n")
+	}
+	sort.Strings(cases)
+	sort.Strings(scaffolds)
+	manifest := "managed-review-preview-v1\n" + page.ReviewDigest + "\n" + strings.Join(cases, "") + strings.Join(scaffolds, "")
+	sum := sha256.Sum256([]byte(manifest))
+	return hex.EncodeToString(sum[:]) == *page.PreviewArtifactDigest
+}
+
+// ValidManagedScaffoldKeyV16 mirrors the closed v1.6 JSON-schema and TS
+// path grammar. It intentionally does not inherit broader source-path rules.
+func ValidManagedScaffoldKeyV16(key string) bool {
+	const prefix = "scaffold:tests/generated/"
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	path := strings.TrimPrefix(key, "scaffold:")
+	if strings.Contains(path, "//") {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	var suffix string
+	if strings.HasSuffix(key, "_test.cpp") {
+		suffix = "_test.cpp"
+	} else if strings.HasSuffix(key, "_test.c") {
+		suffix = "_test.c"
+	} else {
+		return false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(key, prefix), suffix)
+	if len(body) < 1 || len(body) > 220 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '/' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidManagedReviewCaseDigestsV16(item generationv16.ManagedReviewCaseV16) bool {

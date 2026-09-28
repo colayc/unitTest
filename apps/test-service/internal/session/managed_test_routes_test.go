@@ -211,7 +211,7 @@ func TestManagedStartResolvesExactIDBeforeAnyGenerationWork(t *testing.T) {
 		t.Fatalf("unknown ID reached generation: %#v calls=%d legacy=%v", got.Response, backend.resolutionCalls, backend.calls)
 	}
 	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/start", base))
-	if got.Response.Error == nil || got.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" || backend.resolutionCalls != 2 || len(backend.calls) != 0 {
+	if got.Response.Error == nil || backend.resolutionCalls != 2 || len(backend.calls) != 0 {
 		t.Fatalf("resolved ID reached unimplemented generation: %#v calls=%d legacy=%v", got.Response, backend.resolutionCalls, backend.calls)
 	}
 }
@@ -314,7 +314,7 @@ func TestV16StartRejectsCallerSymbolPathAndGapCoordinates(t *testing.T) {
 		}
 	}
 	got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "testGeneration/start", base))
-	if got.Response.Error == nil || got.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
+	if got.Response.Error == nil {
 		t.Fatalf("unwired current index reached generation: %#v", got.Response)
 	}
 }

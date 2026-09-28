@@ -23,12 +23,12 @@ export interface ManagedCaseReview {
 }
 
 /** v1.6 transports only a bounded diff plus the three operation digests. */
-export function createManagedCaseReview(value: ManagedReviewCaseV16): ManagedCaseReview {
+export function createManagedCaseReview(value: ManagedReviewCaseV16, verifiedPreview = false): ManagedCaseReview {
   if (!/^utc_[0-9a-f]{32}$/.test(value.caseId) || !validateManagedReviewCaseDigestsV16(value) || value.diff !== undefined && (value.diff.length > 32_768 || value.diff.includes("\0"))) {
     throw new Error("The managed case preview or digest is invalid.");
   }
   const absent = new Set<string>(value.absentSides ?? []);
-  return { title: `Managed test ${value.caseId}`, content: value.diff || "Preview unavailable: the service supplied digests only; exact text changes cannot be shown.", previewAvailable: !!value.diff,
+  return { title: `Managed test ${value.caseId}`, content: verifiedPreview && value.diff ? value.diff : "Preview unavailable: the service did not supply a verified manifest-bound preview artifact.", previewAvailable: verifiedPreview && !!value.diff,
     panes: { accepted: absent.has("accepted") ? "No accepted ancestor" : value.acceptedDigest,
       current: absent.has("current") ? "No current block" : value.currentDigest,
       generated: absent.has("generated") ? "No generated block" : value.generatedDigest } };

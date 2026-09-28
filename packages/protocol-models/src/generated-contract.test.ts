@@ -144,6 +144,9 @@ test("protocol 1.6 review requests paginate and reject stale or duplicate resolu
   assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [apply.resolutions[0]!, { caseId, choice: ManagedConflictChoiceV16.UseGenerated }] }, reviewId, currentDigest), false);
   assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [] }, reviewId, currentDigest), true);
   assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [{ caseId: "scaffold:tests/generated/src/a_test.cpp", choice: ManagedConflictChoiceV16.KeepCurrent }] }, reviewId, currentDigest), true);
+  for (const key of ["scaffold:tests/generated/é_test.c", "scaffold:tests/generated/a%20b_test.c", "scaffold:tests/generated/../a_test.c", "scaffold:tests/generated/./a_test.c", "scaffold:tests/generated/" + "a".repeat(221) + "_test.c"]) {
+    assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [{ caseId: key, choice: ManagedConflictChoiceV16.KeepCurrent }] }, reviewId, currentDigest), false, key);
+  }
 });
 
 test("protocol 1.6 review pages reject an escaped-byte budget overrun", () => {

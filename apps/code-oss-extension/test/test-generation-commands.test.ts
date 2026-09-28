@@ -130,7 +130,7 @@ test("managed review displays case diff and records choices but never applies wi
   let state: any = { review: undefined, choices: {}, canApply: false, applying: false };
   const review: any = {
     getState: () => state, available: async () => true, list: async () => ({ items: [] }),
-    load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false }; return state; },
+    load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false, previewAvailable: true }; return state; },
     choose: (_id: string, choice: string) => { calls.push(choice); state = { ...state, canApply: true }; },
     markDisplayed: () => state,
     apply: async (digest: string) => { calls.push(["apply", digest]); return { state: "confirmed", result: { reviewId, reviewDigest: digest, applied: true } }; }, reject: () => { calls.push("reject"); }
@@ -213,9 +213,12 @@ test("command reports post-dispatch workspace invalidation as confirmed or recon
     const caseId = `utc_${"e".repeat(32)}`;
     const generation = "a".repeat(64);
     let release: (() => void) | undefined;
+    const diff = "+TEST(foo)\n";
+    const diffDigest = createHash("sha256").update(diff).digest("hex");
+    const previewArtifactDigest = createHash("sha256").update(`managed-review-preview-v1\n${reviewDigest}\nc:${caseId}:${diffDigest}\n`).digest("hex");
     const client: any = {
       getCapabilities: async () => ({ managedTests: true }),
-      getManagedReview: async () => ({ reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: "b".repeat(32), cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff: "+TEST(foo)\n" }] }),
+      getManagedReview: async () => ({ reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: "b".repeat(32), previewArtifactDigest, cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff }] }),
       listManagedTests: async () => ({ workspaceGeneration: generation, coverageReportId: "b".repeat(32), items: [] }),
       applyManagedReview: async () => { await new Promise<void>((resolve) => { release = resolve; }); if (response === "lost") throw new Error("connection lost"); return { reviewId, reviewDigest, applied: true }; }
     };

@@ -132,14 +132,19 @@ type ManagedRecordsRequestV16 struct {
 // limit, and reject pages exceeding the 512 KiB serialized payload budget; callers continue
 // with nextCursor rather than truncating cases.
 type ManagedReviewV16 struct {
-	Cases               []ManagedReviewCaseV16 `json:"cases"`
-	ConflictKeys        []string               `json:"conflictKeys,omitempty"`
-	CoverageReportID    string                 `json:"coverageReportId"`
-	NextCursor          *string                `json:"nextCursor,omitempty"`
-	ReviewDigest        string                 `json:"reviewDigest"`
-	ReviewID            string                 `json:"reviewId"`
-	ScaffoldPreviews    []ScaffoldPreview      `json:"scaffoldPreviews,omitempty"`
-	WorkspaceGeneration string                 `json:"workspaceGeneration"`
+	Cases            []ManagedReviewCaseV16 `json:"cases"`
+	ConflictKeys     []string               `json:"conflictKeys,omitempty"`
+	CoverageReportID string                 `json:"coverageReportId"`
+	NextCursor       *string                `json:"nextCursor,omitempty"`
+	// Optional SHA-256 of the exact page preview manifest: UTF-8 managed-review-preview-v1
+	// newline, reviewDigest newline, sorted c:caseId:SHA256(diff) newline entries, then sorted
+	// s:scaffoldKey:diffDigest newline entries. Without this verified field, diff text is
+	// display-unavailable and cannot authorize Apply.
+	PreviewArtifactDigest *string           `json:"previewArtifactDigest,omitempty"`
+	ReviewDigest          string            `json:"reviewDigest"`
+	ReviewID              string            `json:"reviewId"`
+	ScaffoldPreviews      []ScaffoldPreview `json:"scaffoldPreviews,omitempty"`
+	WorkspaceGeneration   string            `json:"workspaceGeneration"`
 }
 
 type ManagedReviewCaseV16 struct {

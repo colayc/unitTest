@@ -103,6 +103,16 @@ test("protocol 1.6 closes detail status, reasons, managed states, and digest-bou
   assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ ...apply.payload.resolutions[0], extra: true }] } }), false);
 });
 
+test("protocol 1.6 scaffold resolution keys use only closed canonical ASCII paths", async () => {
+  const { message } = await compileV16();
+  const apply = (await load("../fixtures/v1.6/methods.valid.json"))[6];
+  const withKey = (caseId) => ({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId, choice: "keep-current" }] } });
+  assert.equal(message(withKey("scaffold:tests/generated/src/a_test.cpp")), true);
+  for (const key of ["scaffold:tests/generated/é_test.c", "scaffold:tests/generated/a%20b_test.c", "scaffold:tests/generated/../a_test.c", "scaffold:tests/generated/./a_test.c", "scaffold:tests/generated/" + "a".repeat(221) + "_test.c"]) {
+    assert.equal(message(withKey(key)), false, key);
+  }
+});
+
 test("protocol 1.6 validates paginated detail and managed-review responses", async () => {
   const { message } = await compileV16();
   const id = "a".repeat(32);

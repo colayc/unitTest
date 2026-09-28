@@ -592,7 +592,7 @@ export function registerManagedTestCommands(
       if (!reviewId || !ID32.test(reviewId)) throw new Error("Select an authoritative managed review ID.");
       const loaded = await review.load(reviewId);
       for (const item of loaded.review?.cases ?? []) {
-        const display = createManagedCaseReview(item);
+        const display = createManagedCaseReview(item, loaded.previewAvailable);
         output.appendLine(`${display.title} [${item.status}] accepted=${display.panes.accepted} current=${display.panes.current} generated=${display.panes.generated}`);
         if (display.previewAvailable) {
           if (host.openManagedCaseDiff) await host.openManagedCaseDiff(display.title, redactGenerationDiffPaths(display.content));
@@ -606,7 +606,7 @@ export function registerManagedTestCommands(
         const choice = await host.pickManagedConflictChoice?.(item.caseId, MANAGED_CHOICES);
         if (choice !== undefined) review.choose(item.caseId, choice);
       }
-      for (const preview of loaded.review?.scaffoldPreviews ?? []) {
+      for (const preview of loaded.previewAvailable ? loaded.review?.scaffoldPreviews ?? [] : []) {
         const title = `Managed scaffold ${preview.key}`;
         if (host.openManagedCaseDiff) await host.openManagedCaseDiff(title, redactGenerationDiffPaths(preview.diff));
         else if (host.openGenerationDiff) await host.openGenerationDiff(title, redactGenerationDiffPaths(preview.diff));
