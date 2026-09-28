@@ -31,6 +31,23 @@ func TestNormalizeLLVMFiltersSourcesAndBuildsCanonicalMetrics(t *testing.T) {
 	}
 }
 
+func TestNormalizeLLVMWithDetailBindsOnlyVerifiedSnapshots(t *testing.T) {
+	input := llvmNormalizationFixture(t)
+	file := &input.Export.Files[len(input.Export.Files)-1]
+	file.Observations = []coveragedomain.FunctionObservation{{LinkageName: "_Z3foov", File: file.NativePath, ExecutionCount: 1}}
+	_, bindings, observations, err := NormalizeLLVMWithDetail(input)
+	if err != nil || len(observations) != 1 || len(bindings) != 2 || observations[0].File != "src/a.cpp" {
+		t.Fatalf("detail = %#v / %#v / %v", bindings, observations, err)
+	}
+	input.Export.Files[len(input.Export.Files)-1].Observations[0].File = filepath.Join(t.TempDir(), "private.cpp")
+	if _, _, _, err := NormalizeLLVMWithDetail(input); err == nil {
+		t.Fatal("accepted unbound native observation path")
+	}
+	if _, _, err := NormalizeLLVM(input); err != nil {
+		t.Fatalf("legacy aggregate changed: %v", err)
+	}
+}
+
 func TestNormalizeLLVMPartialIncludesOnlyPresentEvidence(t *testing.T) {
 	input := llvmNormalizationFixture(t)
 	input.Export.Files = input.Export.Files[len(input.Export.Files)-1:]
