@@ -91,6 +91,33 @@ type BuildInput struct {
 	Sources             []coveragedomain.SourceSnapshot
 }
 
+// Detail queries are internal store contracts. HTTP representations are kept
+// separate so existing v1 coverage artifacts remain unchanged.
+type FileQuery struct {
+	ReportID, WorkspaceGeneration, Filter, Sort, Cursor string
+	Limit                                               int
+}
+type FunctionQuery struct {
+	ReportID, WorkspaceGeneration, FileID, Filter, Sort, Cursor string
+	Limit                                                       int
+}
+type LineQuery struct {
+	ReportID, WorkspaceGeneration, FileID, FunctionID, Filter, Sort, Cursor string
+	Limit                                                                   int
+}
+type FilePage struct {
+	Items      []File
+	NextCursor string
+}
+type FunctionPage struct {
+	Items      []Function
+	NextCursor string
+}
+type LinePage struct {
+	Items      []Line
+	NextCursor string
+}
+
 func metricPercent(summary coveragedomain.Summary, status Status, kind string) (float64, bool) {
 	if status != StatusCurrent {
 		return 0, false

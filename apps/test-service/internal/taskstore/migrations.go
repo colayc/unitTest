@@ -48,10 +48,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	for _, current := range migrations {
 		if applied[current.version] {
+			if current.version == 16 && !s.detailInvalid {
+				s.detailAvailable = true
+			}
 			continue
 		}
 		if err := s.applyMigration(ctx, current); err != nil {
+			if current.version == 16 {
+				// Detailed coverage is an optional extension. Its failed migration
+				// rolls back independently; all durable v1 reports remain readable.
+				s.detailAvailable = false
+				break
+			}
 			return err
+		}
+		if current.version == 16 {
+			s.detailAvailable = true
 		}
 	}
 	return s.reconcileGenerationRecords(ctx)
@@ -209,6 +221,12 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 			return nil, fmt.Errorf("%w: unknown migration version %d", task.ErrStorageUnavailable, version)
 		}
 		if !expectedMigration.acceptsChecksum(checksum) {
+			if version == 16 {
+				// A compromised optional detail schema must not hide legacy reports.
+				s.detailInvalid = true
+				applied[version] = true
+				continue
+			}
 			return nil, fmt.Errorf("%w: migration %d checksum mismatch", task.ErrStorageUnavailable, version)
 		}
 		applied[version] = true

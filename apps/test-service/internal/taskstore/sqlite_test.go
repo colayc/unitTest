@@ -1140,6 +1140,90 @@ func TestMigration009FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 	}
 }
 
+func TestMigration016UpgradeAndOptionalFailurePreserveV1(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != 16 || migrations[15].version != 16 {
+		t.Fatalf("migration list ends at %#v", migrations[len(migrations)-1])
+	}
+	for _, broken := range []bool{false, true} {
+		name := "upgrade"
+		if broken {
+			name = "failed detail migration"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "upgrade.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:15])
+			if broken {
+				if _, err := db.Exec(`CREATE TABLE coverage_detail_reports (unexpected INTEGER)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			opened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1 store unavailable after detail migration: %v", err)
+			}
+			defer opened.Close()
+			var count int
+			if err := opened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=16`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if broken && count != 0 || !broken && count != 1 {
+				t.Fatalf("v16 migration count = %d, broken=%v", count, broken)
+			}
+			if _, err := opened.Get(ctx, id(1)); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("v1 Get after upgrade = %v", err)
+			}
+			if broken {
+				if _, err := opened.GetCoverageProject(ctx, id(1)); !errors.Is(err, task.ErrStorageUnavailable) {
+					t.Fatalf("detail capability after migration failure = %v", err)
+				}
+			} else {
+				if _, err := opened.GetCoverageProject(ctx, id(1)); !errors.Is(err, task.ErrNotFound) {
+					t.Fatalf("detail missing report = %v", err)
+				}
+			}
+			var foreignKeys int
+			if err := opened.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+				t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
+			}
+		})
+	}
+}
+
+func TestMigration016ChecksumMismatchDisablesOnlyDetails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checksum.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=16`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("v1 store after optional checksum mismatch = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Get(context.Background(), id(1)); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("v1 Get = %v", err)
+	}
+	if _, err := store.GetCoverageProject(context.Background(), id(1)); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("detail getter = %v", err)
+	}
+}
+
 func TestMigrationCancellationRestoresForeignKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	createMigration001Database(t, path)

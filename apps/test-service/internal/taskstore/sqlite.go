@@ -13,8 +13,10 @@ import (
 )
 
 type Store struct {
-	db    *sql.DB
-	newID func() string
+	db              *sql.DB
+	newID           func() string
+	detailAvailable bool
+	detailInvalid   bool
 }
 
 func Open(path string) (*Store, error) {
