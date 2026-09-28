@@ -154,6 +154,10 @@ func TestRuntimeCurrentCoverageTargetAttestsEverySourceAndExactGap(t *testing.T)
 	index := coveragedetail.Index{ProjectID: projectID, ReportID: reportID, RunID: strings.Repeat("c", 32), WorkspaceGeneration: generation, Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent}, Files: files, Gaps: []coveragedetail.Gap{{ID: gapID, FileID: files[0].ID, FunctionID: functionID, Kind: "line", Location: coveragedomain.SourceLocation{Line: 2}}}}
 	store := &sourceBoundDetailStore{report: coveragedomain.Report{ID: reportID, RunID: strings.Repeat("c", 32)}, run: coveragedomain.Run{Request: coveragedomain.Request{WorkspaceGeneration: generation, ProjectID: projectID}}, index: index}
 	r := &Runtime{store: store, coordinator: sourceBoundCoordinator{generation: generation}, workspaceRoot: root, trustedWorkspace: true}
+	attested, err := r.ReadCurrentCoverageIndex(context.Background(), coveragedetail.CurrentIndexQuery{ProjectID: projectID, ReportID: reportID, WorkspaceGeneration: generation})
+	if err != nil || len(attested.Files) != 2 {
+		t.Fatalf("current index = %#v, %v", attested, err)
+	}
 	q := coveragedetail.CurrentTargetQuery{CurrentIndexQuery: coveragedetail.CurrentIndexQuery{ProjectID: projectID, ReportID: reportID, WorkspaceGeneration: generation}, FileID: files[0].ID, FunctionID: functionID, GapID: gapID}
 	target, err := r.ResolveCurrentCoverageTarget(context.Background(), q)
 	if err != nil || target.File.RelativePath != "a.c" || target.Function == nil || target.Function.ID != functionID || target.Gap == nil || target.Gap.Location.Line != 2 {
@@ -169,5 +173,8 @@ func TestRuntimeCurrentCoverageTargetAttestsEverySourceAndExactGap(t *testing.T)
 	}
 	if _, err := r.ResolveCurrentCoverageTarget(context.Background(), q); err != coveragedetail.ErrStale {
 		t.Fatalf("other indexed source drift = %v", err)
+	}
+	if _, err := r.ReadCurrentCoverageIndex(context.Background(), q.CurrentIndexQuery); err != coveragedetail.ErrStale {
+		t.Fatalf("current index retained after source drift = %v", err)
 	}
 }

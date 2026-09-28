@@ -21,6 +21,16 @@ type ManagedGenerationBackend interface {
 	ApplyManagedReview(context.Context, managedtest.ApplyRequest) (testgendomain.Run, error)
 }
 
+// ManagedReviewPageBackend is read-only. It does not authorize review apply or
+// affect protocol negotiation on its own.
+type ManagedReviewPageBackend interface {
+	GetManagedReviewPage(context.Context, string, string, string, int) (generationv16.ManagedReviewV16, error)
+}
+
+type ManagedStartResolverBackend interface {
+	ResolveManagedStart(context.Context, string, generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error)
+}
+
 func validManagedStart(input generationv16.TestGenerationStartRequestV16) bool {
 	if !validID(input.IdempotencyKey) || !validHash(input.WorkspaceGeneration) || !validProjectID(input.ProjectID) ||
 		input.Budgets.WallTimeMS < 1 || input.Budgets.WallTimeMS > 86400000 ||
@@ -63,9 +73,11 @@ func validManagedStart(input generationv16.TestGenerationStartRequestV16) bool {
 }
 
 func (s *Session) handleManagedGeneration(ctx context.Context, version string, request protocol.Request) HandleResult {
+	var start generationv16.TestGenerationStartRequestV16
 	if request.Method == "testGeneration/start" {
-		input, err := decodeStrict[generationv16.TestGenerationStartRequestV16](request.Payload)
-		if err != nil || !validManagedStart(input) {
+		var err error
+		start, err = decodeStrict[generationv16.TestGenerationStartRequestV16](request.Payload)
+		if err != nil || !validManagedStart(start) {
 			return invalidPayload(version, request)
 		}
 	}
@@ -73,17 +85,51 @@ func (s *Session) handleManagedGeneration(ctx context.Context, version string, r
 	if !ok || !provider.ManagedTestsReady() || s.managedTests == nil || !s.managedTests.ManagedTestsReady() {
 		return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed generation is not available", false))
 	}
-	// A ready provider still needs a trusted, current index resolver for
-	// function/file/gap IDs. Until that contract is present, reject the call.
-	_ = ctx
+	if request.Method == "testGeneration/start" {
+		resolver, ok := s.generationBackend.(ManagedStartResolverBackend)
+		if !ok {
+			return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed generation ID resolution is not available", false))
+		}
+		if _, err := resolver.ResolveManagedStart(ctx, s.generationOwner(), start); err != nil {
+			return generationFailure(version, request, err)
+		}
+	}
+	// Candidate generation is deliberately not wired to this read-only route.
 	return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed generation ID resolution is not available", false))
 }
 
 func (s *Session) handleManagedTests(ctx context.Context, version string, request protocol.Request) HandleResult {
+	if request.Method == "managedTests/reviews/apply" {
+		return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review apply is not available", false))
+	}
 	provider, ok := s.generationBackend.(ManagedGenerationBackend)
 	if !ok || !provider.ManagedTestsReady() || s.managedTests == nil || !s.managedTests.ManagedTestsReady() {
 		return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed test service is not available", false))
 	}
-	_ = ctx
+	if request.Method == "managedTests/reviews/get" {
+		reader, ok := s.generationBackend.(ManagedReviewPageBackend)
+		if !ok {
+			return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review read is not available", false))
+		}
+		input, err := decodeStrict[generationv16.ManagedReviewIDRequestV16](request.Payload)
+		if err != nil || !validID(input.ReviewID) || !validGenerationPage(input.Cursor, input.Limit) || input.Limit != nil && *input.Limit > protocol.MaxManagedReviewPageItemsV16 {
+			return invalidPayload(version, request)
+		}
+		cursor, limit := "", protocol.MaxManagedReviewPageItemsV16
+		if input.Cursor != nil {
+			cursor = *input.Cursor
+		}
+		if input.Limit != nil {
+			limit = int(*input.Limit)
+		}
+		page, err := reader.GetManagedReviewPage(ctx, s.generationOwner(), input.ReviewID, cursor, limit)
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		if page.ReviewID != input.ReviewID || len(page.Cases) > limit || !protocol.ValidManagedReviewPageV16(page) {
+			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "managed review page is invalid", true))
+		}
+		return handled(protocol.Success(version, request, page))
+	}
 	return handled(protocol.Failure(version, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed review lifecycle is not available", false))
 }

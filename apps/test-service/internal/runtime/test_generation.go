@@ -10,8 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/managedtest"
+	"unit-test-ide.local/test-service/internal/protocol"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
+	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -43,6 +46,22 @@ type ManagedValidationDriver interface {
 	ValidateManagedSelection(context.Context, testgenpublish.ManagedSelection) ([]byte, error)
 }
 
+type managedValidationProvider interface {
+	ManagedValidationDriver
+	ManagedValidationReady() bool
+}
+
+type managedCurrentIndexReader interface {
+	CurrentCoverageReady() bool
+	ReadCurrentCoverageIndex(context.Context, coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error)
+}
+
+type managedReviewReader interface {
+	ManagedReviewsReady() bool
+	LookupManagedReviewBinding(context.Context, string, string) (managedtest.ReviewBinding, error)
+	GetManagedReview(context.Context, managedtest.ReviewGetQuery) (managedtest.ReviewPage, error)
+}
+
 type GenerationStageResult struct {
 	Next             testgendomain.State
 	Candidates       []testgendomain.Candidate
@@ -59,29 +78,35 @@ type generationPublisher interface {
 }
 
 type GenerationServiceConfig struct {
-	Store          *taskstore.Store
-	Driver         GenerationDriver
-	Publisher      generationPublisher
-	Trusted        bool
-	CoverageReady  bool
-	VerifySnapshot testgencoord.SnapshotVerifier
-	VerifyArtifact testgencoord.ArtifactVerifier
-	VerifyProcess  testgencoord.ProcessOwnerVerifier
-	PublishEvent   func(task.Event)
+	Store            *taskstore.Store
+	Driver           GenerationDriver
+	Publisher        generationPublisher
+	Trusted          bool
+	CoverageReady    bool
+	VerifySnapshot   testgencoord.SnapshotVerifier
+	VerifyArtifact   testgencoord.ArtifactVerifier
+	VerifyProcess    testgencoord.ProcessOwnerVerifier
+	PublishEvent     func(task.Event)
+	CurrentIndex     managedCurrentIndexReader
+	ManagedReviews   managedReviewReader
+	ManagedValidator managedValidationProvider
 }
 
 type generationService struct {
-	store         *taskstore.Store
-	coord         *testgencoord.Coordinator
-	driver        GenerationDriver
-	publisher     generationPublisher
-	verifyProcess testgencoord.ProcessOwnerVerifier
-	publishEvent  func(task.Event)
-	mu            sync.Mutex
-	acceptMu      sync.Mutex
-	running       map[string]*generationExecution
-	cancelPending map[string]bool
-	wg            sync.WaitGroup
+	store            *taskstore.Store
+	coord            *testgencoord.Coordinator
+	driver           GenerationDriver
+	publisher        generationPublisher
+	verifyProcess    testgencoord.ProcessOwnerVerifier
+	publishEvent     func(task.Event)
+	currentIndex     managedCurrentIndexReader
+	managedReviews   managedReviewReader
+	managedValidator managedValidationProvider
+	mu               sync.Mutex
+	acceptMu         sync.Mutex
+	running          map[string]*generationExecution
+	cancelPending    map[string]bool
+	wg               sync.WaitGroup
 }
 
 type generationExecution struct {
@@ -99,6 +124,7 @@ func newGenerationService(config GenerationServiceConfig) (*generationService, e
 	return &generationService{
 		store: config.Store, coord: testgencoord.NewWithProcessVerifier(config.Store, config.VerifySnapshot, config.VerifyArtifact, config.VerifyProcess),
 		driver: config.Driver, publisher: config.Publisher, publishEvent: config.PublishEvent, verifyProcess: config.VerifyProcess,
+		currentIndex: config.CurrentIndex, managedReviews: config.ManagedReviews, managedValidator: config.ManagedValidator,
 		running: make(map[string]*generationExecution), cancelPending: make(map[string]bool),
 	}, nil
 }
@@ -109,6 +135,94 @@ func (s *generationService) TestGenerationReady() bool { return s != nil }
 // resolver and durable review lookup in addition to selected-output
 // validation. Until all three are wired, v1.6 managed methods stay closed.
 func (s *generationService) ManagedTestsReady() bool { return false }
+
+// ManagedReadsReady is deliberately not the v1.6 capability gate: publisher
+// preimage reread and apply validation are not yet wired as one operation.
+func (s *generationService) ManagedReadsReady() bool {
+	return s != nil && s.currentIndex != nil && s.currentIndex.CurrentCoverageReady() &&
+		s.managedReviews != nil && s.managedReviews.ManagedReviewsReady() &&
+		s.managedValidator != nil && s.managedValidator.ManagedValidationReady()
+}
+
+// ResolveManagedStart performs no generation work. Only a report-bound gap has
+// enough information in v1.6 to select one exact coverage snapshot; unbound
+// file/symbol/target/workspace requests remain unavailable.
+func (s *generationService) ResolveManagedStart(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error) {
+	if !s.ManagedReadsReady() {
+		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+	}
+	if ctx == nil || !validGenerationOwner(owner) {
+		return testgendomain.ManagedTarget{}, task.ErrInvalidArgument
+	}
+	if err := ctx.Err(); err != nil {
+		return testgendomain.ManagedTarget{}, err
+	}
+	if input.Scope != generationv16.TestGenerationScopeV16CoverageGap || input.CoverageReportID == nil || input.CoverageGapID == nil {
+		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+	}
+	index, err := s.currentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: input.ProjectID, ReportID: *input.CoverageReportID, WorkspaceGeneration: input.WorkspaceGeneration})
+	if err != nil {
+		return testgendomain.ManagedTarget{}, err
+	}
+	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: *input.CoverageGapID}, index)
+	if err != nil {
+		return testgendomain.ManagedTarget{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return testgendomain.ManagedTarget{}, err
+	}
+	return target, nil
+}
+
+func (s *generationService) GetManagedReviewPage(ctx context.Context, owner, reviewID, cursor string, limit int) (generationv16.ManagedReviewV16, error) {
+	if !s.ManagedReadsReady() {
+		return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+	}
+	if ctx == nil || !validGenerationOwner(owner) || !validGenerationRunID(reviewID) || limit < 1 || limit > protocol.MaxManagedReviewPageItemsV16 || len(cursor) > 4096 {
+		return generationv16.ManagedReviewV16{}, task.ErrInvalidArgument
+	}
+	if err := ctx.Err(); err != nil {
+		return generationv16.ManagedReviewV16{}, err
+	}
+	binding, err := s.managedReviews.LookupManagedReviewBinding(ctx, owner, reviewID)
+	if err != nil {
+		return generationv16.ManagedReviewV16{}, err
+	}
+	if binding.OwnerDigest != owner || !binding.Valid() {
+		return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+	}
+	index, err := s.currentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: binding.ProjectID, ReportID: binding.ReportID, WorkspaceGeneration: binding.WorkspaceGeneration})
+	if err != nil {
+		return generationv16.ManagedReviewV16{}, err
+	}
+	if index.ProjectID != binding.ProjectID || index.ReportID != binding.ReportID || index.WorkspaceGeneration != binding.WorkspaceGeneration || index.Project.Status != coveragedetail.StatusCurrent || len(index.Files) == 0 {
+		return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+	}
+	page, err := s.managedReviews.GetManagedReview(ctx, managedtest.ReviewGetQuery{Binding: binding, ReviewID: reviewID, Cursor: cursor, Limit: limit})
+	if err != nil {
+		return generationv16.ManagedReviewV16{}, err
+	}
+	if page.ReviewID != reviewID || !validGenerationDigest(page.ReviewDigest) || page.ReportID != binding.ReportID || page.WorkspaceGeneration != binding.WorkspaceGeneration || len(page.Cases) > limit {
+		return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+	}
+	result := generationv16.ManagedReviewV16{ReviewID: page.ReviewID, ReviewDigest: page.ReviewDigest, WorkspaceGeneration: page.WorkspaceGeneration, CoverageReportID: page.ReportID, Cases: make([]generationv16.ManagedReviewCaseV16, 0, len(page.Cases))}
+	for _, c := range page.Cases {
+		if len(c.CandidateID) != 36 || c.CandidateID[:4] != "utc_" || !validGenerationHex(c.CandidateID[4:]) || !validGenerationDigest(c.CurrentDigest) || !validGenerationDigest(c.GeneratedDigest) || c.AcceptedDigest != "" && !validGenerationDigest(c.AcceptedDigest) || !managedtest.ValidStatus(c.Status) {
+			return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+		}
+		result.Cases = append(result.Cases, generationv16.ManagedReviewCaseV16{CaseID: c.CandidateID, Status: generationv16.ManagedTestStatusV16(c.Status), AcceptedDigest: c.AcceptedDigest, CurrentDigest: c.CurrentDigest, GeneratedDigest: c.GeneratedDigest})
+	}
+	if page.NextCursor != "" {
+		result.NextCursor = &page.NextCursor
+	}
+	if !protocol.ValidManagedReviewPageV16(result) {
+		return generationv16.ManagedReviewV16{}, task.ErrStorageUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return generationv16.ManagedReviewV16{}, err
+	}
+	return result, nil
+}
 
 func (s *generationService) ListManagedTests(context.Context, managedtest.Query) (managedtest.Page, error) {
 	return managedtest.Page{}, task.ErrStorageUnavailable

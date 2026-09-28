@@ -123,6 +123,28 @@ func TestManagedReviewPersistsExactBytesAndIsOwnerBoundAfterRestart(t *testing.T
 	}
 }
 
+func TestManagedReviewBindingLookupRejectsOtherOwnerAndStaleReview(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	draft := reviewFixture(t, s)
+	if err := s.CommitManagedReview(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LookupManagedReviewBinding(ctx, draft.Manifest.OwnerDigest, draft.Manifest.ReviewID)
+	if err != nil || got != draft.Manifest.Binding() {
+		t.Fatalf("binding=%+v err=%v", got, err)
+	}
+	if _, err := s.LookupManagedReviewBinding(ctx, strings.Repeat("a", 64), draft.Manifest.ReviewID); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("cross-owner lookup=%v", err)
+	}
+	if err := s.MarkManagedReviewStale(ctx, draft.Manifest.OwnerDigest, draft.Manifest.ReviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupManagedReviewBinding(ctx, draft.Manifest.OwnerDigest, draft.Manifest.ReviewID); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("stale lookup=%v", err)
+	}
+}
+
 func TestManagedReviewRejectsDuplicateAndStaleBindings(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

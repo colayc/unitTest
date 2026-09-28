@@ -22,8 +22,47 @@ import (
 type ManagedReviewStore interface {
 	CommitManagedReview(context.Context, managedtest.ReviewDraft) error
 	ListManagedReviews(context.Context, string, managedtest.ReviewListQuery) (managedtest.ReviewListPage, error)
+	LookupManagedReviewBinding(context.Context, string, string) (managedtest.ReviewBinding, error)
 	GetManagedReview(context.Context, managedtest.ReviewGetQuery) (managedtest.ReviewPage, error)
 	LookupManagedReviewSelection(context.Context, managedtest.ReviewBinding, string, string, []string) ([]managedtest.ReviewCandidate, error)
+}
+
+// LookupManagedReviewBinding derives the complete binding from authenticated
+// durable state. The wire request deliberately supplies only a review ID.
+func (s *Store) LookupManagedReviewBinding(ctx context.Context, owner, reviewID string) (managedtest.ReviewBinding, error) {
+	if !s.ManagedReviewsReady() {
+		return managedtest.ReviewBinding{}, task.ErrStorageUnavailable
+	}
+	if ctx == nil || !lowerHex(owner, 64) || !lowerHex(reviewID, 32) {
+		return managedtest.ReviewBinding{}, task.ErrInvalidArgument
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return managedtest.ReviewBinding{}, storageError("begin managed review binding", err)
+	}
+	defer tx.Rollback()
+	key, err := reviewKey(ctx, tx)
+	if err != nil {
+		return managedtest.ReviewBinding{}, err
+	}
+	stored, err := loadReview(ctx, tx, key, reviewID)
+	if err != nil {
+		return managedtest.ReviewBinding{}, err
+	}
+	if stored.manifest.OwnerDigest != owner {
+		return managedtest.ReviewBinding{}, task.ErrNotFound
+	}
+	if stored.status != "current" {
+		return managedtest.ReviewBinding{}, task.ErrConflict
+	}
+	binding := stored.manifest.Binding()
+	if err := validateReviewRun(ctx, tx, binding, stored.manifest.SourceDigest); err != nil {
+		return managedtest.ReviewBinding{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return managedtest.ReviewBinding{}, storageError("commit managed review binding", err)
+	}
+	return binding, nil
 }
 
 var _ ManagedReviewStore = (*Store)(nil)
