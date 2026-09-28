@@ -15,7 +15,7 @@ import (
 
 func managedRequest(lang Language) ManagedRenderInput {
 	r := request(lang)
-	r.Target.TestPath = "tests/generated/src/choose_test." + string(lang)
+	r.Target.TestPath = "tests/generated/src/choose." + string(lang) + "_test." + string(lang)
 	return ManagedRenderInput{
 		Program: r.Program, ProjectID: "project", SourceRelativePath: "src/choose." + string(lang),
 		SourceFileID: strings.Repeat("d", 32), Framework: map[Language]string{LanguageC: "unity", LanguageCPP: "cpputest"}[lang],
@@ -47,7 +47,7 @@ func TestRenderManagedFileDeterministicAndParseable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if first.Path != "tests/generated/src/choose_test."+map[Language]string{LanguageC: "c", LanguageCPP: "cpp"}[lang] {
+		if first.Path != "tests/generated/src/choose."+string(lang)+"_test."+map[Language]string{LanguageC: "c", LanguageCPP: "cpp"}[lang] {
 			t.Fatalf("path: %s", first.Path)
 		}
 		doc, err := managedtest.ParseDocument(first.Content, int64(len(first.Content)), 10)
@@ -79,6 +79,63 @@ func TestRenderManagedFileRejectsAliasAndDuplicateIDs(t *testing.T) {
 	in.Functions = append(in.Functions, in.Functions[0])
 	if _, err := RenderManagedFile(in); err == nil {
 		t.Fatal("duplicate function accepted")
+	}
+}
+
+func TestManagedPathsDisambiguateSourceExtensionsAndCraftedStems(t *testing.T) {
+	paths := []string{"src/choose.cpp", "src/choose.cc", "src/choose.cxx", "src/choose.cpp_test.cpp"}
+	seen := map[string]bool{}
+	for _, source := range paths {
+		in := managedRequest(LanguageCPP)
+		in.SourceRelativePath = source
+		in.Target.TestPath = ""
+		file, err := RenderManagedFile(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[file.Path] {
+			t.Fatalf("different source paths collided at %q", file.Path)
+		}
+		seen[file.Path] = true
+		if file.Path != "tests/generated/"+source+"_test.cpp" {
+			t.Fatalf("non-injective mapping for %q: %q", source, file.Path)
+		}
+	}
+}
+
+func TestManagedCppCaseAdditionDoesNotChangeUnmanagedScaffold(t *testing.T) {
+	in := managedRequest(LanguageCPP)
+	first, err := RenderManagedFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	more := in.Functions[0].Cases[0]
+	more.Vector.ID = idA
+	more.Observation.CandidateID = idA
+	in.Functions[0].Cases = append(in.Functions[0].Cases, more)
+	proof := in.Program.Functions[0].OracleProofs[0]
+	proof.CandidateID = idA
+	in.Program.Functions[0].OracleProofs = append(in.Program.Functions[0].OracleProofs, proof)
+	second, err := RenderManagedFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := func(raw []byte) string {
+		doc, err := managedtest.ParseDocument(raw, int64(len(raw)), 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		cursor := 0
+		for _, block := range doc.Blocks {
+			b.Write(doc.Bytes[cursor:block.StartByte])
+			cursor = block.EndByte
+		}
+		b.Write(doc.Bytes[cursor:])
+		return b.String()
+	}
+	if outside(first.Content) != outside(second.Content) {
+		t.Fatalf("adding C++ case changed unmanaged bytes\nbefore:%q\nafter:%q", outside(first.Content), outside(second.Content))
 	}
 }
 

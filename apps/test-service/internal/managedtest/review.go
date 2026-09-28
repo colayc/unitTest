@@ -45,12 +45,23 @@ type ReviewPreview struct {
 	Unified string `json:"unified"`
 }
 
-type Review struct {
-	Path            string        `json:"path"`
-	PreimageDigest  string        `json:"preimageDigest"`
+// ScaffoldOperation covers bytes outside managed blocks and their placement
+// relative to blocks common to the current and generated documents.
+type ScaffoldOperation struct {
+	Kind            OperationKind `json:"kind"`
+	Conflict        bool          `json:"conflict"`
+	CurrentDigest   string        `json:"currentDigest"`
 	GeneratedDigest string        `json:"generatedDigest"`
-	Operations      []Operation   `json:"operations"`
-	Preview         ReviewPreview `json:"preview"`
+	Preview         CasePreview   `json:"preview"`
+}
+
+type Review struct {
+	Path            string             `json:"path"`
+	PreimageDigest  string             `json:"preimageDigest"`
+	GeneratedDigest string             `json:"generatedDigest"`
+	Operations      []Operation        `json:"operations"`
+	Scaffold        *ScaffoldOperation `json:"scaffold,omitempty"`
+	Preview         ReviewPreview      `json:"preview"`
 }
 
 // Digest binds the exact preimage, generated candidate, sorted operations and

@@ -70,6 +70,81 @@ func TestReconcileNewGeneratedBlockIsAddOnly(t *testing.T) {
 	}
 }
 
+func TestReconcileSurfacesUnmanagedIncludeChangeWithUnchangedBlock(t *testing.T) {
+	rec, old, _ := reviewFixture(t)
+	generated := ManagedFile{Path: rec.TestRelativePath, Content: append([]byte("#include \"new-header.h\"\n"), old...)}
+	r, err := Reconcile(ReconcileInput{Accepted: []Record{rec}, Current: document(t, old), Generated: generated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Operations) != 1 || r.Operations[0].Kind != OperationUnchanged || r.Scaffold == nil || !r.Scaffold.Conflict || r.Scaffold.GeneratedDigest == r.Scaffold.CurrentDigest || !strings.Contains(r.Preview.Unified, "new-header.h") {
+		t.Fatalf("unmanaged change hidden: %+v", r)
+	}
+}
+
+func TestReconcileTreatsHandwrittenBytesAsScaffoldConflict(t *testing.T) {
+	rec, old, next := reviewFixture(t)
+	current := append([]byte("// handwritten helper\n"), old...)
+	r, err := Reconcile(ReconcileInput{Accepted: []Record{rec}, Current: document(t, current), Generated: next})
+	if err != nil || r.Scaffold == nil || !r.Scaffold.Conflict || !strings.Contains(r.Scaffold.Preview.Current, "handwritten helper") {
+		t.Fatalf("handwritten scaffold was not preserved for review: %+v %v", r, err)
+	}
+}
+
+func TestReconcileRawBlockChangeCannotBeCalledUnchanged(t *testing.T) {
+	rec, old, _ := reviewFixture(t)
+	crlf := bytes.ReplaceAll(old, []byte("\n"), []byte("\r\n"))
+	r, err := Reconcile(ReconcileInput{Accepted: []Record{rec}, Current: document(t, crlf), Generated: ManagedFile{Path: rec.TestRelativePath, Content: old}})
+	if err != nil || len(r.Operations) != 1 || r.Operations[0].Kind == OperationUnchanged {
+		t.Fatalf("raw byte drift hidden: %+v %v", r, err)
+	}
+}
+
+func TestReconcileExistingFileCanAddOnlyManagedBlock(t *testing.T) {
+	rec, old, _ := reviewFixture(t)
+	other := rec
+	other.ScenarioID = "more"
+	var err error
+	other.CaseID, err = StableCaseID(other.ProjectID, other.SourceRelativePath, other.FunctionID, other.ScenarioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := RenderMarkers(other.CaseID, other.FunctionID, "choose", []byte("TEST(Group, More) {}\n"), "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := ManagedFile{Path: rec.TestRelativePath, Content: append(bytes.Clone(old), added...)}
+	r, err := Reconcile(ReconcileInput{Accepted: []Record{rec}, Current: document(t, old), Generated: generated})
+	if err != nil || r.Scaffold != nil || len(r.Operations) != 2 {
+		t.Fatalf("new block incorrectly changed scaffold: %+v %v", r, err)
+	}
+}
+
+func TestReconcileReorderedUnchangedBlocksRequiresLayoutReview(t *testing.T) {
+	rec, old, _ := reviewFixture(t)
+	other := rec
+	other.ScenarioID = "more"
+	var err error
+	other.CaseID, err = StableCaseID(other.ProjectID, other.SourceRelativePath, other.FunctionID, other.ScenarioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RenderMarkers(other.CaseID, other.FunctionID, "choose", []byte("TEST(Group, More) {}\n"), "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.AcceptedBlockDigest = document(t, second).Blocks[0].Digest
+	r, err := Reconcile(ReconcileInput{Accepted: []Record{rec, other}, Current: document(t, append(bytes.Clone(old), second...)), Generated: ManagedFile{Path: rec.TestRelativePath, Content: append(bytes.Clone(second), old...)}})
+	if err != nil || r.Scaffold == nil || !r.Scaffold.Conflict {
+		t.Fatalf("block reordering was hidden: %+v %v", r, err)
+	}
+	for _, op := range r.Operations {
+		if op.Kind != OperationUnchanged {
+			t.Fatalf("block content changed unexpectedly: %+v", op)
+		}
+	}
+}
+
 func TestReconcileEditedManagedBlockRequiresAuthenticatedAncestor(t *testing.T) {
 	rec, old, next := reviewFixture(t)
 	current := bytes.Replace(old, []byte("CHECK_TRUE(1)"), []byte("CHECK_TRUE(3)"), 1)

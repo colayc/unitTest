@@ -50,8 +50,9 @@ func RenderManagedFile(in ManagedRenderInput) (ManagedFile, error) {
 	if in.Language == LanguageC {
 		ext = ".c"
 	}
-	sourceExt := in.SourceRelativePath[strings.LastIndexByte(in.SourceRelativePath, '.'):]
-	path := "tests/generated/" + strings.TrimSuffix(in.SourceRelativePath, sourceExt) + "_test" + ext
+	// Retaining the complete source filename makes this mapping injective:
+	// foo.cpp, foo.cc and even foo.cpp_test.cpp cannot alias one target.
+	path := "tests/generated/" + in.SourceRelativePath + "_test" + ext
 	if !managedtest.ValidTestPath(path) || in.Target.TestPath != "" && in.Target.TestPath != path {
 		return ManagedFile{}, ErrInvalidRender
 	}
@@ -107,7 +108,7 @@ func RenderManagedFile(in ManagedRenderInput) (ManagedFile, error) {
 	} else {
 		fmt.Fprintf(&out, "#include \"unity.h\"\n#include \"%s\"\n#include <stdint.h>\n#include <stdbool.h>\n\nvoid setUp(void) {}\nvoid tearDown(void) {}\n", in.HeaderPath)
 	}
-	for _, c := range all {
+	for index, c := range all {
 		var body strings.Builder
 		name := managedName(c.function.Name, c.behavior, c.caseID)
 		if c.derived.kind == assert.KindCharacterization {
@@ -126,7 +127,9 @@ func RenderManagedFile(in ManagedRenderInput) (ManagedFile, error) {
 		if err != nil {
 			return ManagedFile{}, err
 		}
-		out.WriteByte('\n')
+		if index == 0 {
+			out.WriteByte('\n')
+		}
 		out.Write(block)
 	}
 	if in.Language == LanguageC {

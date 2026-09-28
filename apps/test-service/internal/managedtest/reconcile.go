@@ -1,7 +1,9 @@
 package managedtest
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -114,7 +116,7 @@ func Reconcile(in ReconcileInput) (Review, error) {
 			op.Preview.Accepted = string(ancestor)
 		case wasAccepted && !hasGenerated:
 			op.Kind, op.Conflict = OperationOrphan, true
-		case wasAccepted && old.Digest == next.Digest:
+		case wasAccepted && old.Digest == next.Digest && bytes.Equal(current.Bytes[old.StartByte:old.EndByte], generated.Bytes[next.StartByte:next.EndByte]):
 			op.Kind = OperationUnchanged
 		case wasAccepted:
 			op.Kind = OperationUpdate
@@ -157,8 +159,42 @@ func Reconcile(in ReconcileInput) (Review, error) {
 			review.Preview.Unified += fragment
 		}
 	}
-	if len(review.Operations) == 0 {
+	common := map[string]bool{}
+	for id := range cur {
+		_, exists := gen[id]
+		if exists {
+			common[id] = true
+		}
+	}
+	currentLayout, currentPreview := scaffoldFrame(current, common)
+	generatedLayout, generatedPreview := scaffoldFrame(generated, common)
+	if !bytes.Equal(currentLayout, generatedLayout) {
+		scaffold := &ScaffoldOperation{Kind: OperationConflict, Conflict: true, CurrentDigest: byteDigest(currentLayout), GeneratedDigest: byteDigest(generatedLayout), Preview: CasePreview{Current: currentPreview, Generated: generatedPreview}}
+		if len(current.Bytes) == 0 {
+			scaffold.Kind, scaffold.Conflict = OperationAdd, false
+		}
+		previewBytes += len(currentPreview) + len(generatedPreview)
+		fragment := fmt.Sprintf("--- current/%s (scaffold)\n+++ generated/%s (scaffold)\n@@ scaffold @@\n", review.Path, review.Path) + prefixedLines('-', currentPreview) + prefixedLines('+', generatedPreview)
+		if previewBytes+len(review.Preview.Unified)+len(fragment) > maxPreviewBytes {
+			return Review{}, ErrInvalidManagedTest
+		}
+		review.Scaffold = scaffold
+		review.Preview.Unified += fragment
+	}
+	if len(review.Operations) == 0 && review.Scaffold == nil {
 		return Review{}, ErrInvalidManagedTest
+	}
+	if review.Scaffold == nil && len(review.Operations) > 0 && bytes.Equal(current.Bytes, generated.Bytes) == false {
+		allUnchanged := true
+		for _, op := range review.Operations {
+			if op.Kind != OperationUnchanged {
+				allUnchanged = false
+				break
+			}
+		}
+		if allUnchanged {
+			return Review{}, ErrInvalidManagedTest
+		}
 	}
 	encoded, err := json.Marshal(review)
 	if err != nil || len(encoded) > maxReviewBytes {
@@ -185,4 +221,34 @@ func prefixedLines(prefix byte, raw string) string {
 		}
 	}
 	return out.String()
+}
+
+// scaffoldFrame removes non-common managed blocks, then length-prefixes each
+// unmanaged span and common case ID. This detects text moved across block
+// boundaries or reordered blocks without treating a new case as hand editing.
+func scaffoldFrame(doc Document, common map[string]bool) ([]byte, string) {
+	var frame bytes.Buffer
+	var preview strings.Builder
+	pending := make([]byte, 0)
+	cursor := 0
+	writeSpan := func(span []byte) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(span)))
+		frame.Write(length[:])
+		frame.Write(span)
+		preview.Write(span)
+	}
+	for _, block := range doc.Blocks {
+		pending = append(pending, doc.Bytes[cursor:block.StartByte]...)
+		if common[block.CaseID] {
+			writeSpan(pending)
+			pending = pending[:0]
+			frame.WriteString(block.CaseID)
+			fmt.Fprintf(&preview, "\n<managed-case:%s>\n", block.CaseID)
+		}
+		cursor = block.EndByte
+	}
+	pending = append(pending, doc.Bytes[cursor:]...)
+	writeSpan(pending)
+	return frame.Bytes(), preview.String()
 }
