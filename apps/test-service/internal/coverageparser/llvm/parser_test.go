@@ -98,6 +98,29 @@ func TestParseLLVMBoundsExpandedPerFunctionLineObservations(t *testing.T) {
 	}
 }
 
+func TestParseLLVMValidatesLaterRegionFileIDAfterDetailLimit(t *testing.T) {
+	simple := string(readFixture(t, "simple.json"))
+	start := strings.Index(simple, `{"name":"?simple@@YAHXZ"`)
+	end := strings.Index(simple[start:], `],"totals":`)
+	if start < 0 || end < 0 {
+		t.Fatal("function fixture boundary missing")
+	}
+	function := simple[start : start+end]
+	badFunction := strings.Replace(function,
+		`"regions":[[2,1,3,2,5,0,0,0]]`,
+		`"regions":[[2,1,3,2,5,0,0,0],[2,1,3,2,5,1,0,0]]`, 1)
+	if badFunction == function {
+		t.Fatal("region fixture boundary missing")
+	}
+	encoded := strings.Replace(simple, function+`],"totals":`, strings.Repeat(function+",", 5)+badFunction+`],"totals":`, 1)
+	limits := DefaultLimits()
+	limits.MaxLines = 11 // 4 segments + 7 regions; detail budget is reached in last function
+	got, err := Parse(strings.NewReader(encoded), limits)
+	if err == nil || !reflect.DeepEqual(got, Export{}) {
+		t.Fatalf("malformed later region passed after detail limit: %#v, %v", got, err)
+	}
+}
+
 func TestParseLLVMDuplicateNativePathsDoNotMultiplyFunctionObservations(t *testing.T) {
 	simple := string(readFixture(t, "simple.json"))
 	start := strings.Index(simple, `{"filename":`)

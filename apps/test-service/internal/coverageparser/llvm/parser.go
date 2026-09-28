@@ -747,14 +747,11 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 		// lines instead of expanding a potentially enormous source range.
 		lineCounts := make(map[int64]int64)
 		for _, candidate := range function.regions {
-			if detailLimited {
-				break
-			}
-			if candidate.kind != 0 {
-				continue
-			}
 			if candidate.fileID < 0 || candidate.fileID >= int64(len(function.filenames)) {
 				return Export{}, errors.New("function region file ID")
+			}
+			if candidate.kind != 0 || detailLimited {
+				continue
 			}
 			if function.filenames[candidate.fileID] != path {
 				continue
