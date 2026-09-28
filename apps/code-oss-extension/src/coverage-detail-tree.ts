@@ -131,9 +131,12 @@ export class CoverageDetailTree {
     if (!parent) return [this.#project];
     if (parent.kind === "load-more") {
       if (!parent.nextCursor) return [];
-      if (parent.id === this.#project.id) await this.#loadFiles(parent.nextCursor);
+      const project = this.#project;
+      const projectPage = parent.id === project.id;
+      if (projectPage) await this.#loadFiles(parent.nextCursor);
       else await this.#loadFunctions(parent.id, parent.nextCursor);
-      return this.children(parent.id === this.#project.id ? this.#project : this.#files.items.find((item) => item.id === parent.id));
+      if (!this.#binding || !this.#current(this.#version, binding) || this.#project !== project) return [];
+      return this.children(projectPage ? project : this.#files.items.find((item) => item.id === parent.id));
     }
     if (parent.kind === "project") {
       if (parent !== this.#project) return [];

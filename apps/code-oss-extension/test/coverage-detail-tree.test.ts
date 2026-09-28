@@ -101,3 +101,24 @@ test("concurrent expansion shares one bounded service page", async () => {
   assert.deepEqual(results.map((item) => item.status), ["fulfilled", "fulfilled"]);
   assert.equal(calls, 1);
 });
+
+test("load-more resolves empty after a report invalidates mid-page", async () => {
+  let resolvePage!: (value: { coverageReportId: string; workspaceGeneration: string; items: CoverageFileV16[] }) => void;
+  const client = {
+    getCapabilities: async () => ({ coverageDetails: true, maxCoverageDetailPageSize: 1, maxCoverageLinePageSize: 1 }),
+    getCoverageProject: async () => project,
+    listCoverageFiles: async ({ cursor }: { cursor?: string }) => cursor
+      ? new Promise<{ coverageReportId: string; workspaceGeneration: string; items: CoverageFileV16[] }>((resolve) => { resolvePage = resolve; })
+      : { coverageReportId: "report", workspaceGeneration: "workspace", items: [file], nextCursor: "more" },
+    listCoverageFunctions: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] }),
+    listCoverageLines: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] })
+  };
+  const tree = new CoverageDetailTree(() => ({ client: client as unknown as ExtensionProtocolClient, workspaceGeneration: "workspace", projectId: "project", reportId: "report" }));
+  await tree.refresh();
+  const root = (await tree.children())[0]!;
+  const more = (await tree.children(root))[1]!;
+  const pending = tree.children(more);
+  tree.invalidate();
+  resolvePage({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] });
+  assert.deepEqual(await pending, []);
+});
