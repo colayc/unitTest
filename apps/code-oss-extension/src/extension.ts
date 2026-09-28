@@ -567,7 +567,7 @@ class ExtensionController {
     await this.host.openCoverageLocation(verified.path, node.startLine ?? 1);
     this.#decorationPath = verified.path;
     const fileId = tree.fileIdFor(node);
-    if (fileId) await this.#decorations?.load(fileId, node.status);
+    if (fileId) await this.#decorations?.load(fileId, node.status, node.kind === "function" ? node.id : undefined);
   }
 
 }

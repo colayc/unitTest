@@ -44,7 +44,7 @@ function label(name: string, value: CoverageProjectV16["summary"], status: Cover
 
 function matches(node: CoverageTreeNode, filter: CoverageFilter): boolean {
   if (filter === "all" || node.kind === "load-more") return true;
-  if (filter === "incomplete") return node.status !== "current";
+  if (filter === "incomplete") return node.status === "incomplete";
   const items = Object.values(node.metrics);
   return filter === "uncovered" ? items.some((item) => item.covered < item.total) : items.some((item) => item.coveredDelta < 0);
 }
@@ -155,7 +155,14 @@ export class CoverageDetailTree {
   }
 
   #pageChildren(page: PageState, id: string, status: CoverageTreeNode["status"], values: CoverageTreeNode["metrics"]): CoverageTreeNode[] {
-    const filtered = page.items.filter((item) => matches(item, this.#filter));
+    const filtered = page.items.filter((item) => {
+      if (this.#filter !== "regressed" || item.kind !== "file") return matches(item, this.#filter);
+      if (matches(item, "regressed")) return true;
+      const functions = this.#functions.get(item.id);
+      // Until every function page has been visited, a flat file delta cannot
+      // prove that no child regressed. Keep the file navigable and load lazily.
+      return !functions || functions.nextCursor !== undefined || functions.items.some((child) => matches(child, "regressed"));
+    });
     return page.nextCursor ? [...filtered, { kind: "load-more", id, label: "Load more…", status, metrics: values, nextCursor: page.nextCursor }] : filtered;
   }
 

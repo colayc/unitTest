@@ -31,13 +31,14 @@ export class CoverageDecorations {
 
   clear(): void { this.#version++; this.apply([]); }
 
-  async load(fileId: string, status: "current" | "stale" | "incomplete"): Promise<void> {
+  async load(fileId: string, status: "current" | "stale" | "incomplete", functionId?: string): Promise<void> {
     const binding = this.readContext();
     if (!binding.client?.listCoverageLines || !binding.reportId || !binding.workspaceGeneration) { this.clear(); return; }
     const version = ++this.#version;
     try {
       const limit = Math.max(1, Math.min(PAGE_LIMIT, binding.limit ?? PAGE_LIMIT));
-      const result = await binding.client.listCoverageLines({ workspaceGeneration: binding.workspaceGeneration, coverageReportId: binding.reportId, fileId, limit });
+      const scope = functionId === undefined ? { fileId } : { functionId };
+      const result = await binding.client.listCoverageLines({ workspaceGeneration: binding.workspaceGeneration, coverageReportId: binding.reportId, ...scope, limit });
       const current = this.readContext();
       if (version !== this.#version || current.client !== binding.client || current.reportId !== binding.reportId || current.workspaceGeneration !== binding.workspaceGeneration) return;
       if (result.workspaceGeneration !== binding.workspaceGeneration || result.coverageReportId !== binding.reportId || result.items.length > limit) throw new Error("Coverage line page identity or limit changed.");

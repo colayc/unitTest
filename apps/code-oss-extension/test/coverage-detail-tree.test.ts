@@ -122,3 +122,41 @@ test("load-more resolves empty after a report invalidates mid-page", async () =>
   resolvePage({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] });
   assert.deepEqual(await pending, []);
 });
+
+test("regressed filter retains a file with a regressed child despite a flat aggregate delta", async () => {
+  const flat = { ...summary, functions: { covered: 1, total: 2, coveredDelta: 0 }, lines: { covered: 3, total: 4, coveredDelta: 0 } };
+  const regressedFile = { ...file, status: CoverageDetailStatusV16.Current, reasons: [], summary: flat };
+  const neutralFile = { ...regressedFile, fileId: "c".repeat(32), relativePath: "src/neutral.cpp" };
+  const client = {
+    getCapabilities: async () => ({ coverageDetails: true, maxCoverageDetailPageSize: 2, maxCoverageLinePageSize: 2 }),
+    getCoverageProject: async () => project,
+    listCoverageFiles: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [regressedFile, neutralFile] }),
+    listCoverageFunctions: async ({ fileId }: { fileId: string }) => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [{ ...fn, fileId, summary: fileId === regressedFile.fileId ? summary : flat }] }),
+    listCoverageLines: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] })
+  };
+  const tree = new CoverageDetailTree(() => ({ client: client as unknown as ExtensionProtocolClient, workspaceGeneration: "workspace", projectId: "project", reportId: "report" }));
+  await tree.refresh();
+  const root = (await tree.children())[0]!;
+  const files = await tree.children(root);
+  await tree.children(files[0]);
+  await tree.children(files[1]);
+  tree.setFilter("regressed");
+  assert.deepEqual((await tree.children(root)).map((node) => node.id), [regressedFile.fileId]);
+  assert.deepEqual((await tree.children(files[0])).map((node) => node.id), [fn.functionId]);
+});
+
+test("incomplete filter excludes stale files", async () => {
+  const stale = { ...file, fileId: "d".repeat(32), status: CoverageDetailStatusV16.Stale, reasons: [CoverageDetailReasonV16.SourceChanged] };
+  const client = {
+    getCapabilities: async () => ({ coverageDetails: true, maxCoverageDetailPageSize: 2, maxCoverageLinePageSize: 2 }),
+    getCoverageProject: async () => project,
+    listCoverageFiles: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [file, stale] }),
+    listCoverageFunctions: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] }),
+    listCoverageLines: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] })
+  };
+  const tree = new CoverageDetailTree(() => ({ client: client as unknown as ExtensionProtocolClient, workspaceGeneration: "workspace", projectId: "project", reportId: "report" }));
+  await tree.refresh();
+  const root = (await tree.children())[0]!;
+  tree.setFilter("incomplete");
+  assert.deepEqual((await tree.children(root)).map((node) => node.id), [file.fileId]);
+});

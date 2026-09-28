@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CoverageDecorations, lineDecorations } from "../src/coverage-decorations.js";
-import type { CoverageLinePageV16 } from "@unit-test-ide/test-client";
+import type { CoverageLineListInputV16, CoverageLinePageV16 } from "@unit-test-ide/test-client";
 
 test("line decorations show hits, branches, stale styling and a hard display bound", () => {
   const items = [
@@ -32,4 +32,19 @@ test("decorations clear on report change and never apply an obsolete page", asyn
   resolve({ coverageReportId: "r1", workspaceGeneration: "w", items: [{ line: 1, count: 1, baselineCount: 0, branchesCovered: 0, branchesTotal: 0, baselineBranchesCovered: 0, baselineBranchesTotal: 0 }] });
   await pending;
   assert.deepEqual(applied, [[]]);
+});
+
+test("function decorations request only that function's lines before styling them", async () => {
+  const requests: unknown[] = [];
+  const applied: unknown[][] = [];
+  const client = {
+    listCoverageLines: async (input: CoverageLineListInputV16): Promise<CoverageLinePageV16> => {
+      requests.push(input);
+      return { coverageReportId: "r1", workspaceGeneration: "w", items: [{ line: 7, count: 1, baselineCount: 0, branchesCovered: 0, branchesTotal: 0, baselineBranchesCovered: 0, baselineBranchesTotal: 0 }] };
+    }
+  };
+  const decorations = new CoverageDecorations(() => ({ reportId: "r1", workspaceGeneration: "w", client }), (items) => { applied.push([...items]); });
+  await decorations.load("f".repeat(32), "incomplete", "a".repeat(32));
+  assert.deepEqual(requests, [{ coverageReportId: "r1", workspaceGeneration: "w", functionId: "a".repeat(32), limit: 200 }]);
+  assert.deepEqual(applied.map((items) => items.map((item) => (item as { style: string }).style)), [["incomplete"]]);
 });
