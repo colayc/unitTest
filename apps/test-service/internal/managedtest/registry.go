@@ -50,6 +50,15 @@ type PendingAcceptance struct {
 	Phase      string
 }
 
+// LegacyRecoveryEvidence explicitly re-verifies an acceptance created before
+// canonical accepted payloads were persisted. The caller must supply exact
+// preimage/published document bytes, source bytes, and receipt bytes.
+type LegacyRecoveryEvidence struct {
+	AcceptanceID                        string
+	PreimageDocument, PublishedDocument []byte
+	SourceBytes, ValidationReceipt      []byte
+}
+
 type SourceSnapshot struct {
 	FileID, RelativePath, Digest string
 	FunctionIDs                  []string
@@ -81,6 +90,7 @@ type AcceptanceJournal interface {
 	MarkManagedFileWritten(context.Context, string, string) error
 	ListPendingManagedAcceptances(context.Context) ([]PendingAcceptance, error)
 	ResolvePendingManagedAcceptance(context.Context, string, string) error
+	AuthorizeLegacyManagedRecovery(context.Context, LegacyRecoveryEvidence) error
 }
 
 func ValidStatus(value Status) bool {

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,6 +293,106 @@ func (r *ManagedRegistry) ResolvePendingManagedAcceptance(ctx context.Context, a
 	return nil
 }
 
+// AuthorizeLegacyManagedRecovery verifies fresh publisher evidence before an
+// accepted 017 row (which lacks canonical acceptance bytes) can be replaced.
+// Authorization is pinned to the old revision and survives a process crash.
+func (r *ManagedRegistry) AuthorizeLegacyManagedRecovery(ctx context.Context, evidence managedtest.LegacyRecoveryEvidence) error {
+	if !r.usable() {
+		return task.ErrStorageUnavailable
+	}
+	if ctx == nil || !lowerHex(evidence.AcceptanceID, 32) || len(evidence.SourceBytes) > 32*1024*1024 || len(evidence.ValidationReceipt) > 1024*1024 {
+		return task.ErrInvalidArgument
+	}
+	tx, err := r.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError("begin legacy managed recovery", err)
+	}
+	defer tx.Rollback()
+	var encoded, phase string
+	err = tx.QueryRowContext(ctx, `SELECT record_json,phase FROM managed_test_pending_acceptances WHERE acceptance_id=?`, evidence.AcceptanceID).Scan(&encoded, &phase)
+	if isNoRows(err) {
+		return task.ErrNotFound
+	}
+	if err != nil {
+		return storageError("read legacy pending", err)
+	}
+	var a managedtest.Acceptance
+	if err := decodeStrictJSON([]byte(encoded), &a); err != nil || !managedtest.ValidAcceptance(a) || a.AcceptanceID != evidence.AcceptanceID || phase != "file_written" {
+		return task.ErrStorageUnavailable
+	}
+	old, revision, err := getManagedRecordTx(ctx, tx, a.Record.CaseID)
+	if err != nil {
+		return err
+	}
+	if old.ProjectID != a.Record.ProjectID || old.SourceFileID != a.Record.SourceFileID || old.FunctionID != a.Record.FunctionID || old.SourceRelativePath != a.Record.SourceRelativePath || old.ScenarioID != a.Record.ScenarioID || old.TestRelativePath != a.Record.TestRelativePath || !a.Record.LastVerifiedAt.After(old.LastVerifiedAt) {
+		return task.ErrConflict
+	}
+	var transitionDigest, transitionReceipt, commitDigest string
+	var legacyJSON, legacyMAC sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT t.record_digest,t.receipt_digest,c.acceptance_digest,c.acceptance_json,c.acceptance_mac FROM managed_test_transitions t JOIN managed_test_commits c ON c.acceptance_id=t.acceptance_id WHERE t.case_id=? AND t.to_status='current' ORDER BY t.revision DESC LIMIT 1`, old.CaseID).Scan(&transitionDigest, &transitionReceipt, &commitDigest, &legacyJSON, &legacyMAC)
+	if err != nil || legacyJSON.Valid || legacyMAC.Valid || transitionDigest != commitDigest || !managedtest.ValidDigest(commitDigest) || transitionReceipt != old.ValidationReceiptDigest {
+		return task.ErrStorageUnavailable
+	}
+	if legacyHashBytes(evidence.PreimageDocument) != a.PreimageDigest || legacyHashBytes(evidence.PublishedDocument) != a.PublishedFileDigest || legacyHashBytes(evidence.SourceBytes) != a.Record.SourceDigest || legacyHashBytes(evidence.ValidationReceipt) != a.Record.ValidationReceiptDigest {
+		return task.ErrConflict
+	}
+	preimage, err := managedtest.ParseDocument(evidence.PreimageDocument, 8*1024*1024, 4096)
+	if err != nil {
+		return task.ErrConflict
+	}
+	published, err := managedtest.ParseDocument(evidence.PublishedDocument, 8*1024*1024, 4096)
+	if err != nil || !matchingManagedBlock(preimage, old.CaseID, old.FunctionID, old.AcceptedBlockDigest) || !matchingManagedBlock(published, a.Record.CaseID, a.Record.FunctionID, a.Record.AcceptedBlockDigest) {
+		return task.ErrStorageUnavailable
+	}
+	key, err := managedRegistryKey(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE managed_test_pending_acceptances SET legacy_recovery_revision=?,legacy_recovery_mac=? WHERE acceptance_id=? AND phase='file_written'`, revision, legacyRecoveryMAC(key, encoded, old, revision), a.AcceptanceID); err != nil {
+		return storageError("authorize legacy managed recovery", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit legacy managed recovery", err)
+	}
+	return nil
+}
+
+func legacyHashBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
+
+func legacyRecoveryMAC(key []byte, encoded string, old managedtest.Record, revision int) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("managed-legacy-recovery-v1\x00"))
+	mac.Write([]byte(encoded))
+	oldJSON, _ := json.Marshal(old)
+	mac.Write(oldJSON)
+	mac.Write([]byte{0})
+	mac.Write([]byte(formatTime(old.LastVerifiedAt)))
+	mac.Write([]byte{0})
+	mac.Write([]byte(strconv.Itoa(revision)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func validLegacyRecoveryMAC(key []byte, encoded string, old managedtest.Record, revision int, value string) bool {
+	got, err := hex.DecodeString(value)
+	if err != nil || value != hex.EncodeToString(got) {
+		return false
+	}
+	want, _ := hex.DecodeString(legacyRecoveryMAC(key, encoded, old, revision))
+	return hmac.Equal(got, want)
+}
+
+func matchingManagedBlock(doc managedtest.Document, caseID, functionID, digest string) bool {
+	for _, block := range doc.Blocks {
+		if block.CaseID == caseID {
+			return block.FunctionID == functionID && block.Digest == digest
+		}
+	}
+	return false
+}
+
 func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acceptance) error {
 	if !r.usable() {
 		return task.ErrStorageUnavailable
@@ -326,7 +427,9 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 		return storageError("read managed commit", err)
 	}
 	var pending, phase string
-	err = tx.QueryRowContext(ctx, `SELECT record_json,phase FROM managed_test_pending_acceptances WHERE acceptance_id=?`, a.AcceptanceID).Scan(&pending, &phase)
+	var legacyRevision sql.NullInt64
+	var legacyMAC sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT record_json,phase,legacy_recovery_revision,legacy_recovery_mac FROM managed_test_pending_acceptances WHERE acceptance_id=?`, a.AcceptanceID).Scan(&pending, &phase, &legacyRevision, &legacyMAC)
 	if err != nil {
 		if isNoRows(err) {
 			return task.ErrConflict
@@ -352,7 +455,12 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 	from := "none"
 	if err == nil {
 		if err := validateManagedRecordBinding(ctx, tx, old); err != nil {
-			return err
+			key, keyErr := managedRegistryKey(ctx, tx)
+			if keyErr != nil || !legacyRevision.Valid || legacyRevision.Int64 != int64(revision) || !legacyMAC.Valid || !validLegacyRecoveryMAC(key, pending, old, revision, legacyMAC.String) || !isLegacyManagedCommit(ctx, tx, old) {
+				return err
+			}
+		} else if legacyRevision.Valid || legacyMAC.Valid {
+			return task.ErrStorageUnavailable
 		}
 		if old.ProjectID != a.Record.ProjectID || old.SourceFileID != a.Record.SourceFileID || old.FunctionID != a.Record.FunctionID ||
 			old.SourceRelativePath != a.Record.SourceRelativePath || old.ScenarioID != a.Record.ScenarioID || old.TestRelativePath != a.Record.TestRelativePath {
@@ -386,6 +494,13 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 		return storageError("commit managed acceptance", err)
 	}
 	return nil
+}
+
+func isLegacyManagedCommit(ctx context.Context, tx *sql.Tx, old managedtest.Record) bool {
+	var transitionDigest, receipt, commitDigest string
+	var encoded, mac sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT t.record_digest,t.receipt_digest,c.acceptance_digest,c.acceptance_json,c.acceptance_mac FROM managed_test_transitions t JOIN managed_test_commits c ON c.acceptance_id=t.acceptance_id WHERE t.case_id=? AND t.to_status='current' ORDER BY t.revision DESC LIMIT 1`, old.CaseID).Scan(&transitionDigest, &receipt, &commitDigest, &encoded, &mac)
+	return err == nil && !encoded.Valid && !mac.Valid && managedtest.ValidDigest(commitDigest) && transitionDigest == commitDigest && receipt == old.ValidationReceiptDigest
 }
 
 func conflictingManagedPaths(ctx context.Context, tx *sql.Tx, incoming managedtest.Record) (bool, error) {
