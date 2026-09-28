@@ -95,6 +95,34 @@ type BuildInput struct {
 	Sources             []coveragedomain.SourceSnapshot
 }
 
+// CurrentIndexQuery binds a validated detail read to one report and one
+// workspace snapshot. Live source attestation is performed by the runtime.
+type CurrentIndexQuery struct {
+	ProjectID, ReportID, WorkspaceGeneration string
+}
+
+// CurrentTargetQuery identifies only persisted IDs. Coordinates, symbols and
+// paths are supplied by the validated index, never by a generation request.
+type CurrentTargetQuery struct {
+	CurrentIndexQuery
+	FileID, FunctionID, GapID string
+}
+
+type CurrentTarget struct {
+	File     File
+	Function *Function
+	Gap      *Gap
+}
+
+func (value Index) GapByID(id string) (Gap, bool) {
+	for _, gap := range value.Gaps {
+		if gap.ID == id {
+			return gap, true
+		}
+	}
+	return Gap{}, false
+}
+
 // Detail queries are internal store contracts. HTTP representations are kept
 // separate so existing v1 coverage artifacts remain unchanged.
 type FileQuery struct {

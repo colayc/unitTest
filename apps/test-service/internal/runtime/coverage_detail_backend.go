@@ -20,6 +20,10 @@ type coverageDetailReader interface {
 	ListCoverageLines(context.Context, coveragedetail.LineQuery) (coveragedetail.LinePage, error)
 }
 
+type attestedDetailReader interface {
+	ReadValidatedCoverageIndex(context.Context, coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error)
+}
+
 func (r *Runtime) detailReader() (coverageDetailReader, error) {
 	if r == nil || !r.trustedWorkspace || r.store == nil || r.detailFailed.Load() {
 		return nil, task.ErrStorageUnavailable
@@ -178,4 +182,86 @@ func (r *Runtime) ListCoverageLines(ctx context.Context, q coveragedetail.LineQu
 		return coveragedetail.LinePage{}, coveragedetail.ErrStale
 	}
 	return reader.ListCoverageLines(ctx, q)
+}
+
+// ResolveCurrentCoverageTarget is the generation-facing ID lookup. The store
+// validates the complete persisted graph in one snapshot; the runtime then
+// binds every indexed source to current workspace bytes before exposing a
+// file, function or exact uncovered gap.
+func (r *Runtime) ResolveCurrentCoverageTarget(ctx context.Context, q coveragedetail.CurrentTargetQuery) (coveragedetail.CurrentTarget, error) {
+	reader, err := r.detailReader()
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	attested, ok := reader.(attestedDetailReader)
+	if !ok || r.workspaceRoot.NativePath == "" || q.FileID == "" || q.FunctionID == "" && q.GapID != "" {
+		return coveragedetail.CurrentTarget{}, task.ErrInvalidArgument
+	}
+	report, err := r.store.GetCoverageReport(ctx, q.ReportID)
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	run, err := r.store.GetCoverageRun(ctx, report.RunID)
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	if run.Request.ProjectID != q.ProjectID || run.Request.WorkspaceGeneration != q.WorkspaceGeneration {
+		return coveragedetail.CurrentTarget{}, task.ErrInvalidArgument
+	}
+	snapshot, err := r.InspectWorkspace(ctx)
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	if snapshot.Generation != q.WorkspaceGeneration {
+		return coveragedetail.CurrentTarget{}, coveragedetail.ErrStale
+	}
+	index, err := attested.ReadValidatedCoverageIndex(ctx, q.CurrentIndexQuery)
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	if index.ProjectID != q.ProjectID || index.ReportID != q.ReportID || index.WorkspaceGeneration != q.WorkspaceGeneration || index.RunID != report.RunID || index.Project.Status != coveragedetail.StatusCurrent || len(index.Files) == 0 {
+		return coveragedetail.CurrentTarget{}, task.ErrStorageUnavailable
+	}
+	if reason := detailSourceReason(r.workspaceRoot.NativePath, index.Files); reason != "" {
+		return coveragedetail.CurrentTarget{}, coveragedetail.ErrStale
+	}
+	snapshot, err = r.InspectWorkspace(ctx)
+	if err != nil {
+		return coveragedetail.CurrentTarget{}, err
+	}
+	if snapshot.Generation != q.WorkspaceGeneration {
+		return coveragedetail.CurrentTarget{}, coveragedetail.ErrStale
+	}
+	for _, file := range index.Files {
+		if file.ID != q.FileID {
+			continue
+		}
+		if file.Status != coveragedetail.StatusCurrent {
+			return coveragedetail.CurrentTarget{}, coveragedetail.ErrStale
+		}
+		target := coveragedetail.CurrentTarget{File: file}
+		if q.FunctionID == "" {
+			return target, nil
+		}
+		for _, fn := range file.Functions {
+			if fn.ID != q.FunctionID {
+				continue
+			}
+			if fn.Status != coveragedetail.StatusCurrent {
+				return coveragedetail.CurrentTarget{}, coveragedetail.ErrStale
+			}
+			target.Function = &fn
+			if q.GapID == "" {
+				return target, nil
+			}
+			gap, ok := index.GapByID(q.GapID)
+			if !ok || gap.FileID != file.ID || gap.FunctionID != fn.ID {
+				return coveragedetail.CurrentTarget{}, task.ErrNotFound
+			}
+			target.Gap = &gap
+			return target, nil
+		}
+		return coveragedetail.CurrentTarget{}, task.ErrNotFound
+	}
+	return coveragedetail.CurrentTarget{}, task.ErrNotFound
 }

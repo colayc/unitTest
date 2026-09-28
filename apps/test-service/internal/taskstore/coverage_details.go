@@ -501,7 +501,7 @@ func decodeDetailCanonical(raw []byte, v any) error {
 	return nil
 }
 func readDetailReasons(ctx context.Context, tx *sql.Tx, reportID, kind, id string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT reason FROM coverage_detail_reasons WHERE report_id=? AND owner_kind=? AND owner_id=? ORDER BY reason`, reportID, kind, id)
+	rows, err := tx.QueryContext(ctx, `SELECT reason FROM coverage_detail_reasons WHERE report_id=? AND owner_kind=? AND owner_id=? ORDER BY reason LIMIT 129`, reportID, kind, id)
 	if err != nil {
 		return nil, storageError("read CoverageDetail reasons", err)
 	}
@@ -513,6 +513,9 @@ func readDetailReasons(ctx context.Context, tx *sql.Tx, reportID, kind, id strin
 			return nil, storageError("scan CoverageDetail reason", err)
 		}
 		result = append(result, reason)
+		if len(result) > 128 {
+			return nil, storageError("CoverageDetail reason bound", nil)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, storageError("read CoverageDetail reasons", err)

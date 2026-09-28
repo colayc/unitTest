@@ -19,6 +19,7 @@ type sourceBoundDetailStore struct {
 	report coveragedomain.Report
 	run    coveragedomain.Run
 	file   coveragedetail.File
+	index  coveragedetail.Index
 }
 
 func (s *sourceBoundDetailStore) CoverageDetailReady() bool { return true }
@@ -39,6 +40,9 @@ func (s *sourceBoundDetailStore) ListCoverageFunctions(context.Context, coverage
 }
 func (s *sourceBoundDetailStore) ListCoverageLines(context.Context, coveragedetail.LineQuery) (coveragedetail.LinePage, error) {
 	return coveragedetail.LinePage{}, nil
+}
+func (s *sourceBoundDetailStore) ReadValidatedCoverageIndex(context.Context, coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
+	return s.index, nil
 }
 
 type sourceBoundCoordinator struct {
@@ -117,5 +121,53 @@ func TestDetailSourceBindingRejectsChangedMissingAndEscapingFiles(t *testing.T) 
 	files[0].RelativePath = strings.Repeat("a", 8193)
 	if reason := detailSourceReason(root, files); reason != "source_missing" {
 		t.Fatalf("oversized source reason=%q", reason)
+	}
+}
+
+func TestRuntimeCurrentCoverageTargetAttestsEverySourceAndExactGap(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.c", "b.c"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("int f() { return 1; }\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := workspace.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, reportID, generation := "core", strings.Repeat("a", 32), strings.Repeat("b", 64)
+	files := make([]coveragedetail.File, 0, 2)
+	for _, name := range []string{"a.c", "b.c"} {
+		binding, err := coveragenormalize.DigestSource(dir, filepath.Join(dir, name), coveragenormalize.DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := coveragedetail.StableFileID(projectID, binding.URI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, coveragedetail.File{ID: id, RelativePath: binding.URI, SourceSHA256: binding.SHA256, Status: coveragedetail.StatusCurrent})
+	}
+	functionID, _ := coveragedetail.StableFunctionID(files[0].ID, "qualified:1:f:signature:")
+	files[0].Functions = []coveragedetail.Function{{ID: functionID, Name: "f", Status: coveragedetail.StatusCurrent}}
+	gapID, _ := coveragedetail.StableGapID(reportID, functionID, "line", coveragedomain.SourceLocation{Line: 2}, 0)
+	index := coveragedetail.Index{ProjectID: projectID, ReportID: reportID, RunID: strings.Repeat("c", 32), WorkspaceGeneration: generation, Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent}, Files: files, Gaps: []coveragedetail.Gap{{ID: gapID, FileID: files[0].ID, FunctionID: functionID, Kind: "line", Location: coveragedomain.SourceLocation{Line: 2}}}}
+	store := &sourceBoundDetailStore{report: coveragedomain.Report{ID: reportID, RunID: strings.Repeat("c", 32)}, run: coveragedomain.Run{Request: coveragedomain.Request{WorkspaceGeneration: generation, ProjectID: projectID}}, index: index}
+	r := &Runtime{store: store, coordinator: sourceBoundCoordinator{generation: generation}, workspaceRoot: root, trustedWorkspace: true}
+	q := coveragedetail.CurrentTargetQuery{CurrentIndexQuery: coveragedetail.CurrentIndexQuery{ProjectID: projectID, ReportID: reportID, WorkspaceGeneration: generation}, FileID: files[0].ID, FunctionID: functionID, GapID: gapID}
+	target, err := r.ResolveCurrentCoverageTarget(context.Background(), q)
+	if err != nil || target.File.RelativePath != "a.c" || target.Function == nil || target.Function.ID != functionID || target.Gap == nil || target.Gap.Location.Line != 2 {
+		t.Fatalf("resolved target = %#v, %v", target, err)
+	}
+	q.GapID = strings.Repeat("f", 32)
+	if _, err := r.ResolveCurrentCoverageTarget(context.Background(), q); err == nil {
+		t.Fatal("nonexistent gap accepted")
+	}
+	q.GapID = gapID
+	if err := os.WriteFile(filepath.Join(dir, "b.c"), []byte("changed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveCurrentCoverageTarget(context.Background(), q); err != coveragedetail.ErrStale {
+		t.Fatalf("other indexed source drift = %v", err)
 	}
 }
