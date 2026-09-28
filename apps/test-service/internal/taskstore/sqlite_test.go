@@ -1245,6 +1245,48 @@ func TestMigration017FailureOrChecksumMismatchDisablesOnlyManagedCapability(t *t
 	}
 }
 
+func TestMigration018UpgradeAndFailurePreserveV15(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil || len(migrations) < 18 || migrations[17].version != 18 {
+		t.Fatalf("migration 018: %v, %d", err, len(migrations))
+	}
+	for _, name := range []string{"upgrade", "optional-failure", "checksum-mismatch"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "migration018.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:17])
+			if name == "optional-failure" {
+				if _, err := db.Exec(`ALTER TABLE managed_test_commits ADD COLUMN acceptance_json TEXT`); err != nil {
+					t.Fatal(err)
+				}
+			} else if name == "checksum-mismatch" {
+				if err := store.applyMigration(ctx, migrations[17]); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=18`, strings.Repeat("0", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1.5 unavailable: %v", err)
+			}
+			defer reopened.Close()
+			if !reopened.CoverageDetailReady() {
+				t.Fatal("v1.5 coverage detail lost")
+			}
+			if reopened.ManagedTestsReady() != (name == "upgrade") {
+				t.Fatalf("managed readiness after migration mode=%s", name)
+			}
+		})
+	}
+}
+
 func TestMigration016ChecksumMismatchDisablesOnlyDetails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "checksum.sqlite")
 	store, err := Open(path)

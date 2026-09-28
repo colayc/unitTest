@@ -2,8 +2,10 @@ package taskstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -475,5 +477,167 @@ func TestManagedStaleReturnsCurrentOnlyAfterFreshAcceptance(t *testing.T) {
 	var from, reason string
 	if err := s.db.QueryRow(`SELECT from_status,reason FROM managed_test_transitions WHERE case_id=? ORDER BY revision DESC LIMIT 1`, a.Record.CaseID).Scan(&from, &reason); err != nil || from != "stale" || reason != "accepted_verified" {
 		t.Fatalf("reverify transition = %q %q %v", from, reason, err)
+	}
+}
+
+func TestManagedRecordTamperingCannotRemainCurrent(t *testing.T) {
+	ctx := context.Background()
+	for _, column := range []string{"accepted_block_digest", "source_digest", "generator_version"} {
+		t.Run(column, func(t *testing.T) {
+			s, err := Open(filepath.Join(t.TempDir(), "tampered-record.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			a, _ := managedFixture(t, "1")
+			commitManagedFixture(t, s.ManagedTestRegistry(), a)
+			replacement := strings.Repeat("9", 64)
+			if column == "generator_version" {
+				replacement = "forged"
+			}
+			if _, err := s.db.Exec(`UPDATE managed_test_records SET `+column+`=? WHERE case_id=?`, replacement, a.Record.CaseID); err != nil {
+				t.Fatal(err)
+			}
+			if s.ManagedTestsReady() {
+				t.Fatal("tampered record advertised current")
+			}
+			if _, err := s.ManagedTestRegistry().Get(ctx, a.Record.CaseID); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("tampered Get = %v", err)
+			}
+			if _, err := s.ManagedTestRegistry().List(ctx, managedtest.Query{ProjectID: "project", Limit: 10}); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("tampered List = %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedAcceptedPayloadRequiresAuthentication(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "forged-acceptance.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a, _ := managedFixture(t, "1")
+	commitManagedFixture(t, s.ManagedTestRegistry(), a)
+	forged := a
+	forged.Record.AcceptedBlockDigest = strings.Repeat("9", 64)
+	encoded, err := json.Marshal(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := managedAcceptanceDigest(encoded)
+	if _, err := s.db.Exec(`UPDATE managed_test_records SET accepted_block_digest=? WHERE case_id=?`, forged.Record.AcceptedBlockDigest, a.Record.CaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE managed_test_commits SET acceptance_json=?,acceptance_digest=? WHERE acceptance_id=?`, string(encoded), digest, a.AcceptanceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE managed_test_transitions SET record_digest=? WHERE acceptance_id=?`, digest, a.AcceptanceID); err != nil {
+		t.Fatal(err)
+	}
+	if s.ManagedTestsReady() {
+		t.Fatal("self-consistent forged payload was not authenticated")
+	}
+}
+
+func TestManagedCommitCannotOverwriteUntrustedPriorRecord(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "untrusted-prior.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := s.ManagedTestRegistry()
+	a, _ := managedFixture(t, "1")
+	commitManagedFixture(t, r, a)
+	if _, err := s.db.Exec(`UPDATE managed_test_records SET accepted_block_digest=? WHERE case_id=?`, strings.Repeat("9", 64), a.Record.CaseID); err != nil {
+		t.Fatal(err)
+	}
+	newer := a
+	newer.AcceptanceID = strings.Repeat("2", 32)
+	newer.Record.LastVerifiedAt = a.Record.LastVerifiedAt.Add(time.Minute)
+	newer.At = newer.Record.LastVerifiedAt
+	if err := r.BeginManagedAcceptance(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkManagedFileWritten(ctx, newer.AcceptanceID, newer.PublishedFileDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CommitAccepted(ctx, newer); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("untrusted prior record advanced = %v", err)
+	}
+}
+
+func TestManagedWindowsTargetCaseAliasesCollide(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "target-case.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := s.ManagedTestRegistry()
+	a, _ := managedFixture(t, "1")
+	commitManagedFixture(t, r, a)
+	other := a
+	other.AcceptanceID = strings.Repeat("2", 32)
+	other.Record.SourceRelativePath = "src/other.cpp"
+	other.Record.SourceFileID, err = coveragedetail.StableFileID("project", other.Record.SourceRelativePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Record.CaseID, err = managedtest.StableCaseID("project", other.Record.SourceRelativePath, other.Record.FunctionID, other.Record.ScenarioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Record.TestRelativePath = "tests/generated/src/EXAMPLE_test.cpp"
+	if err := r.BeginManagedAcceptance(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkManagedFileWritten(ctx, other.AcceptanceID, other.PublishedFileDigest); err != nil {
+		t.Fatal(err)
+	}
+	err = r.CommitAccepted(ctx, other)
+	if runtime.GOOS == "windows" && !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("Windows case-alias target = %v", err)
+	}
+	if runtime.GOOS != "windows" && err != nil {
+		t.Fatalf("distinct Linux target = %v", err)
+	}
+}
+
+func TestManagedOlderVerificationCannotReplaceNewerRecord(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "old-verification.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r := s.ManagedTestRegistry()
+	a, _ := managedFixture(t, "1")
+	commitManagedFixture(t, r, a)
+	old := a
+	old.AcceptanceID = strings.Repeat("2", 32)
+	old.Record.LastVerifiedAt = a.Record.LastVerifiedAt.Add(-time.Minute)
+	old.At = old.Record.LastVerifiedAt
+	old.Record.AcceptedBlockDigest = strings.Repeat("9", 64)
+	if err := r.BeginManagedAcceptance(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkManagedFileWritten(ctx, old.AcceptanceID, old.PublishedFileDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CommitAccepted(ctx, old); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("older verification accepted = %v", err)
+	}
+	v, err := r.Get(ctx, a.Record.CaseID)
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("pending old attempt exposed current = %+v, %v", v, err)
+	}
+	if err := r.ResolvePendingManagedAcceptance(ctx, old.AcceptanceID, old.PreimageDigest); err != nil {
+		t.Fatal(err)
+	}
+	v, err = r.Get(ctx, a.Record.CaseID)
+	if err != nil || v.AcceptedBlockDigest != a.Record.AcceptedBlockDigest {
+		t.Fatalf("previous accepted record changed = %+v, %v", v, err)
 	}
 }

@@ -1,12 +1,15 @@
 package taskstore
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"time"
 
@@ -48,10 +51,8 @@ func (s *Store) ManagedTestsReady() bool {
 		return false
 	}
 	type transitionHead struct {
-		caseID   string
+		record   managedtest.Record
 		revision int
-		status   managedtest.Status
-		receipt  string
 	}
 	heads := []transitionHead{}
 	for rows.Next() {
@@ -60,7 +61,7 @@ func (s *Store) ManagedTestsReady() bool {
 			rows.Close()
 			return false
 		}
-		heads = append(heads, transitionHead{record.CaseID, revision, record.Status, record.ValidationReceiptDigest})
+		heads = append(heads, transitionHead{record, revision})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -70,7 +71,8 @@ func (s *Store) ManagedTestsReady() bool {
 		return false
 	}
 	for _, head := range heads {
-		chain, err := s.db.QueryContext(ctx, `SELECT revision,from_status,to_status,reason,receipt_digest,acceptance_id,record_digest,occurred_at FROM managed_test_transitions WHERE case_id=? ORDER BY revision`, head.caseID)
+		record := head.record
+		chain, err := s.db.QueryContext(ctx, `SELECT revision,from_status,to_status,reason,receipt_digest,acceptance_id,record_digest,occurred_at FROM managed_test_transitions WHERE case_id=? ORDER BY revision`, record.CaseID)
 		if err != nil {
 			return false
 		}
@@ -117,14 +119,17 @@ func (s *Store) ManagedTestsReady() bool {
 			chain.Close()
 			return false
 		}
-		if err := chain.Close(); err != nil || number != head.revision || previous != string(head.status) || lastAcceptedReceipt != head.receipt {
+		if err := chain.Close(); err != nil || number != head.revision || previous != string(record.Status) || lastAcceptedReceipt != record.ValidationReceiptDigest {
 			return false
 		}
 		for _, commit := range accepted {
 			var digest, caseID string
-			if err := s.db.QueryRowContext(ctx, `SELECT acceptance_digest,case_id FROM managed_test_commits WHERE acceptance_id=?`, commit.id).Scan(&digest, &caseID); err != nil || digest != commit.digest || caseID != head.caseID {
+			if err := s.db.QueryRowContext(ctx, `SELECT acceptance_digest,case_id FROM managed_test_commits WHERE acceptance_id=?`, commit.id).Scan(&digest, &caseID); err != nil || digest != commit.digest || caseID != record.CaseID {
 				return false
 			}
+		}
+		if err := validateManagedRecordBinding(ctx, s.db, record); err != nil {
+			return false
 		}
 	}
 	return true
@@ -171,9 +176,14 @@ func (r *ManagedRegistry) BeginManagedAcceptance(ctx context.Context, a managedt
 		return storageError("read managed acceptance", err)
 	}
 	var committed string
-	err = tx.QueryRowContext(ctx, `SELECT acceptance_digest FROM managed_test_commits WHERE acceptance_id=?`, a.AcceptanceID).Scan(&committed)
+	var priorJSON, priorMAC sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT acceptance_digest,acceptance_json,acceptance_mac FROM managed_test_commits WHERE acceptance_id=?`, a.AcceptanceID).Scan(&committed, &priorJSON, &priorMAC)
 	if err == nil {
-		if committed != managedAcceptanceDigest(encoded) {
+		key, keyErr := managedRegistryKey(ctx, tx)
+		if keyErr != nil {
+			return keyErr
+		}
+		if committed != managedAcceptanceDigest(encoded) || !priorJSON.Valid || priorJSON.String != string(encoded) || !priorMAC.Valid || !validManagedAcceptanceMAC(key, encoded, priorMAC.String) {
 			return task.ErrConflict
 		}
 		return tx.Commit()
@@ -300,9 +310,14 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 	}
 	defer tx.Rollback()
 	var committed string
-	err = tx.QueryRowContext(ctx, `SELECT acceptance_digest FROM managed_test_commits WHERE acceptance_id=?`, a.AcceptanceID).Scan(&committed)
+	var priorJSON, priorMAC sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT acceptance_digest,acceptance_json,acceptance_mac FROM managed_test_commits WHERE acceptance_id=?`, a.AcceptanceID).Scan(&committed, &priorJSON, &priorMAC)
 	if err == nil {
-		if committed != digest {
+		key, keyErr := managedRegistryKey(ctx, tx)
+		if keyErr != nil {
+			return keyErr
+		}
+		if committed != digest || !priorJSON.Valid || priorJSON.String != string(encoded) || !priorMAC.Valid || !validManagedAcceptanceMAC(key, encoded, priorMAC.String) {
 			return task.ErrConflict
 		}
 		return tx.Commit()
@@ -321,13 +336,11 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 	if pending != string(encoded) || phase != "file_written" {
 		return task.ErrConflict
 	}
-	var incompatiblePaths int
-	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM managed_test_records WHERE project_id=? AND case_id<>? AND ((test_relative_path=? AND source_file_id<>?) OR (source_file_id=? AND (test_relative_path<>? OR source_relative_path<>?)))`,
-		a.Record.ProjectID, a.Record.CaseID, a.Record.TestRelativePath, a.Record.SourceFileID, a.Record.SourceFileID, a.Record.TestRelativePath, a.Record.SourceRelativePath).Scan(&incompatiblePaths)
+	conflict, err := conflictingManagedPaths(ctx, tx, a.Record)
 	if err != nil {
-		return storageError("check managed path binding", err)
+		return err
 	}
-	if incompatiblePaths != 0 {
+	if conflict {
 		return task.ErrConflict
 	}
 	var old managedtest.Record
@@ -338,8 +351,14 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 	}
 	from := "none"
 	if err == nil {
+		if err := validateManagedRecordBinding(ctx, tx, old); err != nil {
+			return err
+		}
 		if old.ProjectID != a.Record.ProjectID || old.SourceFileID != a.Record.SourceFileID || old.FunctionID != a.Record.FunctionID ||
 			old.SourceRelativePath != a.Record.SourceRelativePath || old.ScenarioID != a.Record.ScenarioID || old.TestRelativePath != a.Record.TestRelativePath {
+			return task.ErrConflict
+		}
+		if !a.Record.LastVerifiedAt.After(old.LastVerifiedAt) {
 			return task.ErrConflict
 		}
 		from = string(old.Status)
@@ -353,7 +372,11 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 		a.Record.CaseID, revision, from, a.Record.ValidationReceiptDigest, a.AcceptanceID, digest, formatTime(a.At)); err != nil {
 		return storageError("write managed transition", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_test_commits(acceptance_id,case_id,acceptance_digest) VALUES(?,?,?)`, a.AcceptanceID, a.Record.CaseID, digest); err != nil {
+	key, err := managedRegistryKey(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_test_commits(acceptance_id,case_id,acceptance_digest,acceptance_json,acceptance_mac) VALUES(?,?,?,?,?)`, a.AcceptanceID, a.Record.CaseID, digest, string(encoded), managedAcceptanceMAC(key, encoded)); err != nil {
 		return storageError("write managed commit", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM managed_test_pending_acceptances WHERE acceptance_id=?`, a.AcceptanceID); err != nil {
@@ -363,6 +386,29 @@ func (r *ManagedRegistry) CommitAccepted(ctx context.Context, a managedtest.Acce
 		return storageError("commit managed acceptance", err)
 	}
 	return nil
+}
+
+func conflictingManagedPaths(ctx context.Context, tx *sql.Tx, incoming managedtest.Record) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT source_file_id,source_relative_path,test_relative_path FROM managed_test_records WHERE project_id=? AND case_id<>?`, incoming.ProjectID, incoming.CaseID)
+	if err != nil {
+		return false, storageError("list managed path bindings", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sourceID, sourcePath, targetPath string
+		if err := rows.Scan(&sourceID, &sourcePath, &targetPath); err != nil {
+			return false, storageError("read managed path binding", err)
+		}
+		sameTarget := targetPath == incoming.TestRelativePath || runtime.GOOS == "windows" && strings.EqualFold(targetPath, incoming.TestRelativePath)
+		if sourceID == incoming.SourceFileID && (sourcePath != incoming.SourceRelativePath || targetPath != incoming.TestRelativePath) ||
+			sourceID != incoming.SourceFileID && sameTarget {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, storageError("list managed path bindings", err)
+	}
+	return false, nil
 }
 
 const managedRecordSelect = `SELECT case_id,project_id,source_file_id,function_id,source_relative_path,scenario_id,test_relative_path,accepted_block_digest,generator_version,framework,toolchain_id,source_digest,validation_receipt_digest,status,last_verified_at,revision FROM managed_test_records`
@@ -418,6 +464,9 @@ func (r *ManagedRegistry) Get(ctx context.Context, caseID string) (managedtest.R
 	if err != nil {
 		return managedtest.Record{}, storageError("get managed record", err)
 	}
+	if err := validateManagedRecordBinding(ctx, tx, v); err != nil {
+		return managedtest.Record{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return managedtest.Record{}, storageError("commit managed get", err)
 	}
@@ -443,6 +492,70 @@ func validManagedFileID(v managedtest.Record) bool {
 func managedAcceptanceDigest(value []byte) string {
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
+}
+
+func managedRegistryKey(ctx context.Context, q managedBindingQuerier) ([]byte, error) {
+	var key []byte
+	if err := q.QueryRowContext(ctx, `SELECT cursor_key FROM managed_test_registry_meta WHERE singleton=1`).Scan(&key); err != nil || len(key) != 32 {
+		return nil, task.ErrStorageUnavailable
+	}
+	return key, nil
+}
+
+func managedAcceptanceMAC(key, encoded []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("managed-acceptance-v1\x00"))
+	mac.Write(encoded)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func validManagedAcceptanceMAC(key, encoded []byte, value string) bool {
+	got, err := hex.DecodeString(value)
+	if err != nil || value != hex.EncodeToString(got) {
+		return false
+	}
+	want, _ := hex.DecodeString(managedAcceptanceMAC(key, encoded))
+	return hmac.Equal(got, want)
+}
+
+type managedBindingQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// The last verified acceptance remains immutable while reconciliation changes
+// only Status/Revision. Persisting its canonical bytes prevents a valid-looking
+// edited record from being presented as an accepted generated test.
+func validateManagedRecordBinding(ctx context.Context, q managedBindingQuerier, record managedtest.Record) error {
+	var acceptanceID, transitionDigest, receiptDigest, commitDigest, encoded, authentication string
+	err := q.QueryRowContext(ctx, `SELECT t.acceptance_id,t.record_digest,t.receipt_digest,c.acceptance_digest,c.acceptance_json,c.acceptance_mac FROM managed_test_transitions t JOIN managed_test_commits c ON c.acceptance_id=t.acceptance_id WHERE t.case_id=? AND t.to_status='current' ORDER BY t.revision DESC LIMIT 1`, record.CaseID).Scan(&acceptanceID, &transitionDigest, &receiptDigest, &commitDigest, &encoded, &authentication)
+	if err != nil {
+		return task.ErrStorageUnavailable
+	}
+	key, err := managedRegistryKey(ctx, q)
+	if err != nil {
+		return err
+	}
+	if !managedtest.ValidDigest(transitionDigest) || transitionDigest != commitDigest || transitionDigest != managedAcceptanceDigest([]byte(encoded)) || receiptDigest != record.ValidationReceiptDigest || !validManagedAcceptanceMAC(key, []byte(encoded), authentication) {
+		return task.ErrStorageUnavailable
+	}
+	var a managedtest.Acceptance
+	if err := decodeStrictJSON([]byte(encoded), &a); err != nil || !managedtest.ValidAcceptance(a) || !validManagedFileID(a.Record) || a.AcceptanceID != acceptanceID || a.Record.CaseID != record.CaseID {
+		return task.ErrStorageUnavailable
+	}
+	canonical, err := json.Marshal(a)
+	if err != nil || !bytes.Equal(canonical, []byte(encoded)) {
+		return task.ErrStorageUnavailable
+	}
+	if !record.LastVerifiedAt.Equal(a.Record.LastVerifiedAt) {
+		return task.ErrStorageUnavailable
+	}
+	expected := a.Record
+	expected.Status = record.Status
+	expected.LastVerifiedAt = record.LastVerifiedAt
+	if expected != record {
+		return task.ErrStorageUnavailable
+	}
+	return nil
 }
 
 func (r *ManagedRegistry) List(ctx context.Context, q managedtest.Query) (managedtest.Page, error) {
@@ -520,6 +633,11 @@ func (r *ManagedRegistry) List(ctx context.Context, q managedtest.Query) (manage
 		last := page.Items[len(page.Items)-1]
 		encoded, _ := json.Marshal([2]string{last.SourceFileID, last.CaseID})
 		page.NextCursor = encodeDetailCursor(key, scope, string(encoded))
+	}
+	for _, item := range page.Items {
+		if err := validateManagedRecordBinding(ctx, tx, item); err != nil {
+			return managedtest.Page{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return managedtest.Page{}, storageError("commit managed list", err)

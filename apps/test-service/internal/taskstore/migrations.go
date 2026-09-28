@@ -47,11 +47,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	for _, current := range migrations {
+		if s.managedInvalid && current.version >= 18 {
+			break
+		}
 		if applied[current.version] {
 			if current.version == 16 && !s.detailInvalid {
 				s.detailAvailable = true
 			}
-			if current.version == 17 && !s.managedInvalid {
+			if current.version == 18 && !s.managedInvalid {
 				s.managedAvailable = true
 			}
 			continue
@@ -63,7 +66,7 @@ func (s *Store) migrate(ctx context.Context) error {
 				s.detailAvailable = false
 				break
 			}
-			if current.version == 17 {
+			if current.version == 17 || current.version == 18 {
 				s.managedAvailable = false
 				break
 			}
@@ -72,7 +75,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		if current.version == 16 {
 			s.detailAvailable = true
 		}
-		if current.version == 17 {
+		if current.version == 18 {
 			s.managedAvailable = true
 		}
 	}
@@ -237,7 +240,7 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 				applied[version] = true
 				continue
 			}
-			if version == 17 {
+			if version == 17 || version == 18 {
 				s.managedInvalid = true
 				applied[version] = true
 				continue
