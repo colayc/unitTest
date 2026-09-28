@@ -14,6 +14,7 @@ import (
 )
 
 var ErrInvalidDetail = errors.New("invalid coverage detail")
+var ErrStale = errors.New("coverage detail source binding is stale")
 
 func stableID(domain string, parts ...string) string {
 	hash := sha256.New()

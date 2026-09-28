@@ -17,6 +17,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
@@ -76,6 +77,8 @@ type execution struct {
 	coverageJSON         []byte
 	normalized           bool
 	bindings             []coveragenormalize.SourceBinding
+	observations         []coveragedomain.FunctionObservation
+	detailNormalized     bool
 	reportSet            *coveragereport.Set
 	finishedTestRun      *testdomain.TestRun
 	events               []task.DomainEvent
@@ -1279,11 +1282,28 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	if adapter == nil {
 		return task.ErrInvalidArgument
 	}
-	document, bindings, err := adapter.Normalize(ctx, NormalizeInput{
+	input := NormalizeInput{
 		ProcessOutput: raw, PinnedOutput: pinned,
 		WorkspaceRoot: execution.config.WorkspaceRoot.NativePath, Matcher: matcher,
 		Toolchain: execution.run.Toolchain, Completeness: completeness, Limits: limits,
-	})
+	}
+	var document coveragemodelv1.CoverageDocumentV1
+	var bindings []coveragenormalize.SourceBinding
+	var observations []coveragedomain.FunctionObservation
+	detailNormalized := false
+	if detail, ok := adapter.(DetailNormalizer); ok && execution.config.DetailStore != nil {
+		document, bindings, observations, err = detail.NormalizeWithDetail(ctx, input)
+		detailNormalized = err == nil
+		if err != nil {
+			// Detail attribution must not make a valid v1 aggregate run fail.
+			document, bindings, err = adapter.Normalize(ctx, input)
+			if err == nil && execution.config.DetailFailure != nil {
+				execution.config.DetailFailure(coveragedetail.ErrInvalidDetail)
+			}
+		}
+	} else {
+		document, bindings, err = adapter.Normalize(ctx, input)
+	}
 	if err != nil {
 		return err
 	}
@@ -1296,6 +1316,8 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	execution.coverageJSON = append([]byte(nil), coverageJSON...)
 	execution.normalized = true
 	execution.bindings = append([]coveragenormalize.SourceBinding(nil), bindings...)
+	execution.observations = append([]coveragedomain.FunctionObservation(nil), observations...)
+	execution.detailNormalized = detailNormalized
 	execution.mu.Unlock()
 	return nil
 }

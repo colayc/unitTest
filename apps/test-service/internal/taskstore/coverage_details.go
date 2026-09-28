@@ -23,6 +23,10 @@ const detailFileLimit = 200
 const detailFunctionLimit = 200
 const detailLineLimit = 1000
 
+// CoverageDetailReady reports only optional migration/index storage readiness.
+// It does not imply a particular report has an index or current source bytes.
+func (s *Store) CoverageDetailReady() bool { return s != nil && s.detailAvailable && !s.detailInvalid }
+
 type CoverageDetailStore interface {
 	PutCoverageDetail(context.Context, coveragedetail.Index) error
 	GetCoverageProject(context.Context, string) (coveragedetail.Project, error)
@@ -770,7 +774,7 @@ func (s *Store) ListCoverageLines(ctx context.Context, q coveragedetail.LineQuer
 	if s != nil && !s.detailAvailable {
 		return coveragedetail.LinePage{}, task.ErrStorageUnavailable
 	}
-	if s == nil || ctx == nil || !validDetailQuery(q.ReportID, q.WorkspaceGeneration, q.Sort, q.Limit, detailLineLimit) || !lowerHex(q.FileID, 32) || (q.FunctionID != "" && !lowerHex(q.FunctionID, 32)) || (q.Filter != "" && q.Filter != "covered" && q.Filter != "uncovered") {
+	if s == nil || ctx == nil || !validDetailQuery(q.ReportID, q.WorkspaceGeneration, q.Sort, q.Limit, detailLineLimit) || (q.FileID == "" && q.FunctionID == "") || (q.FileID != "" && !lowerHex(q.FileID, 32)) || (q.FunctionID != "" && !lowerHex(q.FunctionID, 32)) || (q.Filter != "" && q.Filter != "covered" && q.Filter != "uncovered") {
 		return coveragedetail.LinePage{}, task.ErrInvalidArgument
 	}
 	tx, h, err := s.detailRead(ctx, q.ReportID, q.WorkspaceGeneration)
@@ -778,6 +782,13 @@ func (s *Store) ListCoverageLines(ctx context.Context, q coveragedetail.LineQuer
 		return coveragedetail.LinePage{}, err
 	}
 	defer tx.Rollback()
+	if q.FileID == "" {
+		if err := tx.QueryRowContext(ctx, `SELECT file_id FROM coverage_detail_functions WHERE report_id=? AND function_id=?`, q.ReportID, q.FunctionID).Scan(&q.FileID); isNoRows(err) {
+			return coveragedetail.LinePage{}, task.ErrNotFound
+		} else if err != nil {
+			return coveragedetail.LinePage{}, storageError("resolve CoverageDetail function", err)
+		}
+	}
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM coverage_detail_files WHERE report_id=? AND file_id=?`, q.ReportID, q.FileID).Scan(&exists); isNoRows(err) {
 		return coveragedetail.LinePage{}, task.ErrNotFound

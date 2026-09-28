@@ -455,7 +455,17 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
 	}
-	if coverageDetailMethod(request.Method) || managedTestMethod(request.Method) {
+	if coverageDetailMethod(request.Method) {
+		if s.negotiatedVersion != protocol.Version16 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.6", false))
+		}
+		provider, ok := s.coverageDetails.(CoverageDetailBackend)
+		if !ok || !provider.CoverageDetailsReady() {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "coverage detail service is unavailable", true))
+		}
+		return s.handleCoverageDetail(ctx, responseVersion, request, provider)
+	}
+	if managedTestMethod(request.Method) {
 		return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed detail routes are not initialized", false))
 	}
 	if generationMethod(request.Method) {

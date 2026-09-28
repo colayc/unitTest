@@ -1292,6 +1292,9 @@ func (m *Manager) persistFinished(
 		}
 		return current, err
 	}
+	if hook, ok := owner.resultInterpreter.(CompletionCommitted); ok {
+		_ = hook.CompletionCommitted(context.Background(), completion)
+	}
 	var artifactReleaseErr error
 	if current.Kind == KindCoverageRun {
 		if releaser, ok := owner.artifactSink.(FinalizedArtifactReleaser); ok {

@@ -133,7 +133,7 @@ func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t 
 	}
 	for _, method := range []string{"coverage/details/project/get", "managedTests/reviews/apply"} {
 		response := active.Handle(context.Background(), requestVersion(t, protocol.Version16, method, map[string]any{}))
-		if response.Response.Error == nil || response.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
+		if response.Response.Error == nil || (response.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" && response.Response.Error.Code != "SERVICE_UNHEALTHY") {
 			t.Fatalf("unimplemented v1.6 route %s = %#v", method, response.Response)
 		}
 	}

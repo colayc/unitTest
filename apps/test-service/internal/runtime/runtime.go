@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
@@ -78,6 +79,7 @@ type Runtime struct {
 	coverageBackend     session.CoverageBackend
 	generationBackend   *generationService
 	coverageExecutor    coverageExecutor
+	detailFailed        atomic.Bool
 
 	shutdownMu          sync.Mutex
 	shutdownRunning     bool
@@ -469,6 +471,7 @@ func Open(config Config) (*Runtime, error) {
 			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
 			CoverageBundleRoot: coverageBundleRoot,
 			Clock:              config.Clock, NewID: newID,
+			DetailFailure: runtimeValue.disableCoverageDetails,
 		})
 		if err != nil {
 			return runtimeValue.failOpen(err)

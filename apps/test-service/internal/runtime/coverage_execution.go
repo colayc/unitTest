@@ -73,8 +73,9 @@ type coverageExecutionConfig struct {
 	// CoverageBundleRoot is an internal, canonical exact bundle root seam.
 	// It is intentionally absent from protocol and workspace configuration.
 	CoverageBundleRoot string
-	Clock         task.Clock
-	NewID         task.IDGenerator
+	Clock              task.Clock
+	NewID              task.IDGenerator
+	DetailFailure      func(error)
 }
 
 func newRuntimeCoverageExecutor(config coverageExecutionConfig) (coverageExecutor, error) {
@@ -88,10 +89,15 @@ func newRuntimeCoverageExecutor(config coverageExecutionConfig) (coverageExecuto
 		native = true
 		adapter = linuxCoverageAdapter{bundleRoot: config.CoverageBundleRoot}
 	}
+	var detailStore coverageexec.DetailStore
+	if candidate, ok := config.Store.(coverageexec.DetailStore); ok {
+		detailStore = candidate
+	}
 	coordinator, err := coverageexec.NewCoordinator(coverageexec.Config{
 		Tasks: config.Tasks, Store: config.Store, Build: config.Build,
 		Tests: config.Tests, Adapter: adapter, WorkspaceRoot: config.WorkspaceRoot,
 		ExecutionRoot: config.ExecutionRoot, Clock: config.Clock, NewID: config.NewID,
+		DetailStore: detailStore, DetailFailure: config.DetailFailure,
 	})
 	if err != nil {
 		return nil, err
@@ -220,7 +226,9 @@ func (adapter *llvmPreparedCoverageAdapter) SealEvidence(expectations []testrun.
 		return nil, coveragellvm.ErrInvalidProfiles
 	}
 	manifest, err := coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	adapter.manifest = &manifest
 	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), nil
 }
@@ -230,14 +238,26 @@ func (adapter *llvmPreparedCoverageAdapter) PrepareCollector(_ context.Context, 
 		return coverageexec.CollectionPlan{}, coveragellvm.ErrInvalidProfiles
 	}
 	merge, normalize, err := coveragellvm.BuildCollectorInvocation(adapter.toolset, *adapter.manifest, binaries)
-	if err != nil { return coverageexec.CollectionPlan{}, err }
+	if err != nil {
+		return coverageexec.CollectionPlan{}, err
+	}
 	return coverageexec.CollectionPlan{Aggregate: merge, Normalize: &normalize}, nil
 }
 
 func (adapter *llvmPreparedCoverageAdapter) Normalize(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
 	parsed, err := llvm.Parse(bytes.NewReader(input.ProcessOutput), llvm.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
-	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, err
+	}
 	return coveragenormalize.NormalizeLLVM(coveragenormalize.LLVMInput{Export: parsed, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
+}
+
+func (adapter *llvmPreparedCoverageAdapter) NormalizeWithDetail(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, []coveragedomain.FunctionObservation, error) {
+	parsed, err := llvm.Parse(bytes.NewReader(input.ProcessOutput), llvm.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, err
+	}
+	return coveragenormalize.NormalizeLLVMWithDetail(coveragenormalize.LLVMInput{Export: parsed, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
 }
 
 func (adapter *llvmPreparedCoverageAdapter) Close() error {
@@ -269,62 +289,172 @@ func (adapter gccCoverageAdapter) Prepare(ctx context.Context, input coverageexe
 		return nil, task.ErrInvalidArgument
 	}
 	toolset, err := coveragegcc.PinToolset(input.Toolchain)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	bundle, err := coveragebundle.ResolveExact(adapter.bundleRoot)
-	if err != nil { _ = toolset.Close(); return nil, err }
+	if err != nil {
+		_ = toolset.Close()
+		return nil, err
+	}
 	instrumentation, err := coveragegcc.WriteInstrumentation(input.TaskRoot)
-	if err != nil { _ = bundle.Close(); _ = toolset.Close(); return nil, err }
+	if err != nil {
+		_ = bundle.Close()
+		_ = toolset.Close()
+		return nil, err
+	}
 	return &gccPreparedCoverageAdapter{toolset: toolset, bundle: bundle, instrumentation: instrumentation, allocator: coveragegcc.NewAllocator(), ownsToolset: true}, nil
 }
 
 type gccPreparedCoverageAdapter struct {
-	toolset *coveragegcc.Toolset
-	bundle coveragebundle.Pin
+	toolset         *coveragegcc.Toolset
+	bundle          coveragebundle.Pin
 	instrumentation coverageplatform.Instrumentation
-	allocator *coveragegcc.Allocator
-	evidence *coveragegcc.PreparedEvidence
-	manifest *coveragegcc.Manifest
-	mu sync.Mutex
-	ownsToolset bool
-	closeOnce sync.Once
-	closeErr error
+	allocator       *coveragegcc.Allocator
+	evidence        *coveragegcc.PreparedEvidence
+	manifest        *coveragegcc.Manifest
+	mu              sync.Mutex
+	ownsToolset     bool
+	closeOnce       sync.Once
+	closeErr        error
 }
-func (a *gccPreparedCoverageAdapter) Toolset() coverageplatform.Toolset { if a == nil { return nil }; return a.toolset }
-func (a *gccPreparedCoverageAdapter) RelinquishToolsetOwnership() { if a != nil { a.mu.Lock(); a.ownsToolset=false; a.mu.Unlock() } }
-func (a *gccPreparedCoverageAdapter) Instrumentation() coverageplatform.Instrumentation { if a == nil { return coverageplatform.Instrumentation{} }; return a.instrumentation }
-func (a *gccPreparedCoverageAdapter) Allocator() testrun.ProfileAllocator { if a == nil { return nil }; return a.allocator }
+
+func (a *gccPreparedCoverageAdapter) Toolset() coverageplatform.Toolset {
+	if a == nil {
+		return nil
+	}
+	return a.toolset
+}
+func (a *gccPreparedCoverageAdapter) RelinquishToolsetOwnership() {
+	if a != nil {
+		a.mu.Lock()
+		a.ownsToolset = false
+		a.mu.Unlock()
+	}
+}
+func (a *gccPreparedCoverageAdapter) Instrumentation() coverageplatform.Instrumentation {
+	if a == nil {
+		return coverageplatform.Instrumentation{}
+	}
+	return a.instrumentation
+}
+func (a *gccPreparedCoverageAdapter) Allocator() testrun.ProfileAllocator {
+	if a == nil {
+		return nil
+	}
+	return a.allocator
+}
 func (a *gccPreparedCoverageAdapter) PrepareTests(ctx context.Context, prepared coverageexec.PreparedBuild) error {
-	if a == nil || ctx == nil || prepared == nil || coverageplatform.VerifyDirectory(prepared.CoverageObjectDirectory()) != nil { return task.ErrInvalidArgument }
+	if a == nil || ctx == nil || prepared == nil || coverageplatform.VerifyDirectory(prepared.CoverageObjectDirectory()) != nil {
+		return task.ErrInvalidArgument
+	}
 	evidence, err := coveragegcc.PrepareBuildEvidence(prepared.CoverageObjectDirectory().Path())
-	if err != nil { return err }
-	a.mu.Lock(); old := a.evidence; a.evidence = evidence; a.mu.Unlock()
-	if old != nil { return old.Close() }; return nil
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	old := a.evidence
+	a.evidence = evidence
+	a.mu.Unlock()
+	if old != nil {
+		return old.Close()
+	}
+	return nil
 }
 func (a *gccPreparedCoverageAdapter) SealEvidence(_ []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
-	if a == nil { return nil, task.ErrInvalidArgument }
-	a.mu.Lock(); evidence:=a.evidence; a.mu.Unlock()
-	if evidence == nil { return nil, task.ErrInvalidArgument }
+	if a == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	a.mu.Lock()
+	evidence := a.evidence
+	a.mu.Unlock()
+	if evidence == nil {
+		return nil, task.ErrInvalidArgument
+	}
 	manifest, err := evidence.Seal(context.Background(), outcomes)
-	if err != nil { return nil, err }
-	a.mu.Lock(); a.manifest=&manifest; a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	a.manifest = &manifest
+	a.mu.Unlock()
 	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), nil
 }
 func (a *gccPreparedCoverageAdapter) PrepareCollector(ctx context.Context, prepared coverageexec.PreparedBuild, collector coverageplatform.DirectoryVerifier, _ []coveragerun.TrustedPath) (coverageexec.CollectionPlan, error) {
-	if a == nil || ctx == nil || prepared == nil || a.bundle == nil || a.toolset == nil { return coverageexec.CollectionPlan{}, task.ErrInvalidArgument }
-	if err := a.bundle.Verify(); err != nil { return coverageexec.CollectionPlan{}, err }
+	if a == nil || ctx == nil || prepared == nil || a.bundle == nil || a.toolset == nil {
+		return coverageexec.CollectionPlan{}, task.ErrInvalidArgument
+	}
+	if err := a.bundle.Verify(); err != nil {
+		return coverageexec.CollectionPlan{}, err
+	}
 	execution, err := coveragegcc.PrepareCollector(a.bundle, collector, prepared.CoverageSourceRoot(), prepared.CoverageObjectDirectory(), a.toolset.GCov())
-	if err != nil { return coverageexec.CollectionPlan{}, err }
-	if err := prepared.AttachCoverageExecution(execution); err != nil { _ = execution.Close(); return coverageexec.CollectionPlan{}, err }
+	if err != nil {
+		return coverageexec.CollectionPlan{}, err
+	}
+	if err := prepared.AttachCoverageExecution(execution); err != nil {
+		_ = execution.Close()
+		return coverageexec.CollectionPlan{}, err
+	}
 	return coverageexec.CollectionPlan{Aggregate: execution.ProcessSpec()}, nil
 }
 func (a *gccPreparedCoverageAdapter) Normalize(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
-	if input.PinnedOutput == nil { return coveragemodelv1.CoverageDocumentV1{}, nil, task.ErrInvalidArgument }
-	raw, err := input.PinnedOutput.ReadAll(); if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	if input.PinnedOutput == nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, task.ErrInvalidArgument
+	}
+	raw, err := input.PinnedOutput.ReadAll()
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, err
+	}
 	export, err := coverageparsergcovr.Parse(bytes.NewReader(raw), coverageparsergcovr.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
-	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, err
+	}
 	return coveragenormalize.NormalizeGCC(coveragenormalize.GCCInput{Export: export, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
 }
-func (a *gccPreparedCoverageAdapter) Close() error { if a == nil { return nil }; a.closeOnce.Do(func(){ a.mu.Lock(); evidence, manifest, bundle, owns := a.evidence,a.manifest,a.bundle,a.ownsToolset; a.evidence=nil; a.manifest=nil; a.bundle=nil; a.ownsToolset=false; a.mu.Unlock(); if manifest != nil { a.closeErr=errors.Join(a.closeErr,manifest.Close()) }; if evidence != nil { a.closeErr=errors.Join(a.closeErr,evidence.Close()) }; if bundle != nil { a.closeErr=errors.Join(a.closeErr,bundle.Close()) }; if owns && a.toolset != nil { a.closeErr=errors.Join(a.closeErr,a.toolset.Close()) }; if a.allocator != nil { a.closeErr=errors.Join(a.closeErr,a.allocator.Close()) } }); return a.closeErr }
+func (a *gccPreparedCoverageAdapter) NormalizeWithDetail(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, []coveragedomain.FunctionObservation, error) {
+	if input.PinnedOutput == nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, task.ErrInvalidArgument
+	}
+	raw, err := input.PinnedOutput.ReadAll()
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, err
+	}
+	export, err := coverageparsergcovr.Parse(bytes.NewReader(raw), coverageparsergcovr.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, err
+	}
+	return coveragenormalize.NormalizeGCCWithDetail(coveragenormalize.GCCInput{Export: export, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
+}
+func (a *gccPreparedCoverageAdapter) Close() error {
+	if a == nil {
+		return nil
+	}
+	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		evidence, manifest, bundle, owns := a.evidence, a.manifest, a.bundle, a.ownsToolset
+		a.evidence = nil
+		a.manifest = nil
+		a.bundle = nil
+		a.ownsToolset = false
+		a.mu.Unlock()
+		if manifest != nil {
+			a.closeErr = errors.Join(a.closeErr, manifest.Close())
+		}
+		if evidence != nil {
+			a.closeErr = errors.Join(a.closeErr, evidence.Close())
+		}
+		if bundle != nil {
+			a.closeErr = errors.Join(a.closeErr, bundle.Close())
+		}
+		if owns && a.toolset != nil {
+			a.closeErr = errors.Join(a.closeErr, a.toolset.Close())
+		}
+		if a.allocator != nil {
+			a.closeErr = errors.Join(a.closeErr, a.allocator.Close())
+		}
+	})
+	return a.closeErr
+}
 
 type unsupportedCoverageAdapter struct{}
 

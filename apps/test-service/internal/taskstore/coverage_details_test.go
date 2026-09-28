@@ -327,6 +327,12 @@ func TestCoverageDetailPersistsAndPages(t *testing.T) {
 		t.Fatalf("next lines = %#v, %v", lines, err)
 	}
 	lq.Cursor = ""
+	lq.FileID = ""
+	byFunction, err := store.ListCoverageLines(ctx, lq)
+	if err != nil || len(byFunction.Items) != 1 || byFunction.Items[0].Line != 1 {
+		t.Fatalf("function-only line query = %#v, %v", byFunction, err)
+	}
+	lq.FileID = index.Files[0].ID
 	lq.Filter = "uncovered"
 	lines, err = store.ListCoverageLines(ctx, lq)
 	if err != nil || len(lines.Items) != 1 || lines.Items[0].Line != 9 {
