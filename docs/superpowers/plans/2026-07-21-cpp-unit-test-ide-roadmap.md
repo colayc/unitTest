@@ -171,7 +171,14 @@ Phase 10 在 Phase 8 的正式签名、最终第三方 license/legal 审批和�
 本地报告/mutation/performance/security harness 已实现并通过相应本地回归。它们证明
 契约、安全边界和 fail-closed 行为，不等于四工具链 native 或 hosted 发布证据。
 
-Phase 10 尚未宣告完成：Linux Clang/LLVM coverage、固定 analyzer bundle 的实际准备
+当前开发分支正在增加 Protocol v1.6 的详细覆盖率索引、可维护的受管测试块、
+三方 review/显式接受与 Code-OSS 展示。本地 Phase 10 门禁会固定列出 Windows
+MSVC/Clang-cl、Linux GCC/Clang 与 CppUTest/Unity 的八个原生组合；在没有各组合
+真实运行、不可变 artifact/run/job 身份及摘要核验前，它们全部保持 `MISSING`，
+本地报告始终为 `releaseReady: false`。本地场景计划、静态报告和上传 artifact
+都不能代替生成用例的原生编译/执行、覆盖率一致性与不回退证据。
+
+Phase 10 尚未宣告完成：受管测试与详细覆盖率的跨平台原生验收、Linux Clang/LLVM coverage、固定 analyzer bundle 的实际准备
 与 license inventory、四工具链真实生成/编译/执行/coverage delta、hosted CI receipt、
 完整 Phase 9 regression 以及最终 gate catalog 仍需逐项以 immutable evidence 闭合。
 在这些证据闭合前，所有缺失或未运行的行保持 `MISSING`，gate matrix 的

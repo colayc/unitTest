@@ -92,6 +92,65 @@
       "type": "object", "additionalProperties": false,
       "required": ["total", "killed", "requiredKilled"],
       "properties": { "total": { "type": "integer", "minimum": 1 }, "killed": { "type": "integer", "minimum": 0 }, "requiredKilled": { "type": "integer", "minimum": 1 } }
+    },
+    "managedCoverageLocalReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "candidateCommit", "evidenceKind", "releaseReady", "deferredReleaseBlockers", "blocks"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "candidateCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "evidenceKind": { "const": "local-missing-hosted" },
+        "releaseReady": { "const": false },
+        "deferredReleaseBlockers": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "prefixItems": [{ "const": "windows-signing" }, { "const": "third-party-license-legal" }],
+          "items": false
+        },
+        "blocks": {
+          "type": "array", "minItems": 8, "maxItems": 8,
+          "prefixItems": [
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsMsvcCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsMsvcUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsClangclCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsClangclUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxGccCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxGccUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxClangCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxClangUnity" }
+          ],
+          "items": false
+        }
+      },
+      "$defs": {
+        "managedBlockWindowsMsvcCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-msvc-cpputest" } } },
+        "managedBlockWindowsMsvcUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-msvc-unity" } } },
+        "managedBlockWindowsClangclCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-clangcl-cpputest" } } },
+        "managedBlockWindowsClangclUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-clangcl-unity" } } },
+        "managedBlockLinuxGccCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-gcc-cpputest" } } },
+        "managedBlockLinuxGccUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-gcc-unity" } } },
+        "managedBlockLinuxClangCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-clang-cpputest" } } },
+        "managedBlockLinuxClangUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-clang-unity" } } },
+        "managedBlock": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "status", "evidence"],
+          "properties": {
+            "id": { "type": "string" },
+            "status": { "const": "MISSING" },
+            "evidence": { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedEvidence" }
+          }
+        },
+        "managedEvidence": {
+          "type": "object", "additionalProperties": false,
+          "required": ["candidateSha256", "runId", "runAttempt", "jobId", "runnerId", "toolchainId", "frameworkId", "artifactId", "artifactSha256", "coverageReportSha256", "coverageIndexSha256", "reviewSha256", "publicationSha256", "mutationSha256", "abuseSha256", "performanceSha256"],
+          "properties": {
+            "candidateSha256": { "type": "null" }, "runId": { "type": "null" }, "runAttempt": { "type": "null" }, "jobId": { "type": "null" },
+            "runnerId": { "type": "null" }, "toolchainId": { "type": "null" }, "frameworkId": { "type": "null" },
+            "artifactId": { "type": "null" }, "artifactSha256": { "type": "null" }, "coverageReportSha256": { "type": "null" },
+            "coverageIndexSha256": { "type": "null" }, "reviewSha256": { "type": "null" }, "publicationSha256": { "type": "null" },
+            "mutationSha256": { "type": "null" }, "abuseSha256": { "type": "null" }, "performanceSha256": { "type": "null" }
+          }
+        }
+      }
     }
   }
 }

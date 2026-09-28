@@ -9,6 +9,19 @@ const TOOLCHAINS = Object.freeze([
   ["linux", "gcc"], ["linux", "clang"], ["win32", "msvc"], ["win32", "clang-cl"],
 ]);
 const FRAMEWORKS = Object.freeze(["cpputest", "unity"]);
+const MANAGED_NATIVE_BLOCKS = Object.freeze([
+  "windows-msvc-cpputest", "windows-msvc-unity", "windows-clangcl-cpputest", "windows-clangcl-unity",
+  "linux-gcc-cpputest", "linux-gcc-unity", "linux-clang-cpputest", "linux-clang-unity",
+]);
+const MANAGED_EVIDENCE_FIELDS = Object.freeze([
+  "candidateSha256", "runId", "runAttempt", "jobId", "runnerId", "toolchainId", "frameworkId",
+  "artifactId", "artifactSha256", "coverageReportSha256", "coverageIndexSha256",
+  "reviewSha256", "publicationSha256", "mutationSha256", "abuseSha256", "performanceSha256",
+]);
+const MANAGED_PERFORMANCE_METRICS = Object.freeze([
+  "serviceIndexMs", "servicePeakMemoryBytes", "firstTreePageMs", "functionPageMs", "lineDetailMs",
+  "extensionHeapBytes", "extensionDecorations",
+]);
 const REQUIRED_FAULTS = Object.freeze(["cancel-before-build", "compile-failure", "service-restart"]);
 const METRICS = Object.freeze(["functions", "lines", "branches"]);
 const TOP_KEYS = Object.freeze([
@@ -157,6 +170,38 @@ export function buildMatrixReport(input) {
   return { schemaVersion: 1, candidateCommit: matrix.candidateCommit, evidenceKind: "local-static", nativeEvidenceEligible: false, blocks, overallStatus: "rejected" };
 }
 
+/** Local verification is deliberately not a native receipt. No caller-supplied
+ * status or digest can be smuggled into this report. */
+export function buildManagedCoverageLocalReport(input) {
+  const request = exactObject(input, ["candidateCommit"], "managed coverage local input");
+  commit(request.candidateCommit, "managed coverage candidate commit");
+  return canonicalClone({
+    schemaVersion: 2,
+    candidateCommit: request.candidateCommit,
+    evidenceKind: "local-missing-hosted",
+    releaseReady: false,
+    deferredReleaseBlockers: ["windows-signing", "third-party-license-legal"],
+    blocks: MANAGED_NATIVE_BLOCKS.map((id) => ({
+      id,
+      status: "MISSING",
+      evidence: Object.fromEntries(MANAGED_EVIDENCE_FIELDS.map((field) => [field, null])),
+    })),
+  });
+}
+
+/** Validates real measurements supplied by an execution harness. This helper
+ * does not itself constitute a native performance receipt. */
+export function validateManagedCoveragePerformance(input) {
+  const metrics = exactObject(input, MANAGED_PERFORMANCE_METRICS, "managed coverage performance");
+  for (const name of MANAGED_PERFORMANCE_METRICS) {
+    const value = exactObject(metrics[name], ["measured", "budget"], `${name} performance`);
+    integer(value.measured, `${name} measured`);
+    integer(value.budget, `${name} budget`, 1);
+    if (value.measured > value.budget) fail(`${name} performance budget exceeded`);
+  }
+  return canonicalClone(metrics);
+}
+
 function canonicalClone(value) {
   if (Array.isArray(value)) return value.map(canonicalClone);
   if (value !== null && typeof value === "object") {
@@ -166,6 +211,14 @@ function canonicalClone(value) {
 }
 
 async function main(argv) {
+  if (argv.length === 5 && argv[0] === "--local-managed" && argv[1] === "--candidate" && argv[3] === "--out") {
+    const { writeFile } = await import("node:fs/promises");
+    const outputPath = argv[4];
+    if (typeof outputPath !== "string" || !isAbsolute(outputPath) || outputPath.includes("\0")) fail("report output path is invalid");
+    const report = buildManagedCoverageLocalReport({ candidateCommit: argv[2] });
+    await writeFile(outputPath, `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return;
+  }
   if (argv.length !== 6 || argv[0] !== "--reports" || argv[2] !== "--candidate" || argv[4] !== "--out") fail("arguments are invalid");
   const { lstat, readFile, writeFile } = await import("node:fs/promises");
   const inputPath = argv[1];

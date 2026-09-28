@@ -673,6 +673,19 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   }
 });
 
+test("foundation Phase 10 job uploads only an explicit missing-hosted local report", async () => {
+  const source = await readFile(".github/workflows/foundation.yml", "utf8");
+  const job = workflowJob(source, "phase10-local-gate");
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /pnpm test:phase10:test-generation/u);
+  assert.match(job, /test-generation-report\.mjs --local-managed/u);
+  assert.match(job, /--candidate "\$candidate"/u);
+  assert.match(job, /--out "\$PWD\/\.native-e2e\/artifacts\/phase10\/managed-coverage-local\.json"/u);
+  assert.match(job, /name: phase10-managed-coverage-local-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /if-no-files-found: error/u);
+  assert.doesNotMatch(job, /continue-on-error|external-native-receipt|releaseReady:\s*true/u);
+});
+
 test("Phase 10A publishes exact candidate-bound GCC, Clang, and clang-cl coverage backend evidence", async () => {
   const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
   const clang = workflowJob(workflow, "coverage-linux-clang");

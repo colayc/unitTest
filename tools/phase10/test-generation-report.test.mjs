@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "./test-generation-report.schema.json" with { type: "json" };
 
-import { buildMatrixReport, buildToolchainReport } from "./test-generation-report.mjs";
+import { buildManagedCoverageLocalReport, buildMatrixReport, buildToolchainReport } from "./test-generation-report.mjs";
 
 const commit = "a".repeat(40);
 const digest = (label) => createHash("sha256").update(label).digest("hex");
@@ -99,4 +103,45 @@ test("local-static evidence is rejected as native evidence and coverage may not 
   const regressed = { ...input, coverage: { ...input.coverage, final: { ...input.coverage.final, branches: { covered: 0, total: 30 } } } };
   assert.throws(() => buildToolchainReport(regressed), /coverage metrics cannot regress/u);
   assert.throws(() => buildMatrixReport({ schemaVersion: 1, candidateCommit: commit, evidenceKind: "external-native-receipt", blocks: [input] }), /external producer receipt/u);
+});
+
+test("managed coverage local report names all eight native blocks without claiming a pass", () => {
+  const report = buildManagedCoverageLocalReport({ candidateCommit: commit });
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.candidateCommit, commit);
+  assert.equal(report.releaseReady, false);
+  assert.equal(report.evidenceKind, "local-missing-hosted");
+  assert.deepEqual(report.deferredReleaseBlockers, ["windows-signing", "third-party-license-legal"]);
+  assert.deepEqual(report.blocks.map((block) => block.id), [
+    "windows-msvc-cpputest", "windows-msvc-unity", "windows-clangcl-cpputest", "windows-clangcl-unity",
+    "linux-gcc-cpputest", "linux-gcc-unity", "linux-clang-cpputest", "linux-clang-unity",
+  ]);
+  for (const block of report.blocks) {
+    assert.equal(block.status, "MISSING");
+    assert.deepEqual(Object.values(block.evidence), Array(16).fill(null));
+  }
+  const ajv = new Ajv2020({ strict: true });
+  ajv.addSchema(schema);
+  const validate = ajv.compile({ $ref: `${schema.$id}#/$defs/managedCoverageLocalReport` });
+  assert.equal(validate(report), true, JSON.stringify(validate.errors));
+});
+
+test("managed coverage local report rejects candidate substitution and invented hosted results", () => {
+  assert.throws(() => buildManagedCoverageLocalReport({ candidateCommit: "not-a-sha" }), /candidate commit/u);
+  assert.throws(() => buildManagedCoverageLocalReport({ candidateCommit: commit, blocks: [] }), /closed/u);
+  assert.throws(() => buildManagedCoverageLocalReport({ candidateCommit: commit, releaseReady: true }), /closed/u);
+});
+
+test("local managed report CLI writes an immutable missing-evidence file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase10-managed-gate-"));
+  const output = join(root, "report.json");
+  try {
+    execFileSync(process.execPath, ["tools/phase10/test-generation-report.mjs", "--local-managed", "--candidate", commit, "--out", output]);
+    const report = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(report.releaseReady, false);
+    assert.equal(report.blocks.length, 8);
+    assert.throws(() => execFileSync(process.execPath, ["tools/phase10/test-generation-report.mjs", "--local-managed", "--candidate", commit, "--out", output], { stdio: "ignore" }));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

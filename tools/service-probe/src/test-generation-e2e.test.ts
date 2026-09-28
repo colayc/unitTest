@@ -20,6 +20,11 @@ test("scenario plan contains every required scope, oracle, fault, and recovery c
     assert.equal(plan.includes(required as typeof plan[number]), true, required);
   }
   assert.equal(plan.filter((id) => id.startsWith("cancel-")).length, 6);
+  for (const required of [
+    "managed-rerun-byte-stable", "managed-unmanaged-bytes-preserved", "managed-edited-conflict-zero-write",
+    "managed-accepted-update-idempotent", "coverage-project-file-function-totals",
+    "coverage-navigation-lines", "coverage-no-metric-regression",
+  ]) assert.equal(plan.includes(required as typeof plan[number]), true, required);
 });
 
 test("scenario executor is ordered and cannot silently omit a case", async () => {

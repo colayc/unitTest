@@ -23,6 +23,13 @@ export const TEST_GENERATION_SCENARIO_IDS = Object.freeze([
   "acceptance-conflict",
   "repeat-acceptance",
   "one-click-refresh",
+  "managed-rerun-byte-stable",
+  "managed-unmanaged-bytes-preserved",
+  "managed-edited-conflict-zero-write",
+  "managed-accepted-update-idempotent",
+  "coverage-project-file-function-totals",
+  "coverage-navigation-lines",
+  "coverage-no-metric-regression",
 ] as const);
 
 export type TestGenerationScenarioId = typeof TEST_GENERATION_SCENARIO_IDS[number];
@@ -70,4 +77,3 @@ export async function runTestGenerationScenarioPlan(
 export async function runNativeTestGenerationScenarioPlan(): Promise<never> {
   throw new Error("native test-generation provider is an external Task 15 gate; no local hosted evidence is claimed");
 }
-

@@ -42,6 +42,39 @@ permissions:
   contents: read
 
 jobs:
+  phase10-local-gate:
+    # This is local-contract evidence only. It is never a substitute for the
+    # eight native managed-coverage receipts or release qualification.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:phase10:test-generation
+      - name: Record missing hosted managed-coverage evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          mkdir -p .native-e2e/artifacts/phase10
+          node tools/phase10/test-generation-report.mjs --local-managed --candidate "$candidate" --out "$PWD/.native-e2e/artifacts/phase10/managed-coverage-local.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: phase10-managed-coverage-local-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/phase10/managed-coverage-local.json
+          if-no-files-found: error
+          retention-days: 1
+
   verify-windows:
     # Trusted master pushes use the dedicated WFP runner; pull requests stay on
     # the public hosted runner so fork code never reaches an administrator host.
