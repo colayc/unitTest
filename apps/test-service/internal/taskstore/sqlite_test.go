@@ -1146,7 +1146,7 @@ func TestMigration016UpgradeAndOptionalFailurePreserveV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 16 || migrations[15].version != 16 {
+	if len(migrations) < 16 || migrations[15].version != 16 {
 		t.Fatalf("migration list ends at %#v", migrations[len(migrations)-1])
 	}
 	for _, broken := range []bool{false, true} {
@@ -1194,6 +1194,52 @@ func TestMigration016UpgradeAndOptionalFailurePreserveV1(t *testing.T) {
 			var foreignKeys int
 			if err := opened.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 				t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
+			}
+		})
+	}
+}
+
+func TestMigration017FailureOrChecksumMismatchDisablesOnlyManagedCapability(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil || len(migrations) < 17 || migrations[16].version != 17 {
+		t.Fatalf("migration 017: %v, %d", err, len(migrations))
+	}
+	for _, mode := range []string{"apply-failure", "checksum-mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "managed-optional.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:16])
+			if mode == "apply-failure" {
+				if _, err := db.Exec(`CREATE TABLE managed_test_records (wrong INTEGER)`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := store.applyMigration(ctx, migrations[16]); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=17`, strings.Repeat("0", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1.5 operation failed: %v", err)
+			}
+			defer reopened.Close()
+			if !reopened.CoverageDetailReady() {
+				t.Fatal("coverage detail migration lost")
+			}
+			if reopened.ManagedTestsReady() {
+				t.Fatal("invalid managed schema advertised")
+			}
+			var count int
+			if err := reopened.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='coverage_reports'`).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("v1.5 schema lost: %d, %v", count, err)
 			}
 		})
 	}

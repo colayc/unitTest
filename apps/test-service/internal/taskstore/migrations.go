@@ -51,6 +51,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			if current.version == 16 && !s.detailInvalid {
 				s.detailAvailable = true
 			}
+			if current.version == 17 && !s.managedInvalid {
+				s.managedAvailable = true
+			}
 			continue
 		}
 		if err := s.applyMigration(ctx, current); err != nil {
@@ -60,10 +63,17 @@ func (s *Store) migrate(ctx context.Context) error {
 				s.detailAvailable = false
 				break
 			}
+			if current.version == 17 {
+				s.managedAvailable = false
+				break
+			}
 			return err
 		}
 		if current.version == 16 {
 			s.detailAvailable = true
+		}
+		if current.version == 17 {
+			s.managedAvailable = true
 		}
 	}
 	return s.reconcileGenerationRecords(ctx)
@@ -224,6 +234,11 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 			if version == 16 {
 				// A compromised optional detail schema must not hide legacy reports.
 				s.detailInvalid = true
+				applied[version] = true
+				continue
+			}
+			if version == 17 {
+				s.managedInvalid = true
 				applied[version] = true
 				continue
 			}
