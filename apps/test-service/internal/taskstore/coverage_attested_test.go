@@ -209,6 +209,49 @@ func TestAttestedReadRejectsOversizedTextBeforeMaterialization(t *testing.T) {
 	}
 }
 
+func TestAttestedReadRejectsOversizedChildIDsBeforeMaterialization(t *testing.T) {
+	cases := []struct {
+		name, statement string
+	}{
+		{"file line owner", `UPDATE coverage_detail_file_lines SET file_id=? WHERE report_id=?`},
+		{"function line owner", `UPDATE coverage_detail_function_lines SET function_id=? WHERE report_id=?`},
+		{"branch owner", `UPDATE coverage_detail_branches SET function_id=? WHERE report_id=?`},
+		{"gap file owner", `UPDATE coverage_detail_gaps SET file_id=? WHERE report_id=?`},
+		{"gap function owner", `UPDATE coverage_detail_gaps SET function_id=? WHERE report_id=?`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			index := attestedDetailFixture(t, s, 7260+i)
+			if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(tc.statement, strings.Repeat("x", 2<<20), index.ReportID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if err := preflightAttestedRowSizes(ctx, tx, index.ReportID); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("oversized child preflight = %v", err)
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			q := coveragedetail.CurrentIndexQuery{ProjectID: index.ProjectID, ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration}
+			if _, err := s.ReadValidatedCoverageIndex(ctx, q); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("oversized child read = %v", err)
+			}
+		})
+	}
+}
+
 func TestMigration020FailurePreservesLegacyCoverage(t *testing.T) {
 	ctx := context.Background()
 	migrations, err := loadMigrations()
