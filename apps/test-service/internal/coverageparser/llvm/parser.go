@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
 
 const exportType = "llvm.coverage.json.export"
@@ -43,10 +45,11 @@ type parser struct {
 	limits  Limits
 	depth   int64
 
-	files     int64
-	functions int64
-	lineItems int64
-	branches  int64
+	files              int64
+	functions          int64
+	lineItems          int64
+	branches           int64
+	observedLineVisits int64
 }
 
 type rawFile struct {
@@ -82,6 +85,7 @@ type rawFunction struct {
 	count     int64
 	filenames []string
 	regions   []region
+	branches  []branch
 }
 
 type rawExport struct {
@@ -266,7 +270,7 @@ func (p *parser) parseFunction() (rawFunction, error) {
 		"regions": func() error {
 			return p.regionArray(&result.regions)
 		},
-		"branches":     func() error { return p.branchArray() },
+		"branches":     func() error { return p.functionBranchArray(&result.branches) },
 		"mcdc_records": func() error { return p.mcdcRecords() },
 	}, "name", "count", "filenames", "regions", "branches", "mcdc_records")
 	if err == nil && (result.name == "" || len(result.filenames) == 0 || len(result.regions) == 0) {
@@ -377,6 +381,19 @@ func (p *parser) branchArray() error {
 			return err
 		}
 		_, err := p.branch()
+		return err
+	})
+}
+
+func (p *parser) functionBranchArray(destination *[]branch) error {
+	return p.array(func() error {
+		if err := p.increment(&p.branches, p.limits.MaxBranches); err != nil {
+			return err
+		}
+		value, err := p.branch()
+		if err == nil {
+			*destination = append(*destination, value)
+		}
 		return err
 	})
 }
@@ -687,6 +704,7 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 		covered bool
 	}
 	functions := make(map[string]functionState, len(raw.functions))
+	ordinals := make(map[string]int64, len(raw.functions))
 	for _, function := range raw.functions {
 		var identityRegion region
 		hasCodeRegion := false
@@ -715,6 +733,66 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 		}
 		state.covered = state.covered || function.count > 0
 		functions[key] = state
+		observation := coveragedomain.FunctionObservation{
+			LinkageName: function.name, File: path,
+			Start:                coveragedomain.SourceLocation{Line: identityRegion.lineStart, Column: identityRegion.columnStart},
+			End:                  coveragedomain.SourceLocation{Line: identityRegion.lineEnd, Column: identityRegion.columnEnd},
+			ExecutionCount:       function.count,
+			InstantiationOrdinal: ordinals[key],
+		}
+		ordinals[key]++
+		// Function regions, rather than file-wide segment totals, determine
+		// the per-function line counts. Iterate already-bounded executable
+		// lines instead of expanding a potentially enormous source range.
+		lineCounts := make(map[int64]int64)
+		for _, candidate := range function.regions {
+			if candidate.kind != 0 {
+				continue
+			}
+			if candidate.fileID < 0 || candidate.fileID >= int64(len(function.filenames)) {
+				return Export{}, errors.New("function region file ID")
+			}
+			if function.filenames[candidate.fileID] != path {
+				continue
+			}
+			if candidate.lineStart == candidate.lineEnd && candidate.columnStart == candidate.columnEnd {
+				continue
+			}
+			lines := result.Files[fileIndex].Lines
+			start := sort.Search(len(lines), func(i int) bool { return lines[i].Number >= candidate.lineStart })
+			for _, line := range lines[start:] {
+				if line.Number > candidate.lineEnd || line.Number == candidate.lineEnd && candidate.columnEnd == 1 {
+					break
+				}
+				if err := p.increment(&p.observedLineVisits, p.limits.MaxLines); err != nil {
+					return Export{}, err
+				}
+				if count, exists := lineCounts[line.Number]; !exists || candidate.count > count {
+					lineCounts[line.Number] = candidate.count
+				}
+			}
+		}
+		lineNumbers := make([]int64, 0, len(lineCounts))
+		for line := range lineCounts {
+			lineNumbers = append(lineNumbers, line)
+		}
+		sort.Slice(lineNumbers, func(i, j int) bool { return lineNumbers[i] < lineNumbers[j] })
+		for _, line := range lineNumbers {
+			observation.Lines = append(observation.Lines, coveragedomain.LineObservation{Line: line, Count: lineCounts[line]})
+		}
+		for index, value := range function.branches {
+			if value.fileID < 0 || value.fileID >= int64(len(function.filenames)) {
+				return Export{}, errors.New("function branch file ID")
+			}
+			if function.filenames[value.fileID] != path {
+				continue
+			}
+			ordinal := int64(index) * 2
+			observation.Branches = append(observation.Branches,
+				coveragedomain.BranchObservation{Line: value.lineStart, Column: value.columnStart, Ordinal: ordinal, HasOrdinal: true, Count: value.trueCount},
+				coveragedomain.BranchObservation{Line: value.lineStart, Column: value.columnStart, Ordinal: ordinal + 1, HasOrdinal: true, Count: value.falseCount})
+		}
+		result.Files[fileIndex].Observations = append(result.Files[fileIndex].Observations, observation)
 	}
 	for _, function := range functions {
 		metric := &result.Files[function.file].Functions

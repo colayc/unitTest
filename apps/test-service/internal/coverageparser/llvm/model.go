@@ -1,6 +1,10 @@
 package llvm
 
-import "errors"
+import (
+	"errors"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
+)
 
 const maxSafeInteger int64 = 9_007_199_254_740_991
 
@@ -16,9 +20,10 @@ type Export struct {
 }
 
 type File struct {
-	NativePath string
-	Functions  Metric
-	Lines      []Line
+	NativePath   string
+	Functions    Metric
+	Lines        []Line
+	Observations []coveragedomain.FunctionObservation
 }
 
 type Metric struct {

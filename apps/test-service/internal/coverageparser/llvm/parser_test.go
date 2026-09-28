@@ -8,7 +8,104 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
+
+func TestParseLLVMRetainsExactFunctionRange(t *testing.T) {
+	got, err := Parse(bytes.NewReader(readFixture(t, "simple.json")), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []coveragedomain.FunctionObservation{{
+		LinkageName: "?simple@@YAHXZ", File: `C:\workspace\src\simple.cpp`,
+		Start: coveragedomain.SourceLocation{Line: 2, Column: 1},
+		End:   coveragedomain.SourceLocation{Line: 3, Column: 2}, ExecutionCount: 5,
+		Lines: []coveragedomain.LineObservation{{Line: 2, Count: 5}, {Line: 3, Count: 5}},
+	}}
+	if !reflect.DeepEqual(got.Files[0].Observations, want) {
+		t.Fatalf("observations = %#v, want %#v", got.Files[0].Observations, want)
+	}
+}
+
+func TestParseLLVMRetainsTemplateInstancesAndPartialBranches(t *testing.T) {
+	got, err := Parse(bytes.NewReader(readFixture(t, "branches.json")), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := got.Files[0].Observations
+	if len(values) != 2 || values[0].InstantiationOrdinal != 0 || values[1].InstantiationOrdinal != 1 ||
+		values[0].LinkageName != "?branch@@YAHH@Z" || values[1].LinkageName != values[0].LinkageName ||
+		values[0].ExecutionCount != 0 || values[1].ExecutionCount != 7 {
+		t.Fatalf("instantiation observations = %#v", values)
+	}
+	if !reflect.DeepEqual(values[0].Lines, []coveragedomain.LineObservation{{Line: 4, Count: 0}}) ||
+		!reflect.DeepEqual(values[1].Lines, []coveragedomain.LineObservation{{Line: 4, Count: 7}}) {
+		t.Fatalf("per-instance line counts = %#v, %#v", values[0].Lines, values[1].Lines)
+	}
+	if !reflect.DeepEqual(values[1].Branches, []coveragedomain.BranchObservation{
+		{Line: 4, Column: 3, Ordinal: 0, HasOrdinal: true, Count: 1},
+		{Line: 4, Column: 3, Ordinal: 1, HasOrdinal: true, Count: 2},
+	}) {
+		t.Fatalf("per-instance branches = %#v", values[1].Branches)
+	}
+}
+
+func TestParseLLVMDetailFixtureKeepsLinkageAndDoesNotAssignMacroExpansion(t *testing.T) {
+	got, err := Parse(bytes.NewReader(readFixture(t, "detail-observations.json")), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := got.Files[0]
+	if file.Functions != (Metric{Covered: 1, Total: 3}) || len(file.Observations) != 3 {
+		t.Fatalf("function aggregate/observations = %#v", file)
+	}
+	if file.Observations[0].LinkageName != "_ZN2ns4overEi" || file.Observations[1].LinkageName != "_ZN2ns4overEd" ||
+		file.Observations[0].QualifiedName != "" || file.Observations[0].SignatureDigest != "" {
+		t.Fatalf("unsupported demangling/signature inferred: %#v", file.Observations[:2])
+	}
+	if !reflect.DeepEqual(file.Observations[0].Lines, []coveragedomain.LineObservation{{Line: 2, Count: 2}}) ||
+		!reflect.DeepEqual(file.Observations[1].Lines, []coveragedomain.LineObservation{{Line: 3, Count: 0}}) ||
+		len(file.Observations[2].Lines) != 0 {
+		t.Fatalf("macro/empty observations = %#v", file.Observations)
+	}
+}
+
+func TestParseLLVMBoundsExpandedPerFunctionLineObservations(t *testing.T) {
+	simple := string(readFixture(t, "simple.json"))
+	functionStart := strings.Index(simple, `{"name":"?simple@@YAHXZ"`)
+	functionEnd := strings.Index(simple[functionStart:], `],"totals":`)
+	if functionStart < 0 || functionEnd < 0 {
+		t.Fatal("function fixture boundary missing")
+	}
+	function := simple[functionStart : functionStart+functionEnd]
+	encoded := strings.Replace(simple, function+`],"totals":`, strings.Repeat(function+",", 4)+function+`],"totals":`, 1)
+	limits := DefaultLimits()
+	limits.MaxLines = 9 // 4 segment tuples + 5 region tuples, but 10 retained line observations
+	got, err := Parse(strings.NewReader(encoded), limits)
+	if !errors.Is(err, ErrLimitExceeded) || !reflect.DeepEqual(got, Export{}) {
+		t.Fatalf("Parse() = %#v, %v; want bounded failure", got, err)
+	}
+}
+
+func TestParseLLVMDuplicateNativePathsDoNotMultiplyFunctionObservations(t *testing.T) {
+	simple := string(readFixture(t, "simple.json"))
+	start := strings.Index(simple, `{"filename":`)
+	end := strings.Index(simple[start:], `}],"functions":`)
+	if start < 0 || end < 0 {
+		t.Fatal("file fixture boundary missing")
+	}
+	file := simple[start : start+end+1]
+	encoded := strings.Replace(simple, file+`],"functions":`, file+","+file+`],"functions":`, 1)
+	got, err := Parse(strings.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 2 || len(got.Files[0].Observations) != 1 || len(got.Files[1].Observations) != 0 ||
+		got.Files[0].NativePath != got.Files[1].NativePath {
+		t.Fatalf("duplicate path observations = %#v", got.Files)
+	}
+}
 
 func TestParseLLVMExportAcrossChunks(t *testing.T) {
 	encoded := readFixture(t, "simple.json")
@@ -28,6 +125,7 @@ func TestParseLLVMExportAcrossChunks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("chunk %d: Parse() error = %v", chunk, err)
 		}
+		got.Files[0].Observations = nil // aggregate compatibility assertion
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("chunk %d: Parse() = %#v, want %#v", chunk, got, want)
 		}
@@ -46,6 +144,7 @@ func TestParseLLVMBranchesAndFunctionsDeduplicateSemanticIdentities(t *testing.T
 			Number: 4, Count: 7, Branches: Metric{Covered: 2, Total: 4},
 		}},
 	}}}
+	got.Files[0].Observations = nil // aggregate compatibility assertion
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse() = %#v, want %#v", got, want)
 	}
