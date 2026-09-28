@@ -119,3 +119,37 @@ test("late accept responses cannot republish the old preview after a workspace s
   assert.equal(fixture.controller.getState().state, "unavailable");
   assert.equal(fixture.controller.getState().run, undefined);
 });
+
+test("v1.6 managed generation starts only with authoritative function, file, or gap IDs", async () => {
+  const fixture = setup();
+  const requests: any[] = [];
+  fixture.client.getCapabilities = async () => ({ testGeneration: true, managedTests: true });
+  fixture.client.startTestGeneration = async (request: any) => { requests.push(request); return { ...runBase, state: "queued" }; };
+  const functionId = "1".repeat(32);
+  const fileId = "2".repeat(32);
+  const coverageGapId = "3".repeat(32);
+  await fixture.controller.startManaged({ scope: "symbol", functionId });
+  await fixture.controller.startManaged({ scope: "file", fileId });
+  await fixture.controller.startManaged({ scope: "coverage-gap", coverageGapId, coverageReportId: "4".repeat(32) });
+  assert.deepEqual(requests.map(({ scope, functionId, fileId, coverageGapId, coverageReportId }) => ({ scope, functionId, fileId, coverageGapId, coverageReportId })), [
+    { scope: "symbol", functionId, fileId: undefined, coverageGapId: undefined, coverageReportId: undefined },
+    { scope: "file", functionId: undefined, fileId, coverageGapId: undefined, coverageReportId: undefined },
+    { scope: "coverage-gap", functionId: undefined, fileId: undefined, coverageGapId, coverageReportId: "4".repeat(32) }
+  ]);
+  await assert.rejects(() => fixture.controller.startManaged({ scope: "symbol", functionId: "not-an-id" }), /invalid/i);
+  assert.equal(requests.length, 3);
+});
+
+test("managed generation is unavailable on v1.5 and checks trust after an in-flight start", async () => {
+  const old = setup();
+  await assert.rejects(() => old.controller.startManaged({ scope: "file", fileId: "1".repeat(32) }), /v1.6|managed/i);
+  const fixture = setup();
+  fixture.client.getCapabilities = async () => ({ testGeneration: true, managedTests: true });
+  let release: (() => void) | undefined;
+  fixture.client.startTestGeneration = async () => { await new Promise<void>((resolve) => { release = resolve; }); return { ...runBase, state: "queued" }; };
+  const operation = fixture.controller.startManaged({ scope: "file", fileId: "1".repeat(32) });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fixture.setContext({ trust: "blocked-untrusted" });
+  release!();
+  await assert.rejects(operation, /workspace|stale|session/i);
+});

@@ -2,11 +2,14 @@ import { randomBytes } from "node:crypto";
 import {
   TestGenerationFrameworkV15,
   TestGenerationScopeV15,
+  TestGenerationFrameworkV16,
+  TestGenerationScopeV16,
   type TestGenerationAcceptInput,
   type TestGenerationCandidatePageV15,
   type TestGenerationEventPageV15,
   type TestGenerationRunV15,
-  type TestGenerationStartInput
+  type TestGenerationStartInput,
+  type TestGenerationStartInputV16
 } from "@unit-test-ide/test-client";
 import type { TrustState } from "./contracts.js";
 import type { ExtensionGenerationProtocolClient, ExtensionProtocolClient } from "./protocol-client.js";
@@ -21,6 +24,11 @@ export type GenerationSelection = {
   readonly goals?: TestGenerationStartInput["goals"];
   readonly budgets?: TestGenerationStartInput["budgets"];
 };
+
+export type ManagedGenerationSelection =
+  | { readonly scope: "symbol"; readonly functionId: string; readonly fileId?: never; readonly coverageGapId?: never; readonly coverageReportId?: never }
+  | { readonly scope: "file"; readonly fileId: string; readonly functionId?: never; readonly coverageGapId?: never; readonly coverageReportId?: never }
+  | { readonly scope: "coverage-gap"; readonly coverageGapId: string; readonly coverageReportId: string; readonly functionId?: never; readonly fileId?: never };
 
 export interface GenerationContext {
   readonly trust: TrustState;
@@ -127,6 +135,40 @@ export class TestGenerationController {
       this.#setRun(run, epoch);
       await this.refresh();
       return this.getState();
+    } catch (error) {
+      if (operation === this.#operation && this.#state.state !== "unavailable") this.#publish({ state: "failed", detail: errorMessage(error) });
+      throw error;
+    }
+  }
+
+  async startManaged(selection: ManagedGenerationSelection): Promise<TestGenerationControllerState> {
+    this.#assertOpen();
+    const ids = selection.scope === "symbol" ? [selection.functionId] : selection.scope === "file" ? [selection.fileId] : [selection.coverageGapId, selection.coverageReportId];
+    if (ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) throw new Error("Invalid authoritative managed-generation selection ID.");
+    const operation = ++this.#operation;
+    const epoch = ++this.#epoch;
+    const context = this.#assertContext();
+    const client = generationClient(context.client);
+    const capabilities = await client.getCapabilities();
+    this.#assertFresh(epoch, context, client);
+    if (!("managedTests" in capabilities) || capabilities.managedTests !== true || capabilities.testGeneration !== true) throw new Error("Protocol v1.6 managed test generation is unavailable.");
+    const request: TestGenerationStartInputV16 = {
+      ...selection,
+      scope: selection.scope === "symbol" ? TestGenerationScopeV16.Symbol : selection.scope === "file" ? TestGenerationScopeV16.File : TestGenerationScopeV16.CoverageGap,
+      idempotencyKey: randomBytes(16).toString("hex"),
+      projectId: context.projectId!,
+      workspaceGeneration: context.workspaceGeneration!,
+      framework: TestGenerationFrameworkV16.Auto,
+      goals: DEFAULT_GOALS,
+      budgets: DEFAULT_BUDGETS
+    };
+    this.#publish({ state: "starting" });
+    try {
+      const run = await client.startTestGeneration(request);
+      this.#assertCurrent(operation);
+      this.#assertFresh(epoch, context, client);
+      this.#setRun(run as unknown as TestGenerationRunV15, epoch);
+      return this.refresh();
     } catch (error) {
       if (operation === this.#operation && this.#state.state !== "unavailable") this.#publish({ state: "failed", detail: errorMessage(error) });
       throw error;

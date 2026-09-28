@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildGenerationResults, candidateResult, renderGenerationResults } from "../src/test-generation-results.js";
+import { buildGenerationResults, candidateResult, renderGenerationResults, renderManagedRecords } from "../src/test-generation-results.js";
 import type { TestGenerationCandidatePageV15, TestGenerationRunV15 } from "@unit-test-ide/test-client";
 
 const id = "a".repeat(32);
@@ -33,4 +33,11 @@ test("results redact absolute and traversal paths", () => {
   assert.equal(candidateResult(page.items[0]!).plannedEdits[0], "create: <workspace-path>");
   page.items[0]!.plannedEdits[0]!.path = "../outside.cpp";
   assert.equal(candidateResult(page.items[0]!).plannedEdits[0], "create: <workspace-path>");
+});
+
+test("managed maintenance list labels all five states without treating orphaned as a delete", () => {
+  const statuses = ["current", "stale", "conflicted", "orphaned", "invalid"];
+  const rendered = renderManagedRecords(statuses.map((status, index) => ({ caseId: `utc_${String(index).repeat(32)}`, status, fileId: "a".repeat(32), functionId: "b".repeat(32), acceptedDigest: "c".repeat(64), currentDigest: "d".repeat(64) })) as any);
+  for (const status of statuses) assert.match(rendered, new RegExp(`\\[${status}\\]`));
+  assert.doesNotMatch(rendered, /delete|remove/i);
 });

@@ -7,6 +7,7 @@ import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   registerCommands,
   registerCoverageCommands,
+  registerManagedTestCommands,
   registerTestGenerationCommands,
   presentManagerError,
   type CommandContext,
@@ -29,6 +30,7 @@ import {
 import { createVSCodeTestingController } from "./vscode-testing-bridge.js";
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 import { createTestGenerationController, type TestGenerationController } from "./test-generation-controller.js";
+import { ManagedTestReviewController } from "./managed-test-review.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 export const EXTENSION_ACTIVATION_MARKER = "UNIT_TEST_IDE_EXTENSION_ACTIVATED";
@@ -51,11 +53,16 @@ export interface ExtensionHost extends CommandHost {
   openCoverageSource?: (path: string) => void | PromiseLike<void>;
   openCoverageLocation?: (path: string, line: number) => void | PromiseLike<void>;
   setCoverageDetailsAvailable?: (available: boolean) => void | PromiseLike<void>;
+  setManagedTestsAvailable?: (available: boolean) => void | PromiseLike<void>;
+  setManagedReviewReady?: (ready: boolean) => void | PromiseLike<void>;
   createCoverageDetailView?: (tree: CoverageDetailTree) => CoverageDetailView;
   pickCoverageSource?: (sources: readonly CoverageSourceSnapshotV14[]) => CoverageSourceSnapshotV14 | undefined | PromiseLike<CoverageSourceSnapshotV14 | undefined>;
   showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
   confirmGeneration?: (message: string) => boolean | PromiseLike<boolean>;
   openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
+  openManagedCaseDiff?: (title: string, diff: string) => void | PromiseLike<void>;
+  pickManagedConflictChoice?: (caseId: string, choices: readonly ("keep-current" | "use-generated" | "convert-to-manual")[]) => "keep-current" | "use-generated" | "convert-to-manual" | undefined | PromiseLike<"keep-current" | "use-generated" | "convert-to-manual" | undefined>;
+  pickManagedReviewId?: (records: readonly { caseId: string; reviewId: string }[]) => string | undefined | PromiseLike<string | undefined>;
   pickGenerationCandidate?: (candidates: readonly { candidateId: string; kind: string; label: string }[]) => { candidateId: string; kind: string; label: string } | undefined | PromiseLike<{ candidateId: string; kind: string; label: string } | undefined>;
   pickGenerationSelection?: (scope: TestGenerationScopeV15) => unknown | PromiseLike<unknown>;
   workspaceRoot?: () => string | undefined;
@@ -239,6 +246,9 @@ class ExtensionController {
   #decorationPath: string | undefined;
   #detailRefreshEpoch = 0;
   #generationController: TestGenerationController | undefined;
+  #managedReview: ManagedTestReviewController | undefined;
+  #managedCommands: DisposableLike[] = [];
+  #managedRefreshEpoch = 0;
   #generationWorkspaceGeneration = "";
   #generationProjectId = "";
   #testingSessionRoot: string | undefined;
@@ -334,6 +344,15 @@ class ExtensionController {
       })
     });
     this.host.context.subscriptions.push(this.#generationController);
+    this.#managedReview = new ManagedTestReviewController({ readContext: () => ({
+      trust: this.#testingTrust(),
+      client: this.#testingClient(),
+      projectId: this.#testingAdapter?.catalogState?.projectId,
+      workspaceGeneration: this.#testingAdapter?.catalogState?.workspaceGeneration,
+      coverageReportId: this.#coverageController?.getState().reportId
+    }), onStateChanged: (state) => { void this.host.setManagedReviewReady?.(state.canApply); } });
+    void this.host.setManagedTestsAvailable?.(false);
+    void this.host.setManagedReviewReady?.(false);
 
     registerCommands(
       this.host.context,
@@ -531,6 +550,7 @@ class ExtensionController {
 
   #clearCoverageDetails(): void {
     this.#detailRefreshEpoch++;
+    this.#clearManagedCommands();
     this.#detailTree?.invalidate();
     this.#decorationPath = undefined;
     this.#decorations?.clear();
@@ -540,6 +560,7 @@ class ExtensionController {
 
   async #refreshCoverageDetails(): Promise<void> {
     this.#clearCoverageDetails();
+    void this.#refreshManagedCommands();
     if (!this.#detailTree || this.#deactivating) return;
     const epoch = this.#detailRefreshEpoch;
     const available = await this.#detailTree.refresh();
@@ -547,6 +568,25 @@ class ExtensionController {
     await this.host.setCoverageDetailsAvailable?.(true);
     if (epoch !== this.#detailRefreshEpoch) { void this.host.setCoverageDetailsAvailable?.(false); return; }
     this.#detailView?.refresh();
+  }
+
+  #clearManagedCommands(): void {
+    this.#managedRefreshEpoch++;
+    this.#managedReview?.invalidate();
+    for (const command of this.#managedCommands) command.dispose();
+    this.#managedCommands = [];
+    void this.host.setManagedTestsAvailable?.(false);
+    void this.host.setManagedReviewReady?.(false);
+  }
+
+  async #refreshManagedCommands(): Promise<void> {
+    const epoch = this.#managedRefreshEpoch;
+    const review = this.#managedReview;
+    const generation = this.#generationController;
+    if (!review || !generation || this.#deactivating || !await review.available() || epoch !== this.#managedRefreshEpoch || this.#deactivating) return;
+    this.#managedCommands = registerManagedTestCommands(this.host.context, generation, review, this.#status, this.host, this.#output);
+    await this.host.setManagedTestsAvailable?.(true);
+    if (epoch !== this.#managedRefreshEpoch || this.#deactivating) this.#clearManagedCommands();
   }
 
   #filterCoverageDetails(value: CoverageFilter): void {
@@ -641,6 +681,8 @@ function createVSCodeHost(
       editor.revealRange(new vscode.Range(position, position));
     },
     setCoverageDetailsAvailable: (available) => vscode.commands.executeCommand("setContext", "unitTestIde.coverageDetailsAvailable", available),
+    setManagedTestsAvailable: (available) => vscode.commands.executeCommand("setContext", "unitTestIde.managedTestsAvailable", available),
+    setManagedReviewReady: (ready) => vscode.commands.executeCommand("setContext", "unitTestIde.managedReviewReady", ready),
     createCoverageDetailView: (tree) => {
       const changed = new vscode.EventEmitter<CoverageTreeNode | undefined>();
       const provider: vscodeTypes.TreeDataProvider<CoverageTreeNode> = {
@@ -653,6 +695,7 @@ function createVSCodeHost(
           item.id = `${node.kind}:${node.id}:${node.nextCursor ?? ""}`;
           item.description = model.description;
           item.tooltip = model.label;
+          if (node.kind === "file" || node.kind === "function") item.contextValue = `coverage-${node.kind}`;
           if (node.kind === "file" || node.kind === "function") item.command = { title: "Open coverage location", command: "unitTestIde.openCoverageDetail", arguments: [node] };
           if (node.kind === "load-more") item.command = { title: "Load more coverage", command: "unitTestIde.loadMoreCoverageDetails", arguments: [node] };
           return item;
@@ -693,6 +736,19 @@ function createVSCodeHost(
       const document = await vscode.workspace.openTextDocument({ content: diff, language: "diff" });
       await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
       void title;
+    },
+    openManagedCaseDiff: async (title, diff) => {
+      const document = await vscode.workspace.openTextDocument({ content: diff, language: "diff" });
+      await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
+      void title;
+    },
+    pickManagedConflictChoice: async (caseId, choices) => {
+      const picked = await vscode.window.showQuickPick(choices.map((choice) => ({ label: choice, choice })), { placeHolder: `Resolve managed test ${caseId}` });
+      return picked?.choice;
+    },
+    pickManagedReviewId: async (records) => {
+      const picked = await vscode.window.showQuickPick(records.map((record) => ({ label: record.caseId, description: record.reviewId, reviewId: record.reviewId })), { placeHolder: "Select a managed-test review" });
+      return picked?.reviewId;
     },
     pickGenerationCandidate: async (candidates) => {
       const picked = await vscode.window.showQuickPick(

@@ -3,6 +3,7 @@ import type {
   TestGenerationCandidatePageV15,
   TestGenerationRunV15
 } from "@unit-test-ide/test-client";
+import type { ManagedTestRecordV16 } from "@unit-test-ide/test-client";
 
 export interface CoverageSummary {
   readonly functionPercent: number;
@@ -110,4 +111,8 @@ export function renderGenerationResults(model: GenerationResultsModel): string {
   }
   for (const reason of model.unsupportedReasons) lines.push(`Unsupported: ${reason}`);
   return lines.join("\n");
+}
+
+export function renderManagedRecords(records: readonly ManagedTestRecordV16[]): string {
+  return records.map((item) => `[${item.status}] ${item.caseId} · file ${item.fileId} · function ${item.functionId}`).join("\n");
 }

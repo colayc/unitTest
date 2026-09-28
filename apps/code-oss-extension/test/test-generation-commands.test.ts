@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { registerTestGenerationCommands, type CommandContext, type DisposableLike, type OutputChannelLike, type TestGenerationCommandHost, type TestGenerationCommandController, type CommandStatus } from "../src/commands.js";
+import { registerManagedTestCommands, registerTestGenerationCommands, type CommandContext, type DisposableLike, type OutputChannelLike, type TestGenerationCommandHost, type TestGenerationCommandController, type CommandStatus } from "../src/commands.js";
 
 function setup(trust: "trusted" | "blocked-untrusted" = "trusted") {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -89,4 +89,96 @@ test("accept command picks a candidate, binds the displayed preview, and double-
   assert.equal(accept[1], "candidate-1");
   assert.equal((accept[3] as { diffDigest: string }).diffDigest, run.preview.diffDigest);
   assert.equal(fixture.confirmations.length, 2);
+});
+
+test("managed commands use only authoritative IDs and leave the v1.5 command set unchanged", async () => {
+  const fixture = setup();
+  const output: string[] = [];
+  const managedCalls: unknown[] = [];
+  const review: any = {
+    getState: () => ({ review: undefined, choices: {}, canApply: false, applying: false }),
+    async available() { return true; },
+    async list(status?: string) { managedCalls.push(["list", status]); return { items: [{ caseId: `utc_${"a".repeat(32)}`, status: "orphaned", fileId: "b".repeat(32), functionId: "c".repeat(32) }] }; },
+    async load(reviewId: string) { managedCalls.push(["load", reviewId]); return { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId: `utc_${"a".repeat(32)}`, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false }; },
+    choose(caseId: string, choice: string) { managedCalls.push(["choose", caseId, choice]); },
+    async apply(digest: string) { managedCalls.push(["apply", digest]); },
+    reject() { managedCalls.push(["reject"]); }
+  };
+  const managedHost: any = { ...fixture.host, pickManagedConflictChoice: async () => "keep-current", openManagedCaseDiff: async (_title: string, diff: string) => output.push(diff) };
+  const generation = { startManaged: async (selection: unknown) => { managedCalls.push(["generate", selection]); } };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, generation, review, status, managedHost, { appendLine: (line: string) => output.push(line), dispose() {} });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "1".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ fileId: "2".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForCoverageGap")!({ coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) });
+  assert.deepEqual(managedCalls.slice(0, 3), [
+    ["generate", { scope: "symbol", functionId: "1".repeat(32) }],
+    ["generate", { scope: "file", fileId: "2".repeat(32) }],
+    ["generate", { scope: "coverage-gap", coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) }]
+  ]);
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "../wrong" });
+  assert.equal(managedCalls.filter((call) => Array.isArray(call) && call[0] === "generate").length, 3);
+  assert.equal(output.some((line) => line.includes("../wrong")), false);
+});
+
+test("managed review displays case diff and records choices but never applies without a separate explicit command", async () => {
+  const fixture = setup();
+  const calls: unknown[] = [];
+  const reviewId = "c".repeat(32);
+  const caseId = `utc_${"a".repeat(32)}`;
+  let state: any = { review: undefined, choices: {}, canApply: false, applying: false };
+  const review: any = {
+    getState: () => state, available: async () => true, list: async () => ({ items: [] }),
+    load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false }; return state; },
+    choose: (_id: string, choice: string) => { calls.push(choice); state = { ...state, canApply: true }; },
+    markDisplayed: () => state,
+    apply: async (digest: string) => { calls.push(["apply", digest]); }, reject: () => { calls.push("reject"); }
+  };
+  const host: any = { ...fixture.host, pickManagedConflictChoice: async () => "convert-to-manual", openManagedCaseDiff: async (_title: string, diff: string) => { calls.push(["diff", diff]); } };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId });
+  assert.deepEqual(calls, [["diff", "+TEST(foo)\n"], "convert-to-manual"]);
+  await fixture.handlers.get("unitTestIde.applyManagedReview")!();
+  assert.deepEqual(calls.at(-1), ["apply", "d".repeat(64)]);
+});
+
+test("coverage tree context supplies authoritative file and function IDs to managed generation", async () => {
+  const fixture = setup();
+  const starts: unknown[] = [];
+  const review: any = { available: async () => true };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async (value: unknown) => { starts.push(value); } }, review, status, fixture.host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ kind: "file", id: "1".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ kind: "function", id: "2".repeat(32) });
+  assert.deepEqual(starts, [{ scope: "file", fileId: "1".repeat(32) }, { scope: "symbol", functionId: "2".repeat(32) }]);
+});
+
+test("a preview display failure revokes Apply rather than leaving an unseen review armed", async () => {
+  const fixture = setup();
+  let rejected = 0;
+  const review: any = {
+    available: async () => true,
+    load: async () => ({ review: { reviewId: "c".repeat(32), reviewDigest: "d".repeat(64), cases: [{ caseId: `utc_${"a".repeat(32)}`, status: "current", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, canApply: true }),
+    reject: () => { rejected++; },
+    getState: () => ({ review: undefined, canApply: false })
+  };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId: "c".repeat(32) });
+  assert.equal(rejected, 1);
+  assert.match(fixture.errors.at(-1)!, /preview/i);
+});
+
+test("review command reports an in-flight Apply without throwing from local Reject", async () => {
+  const fixture = setup();
+  const review: any = {
+    available: async () => true,
+    load: async () => { throw new Error("already applying"); },
+    reject: () => { throw new Error("already applying"); }
+  };
+  const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
+  await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId: "c".repeat(32) });
+  assert.match(fixture.errors.at(-1)!, /already applying/i);
 });

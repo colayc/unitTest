@@ -1,4 +1,4 @@
-import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
+import type { CoverageSourceSnapshotV14, ManagedTestRecordPageV16 } from "@unit-test-ide/test-client";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { CoverageControllerState } from "./coverage-controller.js";
@@ -6,9 +6,10 @@ import type { CoverageFilter, CoverageTreeNode } from "./coverage-detail-tree.js
 import { openCoverageHtml } from "./coverage-viewer.js";
 import { openCoverageSource as verifyAndOpenCoverageSource } from "./coverage-sources.js";
 import { redactServiceError } from "./service-resources.js";
-import type { GenerationPreviewBinding, GenerationSelection, TestGenerationControllerState } from "./test-generation-controller.js";
-import { createGenerationDiffReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
-import { buildGenerationResults, renderGenerationResults } from "./test-generation-results.js";
+import type { GenerationPreviewBinding, GenerationSelection, ManagedGenerationSelection, TestGenerationControllerState } from "./test-generation-controller.js";
+import { createGenerationDiffReview, createManagedCaseReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
+import { buildGenerationResults, renderGenerationResults, renderManagedRecords } from "./test-generation-results.js";
+import type { ManagedChoice, ManagedReviewState, ManagedStatusFilter } from "./managed-test-review.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
 import { isAbsolute, relative, resolve } from "node:path";
 
@@ -73,6 +74,27 @@ export interface TestGenerationCommandController {
   refresh(): Promise<TestGenerationControllerState>;
   accept(candidateId: string, confirmCharacterization?: boolean, displayed?: GenerationPreviewBinding): Promise<TestGenerationControllerState>;
   cancel(): Promise<TestGenerationControllerState>;
+}
+
+export interface ManagedGenerationCommandController {
+  startManaged(selection: ManagedGenerationSelection): Promise<unknown>;
+}
+
+export interface ManagedReviewCommandController {
+  available(): Promise<boolean>;
+  list(status?: ManagedStatusFilter): Promise<ManagedTestRecordPageV16>;
+  load(reviewId: string): Promise<ManagedReviewState>;
+  getState(): ManagedReviewState;
+  choose(caseId: string, choice: ManagedChoice): ManagedReviewState;
+  markDisplayed(reviewDigest: string): ManagedReviewState;
+  apply(digest: string): Promise<unknown>;
+  reject(): void;
+}
+
+export interface ManagedTestCommandHost extends TestGenerationCommandHost {
+  openManagedCaseDiff?: (title: string, diff: string) => void | PromiseLike<void>;
+  pickManagedConflictChoice?: (caseId: string, choices: readonly ManagedChoice[]) => ManagedChoice | undefined | PromiseLike<ManagedChoice | undefined>;
+  pickManagedReviewId?: (records: readonly { caseId: string; reviewId: string }[]) => string | undefined | PromiseLike<string | undefined>;
 }
 
 export interface CoverageCommandHost extends CommandHost {
@@ -514,4 +536,102 @@ export function registerTestGenerationCommands(
     host.registerCommand("unitTestIde.acceptGeneratedTests", accept),
     host.registerCommand("unitTestIde.cancelTestGeneration", cancel)
   );
+}
+
+const MANAGED_CHOICES = ["keep-current", "use-generated", "convert-to-manual"] as const;
+const MANAGED_STATUSES = new Set<string>(["current", "stale", "conflicted", "orphaned", "invalid"]);
+const ID32 = /^[0-9a-f]{32}$/;
+
+/** Register only while a trusted v1.6 managed-test capability is advertised. */
+export function registerManagedTestCommands(
+  context: CommandContext,
+  generation: ManagedGenerationCommandController,
+  review: ManagedReviewCommandController,
+  status: CommandStatus,
+  host: ManagedTestCommandHost,
+  output: OutputChannelLike
+): DisposableLike[] {
+  const guard = async (): Promise<boolean> => {
+    if (!status.isActive()) return false;
+    const trust = status.refreshTrust();
+    if (trust !== "trusted") { await host.showErrorMessage(BLOCKED_MESSAGES[trust]); return false; }
+    if (!await review.available()) { await host.showErrorMessage("Unit Test: Protocol v1.6 managed tests are unavailable."); return false; }
+    return true;
+  };
+  const generate = async (value: unknown, scope: ManagedGenerationSelection["scope"]): Promise<void> => {
+    if (!await guard()) return;
+    const input = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const functionId = typeof input.functionId === "string" ? input.functionId : input.kind === "function" && typeof input.id === "string" ? input.id : undefined;
+    const fileId = typeof input.fileId === "string" ? input.fileId : input.kind === "file" && typeof input.id === "string" ? input.id : undefined;
+    const selection = scope === "symbol" && functionId && ID32.test(functionId)
+      ? { scope, functionId } as const
+      : scope === "file" && fileId && ID32.test(fileId)
+        ? { scope, fileId } as const
+        : scope === "coverage-gap" && typeof input.coverageGapId === "string" && ID32.test(input.coverageGapId) && typeof input.coverageReportId === "string" && ID32.test(input.coverageReportId)
+          ? { scope, coverageGapId: input.coverageGapId, coverageReportId: input.coverageReportId } as const
+          : undefined;
+    if (!selection) { await host.showErrorMessage("Unit Test: Select a current, authoritative coverage function, file, or gap ID."); return; }
+    try { await generation.startManaged(selection); }
+    catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+  };
+  const list = async (value?: unknown): Promise<void> => {
+    if (!await guard()) return;
+    const statusFilter = typeof value === "string" && MANAGED_STATUSES.has(value) ? value as ManagedStatusFilter : undefined;
+    try { output.appendLine(renderManagedRecords((await review.list(statusFilter)).items)); }
+    catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+  };
+  const showReview = async (value?: unknown): Promise<void> => {
+    if (!await guard()) return;
+    try {
+      const argument = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+      let reviewId = typeof argument.reviewId === "string" && ID32.test(argument.reviewId) ? argument.reviewId : undefined;
+      if (!reviewId && host.pickManagedReviewId) {
+        const page = await review.list("conflicted");
+        reviewId = await host.pickManagedReviewId(page.items.filter((item) => item.reviewId && ID32.test(item.reviewId)).map((item) => ({ caseId: item.caseId, reviewId: item.reviewId! })));
+      }
+      if (!reviewId || !ID32.test(reviewId)) throw new Error("Select an authoritative managed review ID.");
+      const loaded = await review.load(reviewId);
+      for (const item of loaded.review?.cases ?? []) {
+        const display = createManagedCaseReview(item);
+        output.appendLine(`${display.title} [${item.status}] accepted=${display.panes.accepted} current=${display.panes.current} generated=${display.panes.generated}`);
+        if (host.openManagedCaseDiff) await host.openManagedCaseDiff(display.title, redactGenerationDiffPaths(display.content));
+        else if (host.openGenerationDiff) await host.openGenerationDiff(display.title, redactGenerationDiffPaths(display.content));
+        else output.appendLine(redactGenerationDiffPaths(display.content));
+        if (item.status !== "conflicted") continue;
+        const choice = await host.pickManagedConflictChoice?.(item.caseId, MANAGED_CHOICES);
+        if (choice !== undefined) review.choose(item.caseId, choice);
+      }
+      if (loaded.review) review.markDisplayed(loaded.review.reviewDigest);
+      if (!review.getState().canApply) await host.showInformationMessage?.("Unit Test: Resolve every managed-test conflict before Apply.");
+    } catch (error) {
+      try { review.reject(); } catch { /* An Apply already in flight cannot be revoked here. */ }
+      await host.showErrorMessage(redactServiceError(error, []).message);
+    }
+  };
+  const apply = async (): Promise<void> => {
+    if (!await guard()) return;
+    const state = review.getState();
+    if (!state.canApply || !state.review) { await host.showErrorMessage("Unit Test: Resolve and review every managed-test change before Apply."); return; }
+    if (!host.confirmGeneration || !await host.confirmGeneration("Apply this exact managed-test review?")) return;
+    try { await review.apply(state.review.reviewDigest); await host.showInformationMessage?.("Unit Test: Managed-test review applied."); }
+    catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+  };
+  const reject = async (): Promise<void> => {
+    if (!await guard()) return;
+    try {
+      review.reject();
+      await host.showInformationMessage?.("Unit Test: Managed-test review rejected locally; no files were changed.");
+    } catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
+  };
+  const registered = [
+    host.registerCommand("unitTestIde.generateManagedTestsForFunction", (value) => generate(value, "symbol")),
+    host.registerCommand("unitTestIde.generateManagedTestsForFile", (value) => generate(value, "file")),
+    host.registerCommand("unitTestIde.generateManagedTestsForCoverageGap", (value) => generate(value, "coverage-gap")),
+    host.registerCommand("unitTestIde.listManagedTests", list),
+    host.registerCommand("unitTestIde.reviewManagedTests", showReview),
+    host.registerCommand("unitTestIde.applyManagedReview", apply),
+    host.registerCommand("unitTestIde.rejectManagedReview", reject)
+  ];
+  context.subscriptions.push(...registered);
+  return registered;
 }
