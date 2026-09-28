@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionCoverageProtocolClient } from "../src/protocol-client.js";
 import { TestSelectionModeV14 } from "@unit-test-ide/test-client";
+import { supportsDetailedCoverage, supportsManagedTests } from "../src/contracts.js";
 
 const id = "0123456789abcdef0123456789abcdef";
 
@@ -41,4 +42,13 @@ test("extension protocol facade exposes typed coverage and artifact operations",
     "readArtifact"
   ]);
   assert.deepEqual([...bytes], [60, 104, 116, 109, 108, 62]);
+});
+
+test("extension availability requires explicitly advertised v1.6 capabilities", () => {
+  assert.equal(supportsDetailedCoverage({ coverageRun: true, coverageReport: true }), false);
+  assert.equal(supportsManagedTests({ testGeneration: true }), false);
+  assert.equal(supportsDetailedCoverage({ coverageDetails: true }), true);
+  assert.equal(supportsManagedTests({ managedTests: true }), true);
+  assert.equal(supportsDetailedCoverage({ coverageDetails: false }), false);
+  assert.equal(supportsManagedTests({ managedTests: false }), false);
 });

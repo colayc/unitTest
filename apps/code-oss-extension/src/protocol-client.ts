@@ -22,6 +22,21 @@ import type {
   CapabilitiesV13,
   CapabilitiesV14,
   CapabilitiesV15,
+  CapabilitiesV16,
+  CoverageProjectInputV16,
+  CoverageFileListInputV16,
+  CoverageFunctionListInputV16,
+  CoverageLineListInputV16,
+  ManagedTestListInputV16,
+  ManagedReviewGetInputV16,
+  ManagedReviewApplyInputV16,
+  CoverageProjectV16,
+  CoverageFilePageV16,
+  CoverageFunctionPageV16,
+  CoverageLinePageV16,
+  ManagedTestRecordPageV16,
+  ManagedReviewV16,
+  ManagedReviewApplyResultV16,
   TestGenerationAcceptInput,
   TestGenerationCandidateListInput,
   TestGenerationCandidatePageV15,
@@ -33,7 +48,7 @@ import type {
   TestGenerationTargetListV15
 } from "@unit-test-ide/test-client";
 
-export type ExtensionCapabilities = Capabilities | CapabilitiesV11 | CapabilitiesV12 | CapabilitiesV13 | CapabilitiesV14 | CapabilitiesV15;
+export type ExtensionCapabilities = Capabilities | CapabilitiesV11 | CapabilitiesV12 | CapabilitiesV13 | CapabilitiesV14 | CapabilitiesV15 | CapabilitiesV16;
 
 export interface ExtensionGenerationProtocolClient {
   getCapabilities(): Promise<ExtensionCapabilities>;
@@ -55,6 +70,19 @@ export interface ExtensionCoverageProtocolClient {
   readArtifact(artifactId: string): Promise<Uint8Array>;
 }
 
+export interface ExtensionCoverageDetailsProtocolClient {
+  getCoverageProject(input: CoverageProjectInputV16): Promise<CoverageProjectV16>;
+  listCoverageFiles(input: CoverageFileListInputV16): Promise<CoverageFilePageV16>;
+  listCoverageFunctions(input: CoverageFunctionListInputV16): Promise<CoverageFunctionPageV16>;
+  listCoverageLines(input: CoverageLineListInputV16): Promise<CoverageLinePageV16>;
+}
+
+export interface ExtensionManagedProtocolClient {
+  listManagedTests(input: ManagedTestListInputV16): Promise<ManagedTestRecordPageV16>;
+  getManagedReview(input: ManagedReviewGetInputV16): Promise<ManagedReviewV16>;
+  applyManagedReview(input: ManagedReviewApplyInputV16): Promise<ManagedReviewApplyResultV16>;
+}
+
 export interface ExtensionProtocolClient {
   inspectWorkspace(): Promise<WorkspaceSnapshot>;
   discoverTests(input: TestDiscoveryInput): ReturnType<ProtocolClient["discoverTests"]>;
@@ -67,6 +95,13 @@ export interface ExtensionProtocolClient {
   getCoverageReport?: ExtensionCoverageProtocolClient["getCoverageReport"];
   listArtifacts?: ExtensionCoverageProtocolClient["listArtifacts"];
   readArtifact?: ExtensionCoverageProtocolClient["readArtifact"];
+  getCoverageProject?: ExtensionCoverageDetailsProtocolClient["getCoverageProject"];
+  listCoverageFiles?: ExtensionCoverageDetailsProtocolClient["listCoverageFiles"];
+  listCoverageFunctions?: ExtensionCoverageDetailsProtocolClient["listCoverageFunctions"];
+  listCoverageLines?: ExtensionCoverageDetailsProtocolClient["listCoverageLines"];
+  listManagedTests?: ExtensionManagedProtocolClient["listManagedTests"];
+  getManagedReview?: ExtensionManagedProtocolClient["getManagedReview"];
+  applyManagedReview?: ExtensionManagedProtocolClient["applyManagedReview"];
   getCapabilities?: ExtensionGenerationProtocolClient["getCapabilities"];
   listTestGenerationTargets?: ExtensionGenerationProtocolClient["listTestGenerationTargets"];
   startTestGeneration?: ExtensionGenerationProtocolClient["startTestGeneration"];

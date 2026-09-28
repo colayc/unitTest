@@ -7,7 +7,7 @@ import { MAX_MESSAGE_BYTES } from "./client.js";
 import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
-import { ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
+import { ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
@@ -29,6 +29,33 @@ const CONTAINER_ID = `utid-v1-${"8".repeat(64)}`;
 const ITEM_ID = `utid-v1-${"9".repeat(64)}`;
 const SENT_AT = "2026-07-21T00:00:00Z";
 const CLIENT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const FILE_ID = "c".repeat(32);
+const FUNCTION_ID = "d".repeat(32);
+const REVIEW_ID = "e".repeat(32);
+const REVIEW_DIGEST = "f".repeat(64);
+const CASE_ID = `utc_${"1".repeat(32)}`;
+
+function capabilitiesV16(overrides: JsonObject = {}): JsonObject {
+  return {
+    workspaceInspect: true, targetList: true, cmakeBuild: true, testDiscovery: true, testRun: true,
+    frameworkAdapters: [], opaqueCTestFallback: true, ctestJson: true,
+    maxRepeatCount: 100, maxSelectionSize: 100000, maxCatalogPageSize: 1000,
+    unityHelperContractVersion: "1", unityRunnerContractVersion: "utide.runner.v1",
+    coverageRun: true, coverageReport: true, maxCoveragePageSize: 200,
+    maxCoverageTimeoutMs: 86400000, testGeneration: true, maxTestGenerationCandidates: 1000,
+    coverageDetails: true, managedTests: true, maxCoverageDetailPageSize: 200,
+    maxCoverageLinePageSize: 1000, maxManagedTestPageSize: 200,
+    ...overrides
+  };
+}
+
+function detailSummary(): JsonObject {
+  return {
+    lines: { covered: 2, total: 3, coveredDelta: 1 },
+    branches: { covered: 1, total: 2, coveredDelta: -1 },
+    functions: { covered: 1, total: 1, coveredDelta: 0 }
+  };
+}
 
 function pair(emitClose = true): [Duplex, Duplex] {
   const leftToRight = new PassThrough();
@@ -376,6 +403,214 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
   old.client.close();
 });
 
+test("protocol 1.6 negotiates and routes detailed coverage and managed review with bound data", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6");
+    if (request.method === "capabilities/get") return response(request, capabilitiesV16(), "1.6");
+    const payloads: Record<string, JsonObject> = {
+      "coverage/details/project/get": {
+        workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, projectId: "core",
+        status: "current", reasons: [], summary: detailSummary(), fileCount: 1
+      },
+      "coverage/details/files/list": {
+        workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+        items: [{ fileId: FILE_ID, relativePath: "src/a.cpp", sourceSha256: "a".repeat(64),
+          status: "current", reasons: [], summary: detailSummary(), functionCount: 1 }], nextCursor: "next-file"
+      },
+      "coverage/details/functions/list": {
+        workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+        items: [{ functionId: FUNCTION_ID, fileId: FILE_ID, qualifiedName: "core::add", startLine: 3, endLine: 6,
+          status: "current", reasons: [], summary: detailSummary() }]
+      },
+      "coverage/details/lines/list": {
+        workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+        items: [{ line: 3, count: 4, baselineCount: 2, branchesCovered: 1, branchesTotal: 2,
+          baselineBranchesCovered: 0, baselineBranchesTotal: 2 }]
+      },
+      "managedTests/records/list": {
+        workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+        items: [{ caseId: CASE_ID, fileId: FILE_ID, functionId: FUNCTION_ID, status: "current",
+          acceptedDigest: "a".repeat(64), currentDigest: "a".repeat(64) }]
+      },
+      "managedTests/reviews/get": {
+        reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, workspaceGeneration: WORKSPACE_GENERATION,
+        coverageReportId: REPORT_ID, cases: [{ caseId: CASE_ID, status: "conflicted",
+          acceptedDigest: "a".repeat(64), currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), diff: "@@" }]
+      },
+      "managedTests/reviews/apply": { reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, applied: true }
+    };
+    return response(request, payloads[String(request.method)]!, "1.6");
+  });
+  const negotiated = await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  assert.equal(negotiated.negotiatedProtocolVersion, "1.6");
+  const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID };
+  assert.equal((await fixture.client.getCoverageProject({ ...context, projectId: "core" })).summary.branches.coveredDelta, -1);
+  assert.equal((await fixture.client.listCoverageFiles({ ...context, projectId: "core", limit: 1 })).nextCursor, "next-file");
+  assert.equal((await fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })).items[0]?.functionId, FUNCTION_ID);
+  assert.equal((await fixture.client.listCoverageLines({ ...context, functionId: FUNCTION_ID })).items[0]?.baselineCount, 2);
+  assert.equal((await fixture.client.listManagedTests({ ...context, projectId: "core" })).items[0]?.caseId, CASE_ID);
+  assert.equal((await fixture.client.getManagedReview({ reviewId: REVIEW_ID })).cases[0]?.status, "conflicted");
+  assert.equal((await fixture.client.applyManagedReview({ reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
+    resolutions: [{ caseId: CASE_ID, choice: ManagedConflictChoiceV16.KeepCurrent }] })).applied, true);
+  assert.deepEqual(fixture.requests.filter((request) => String(request.method).includes("details/") || String(request.method).startsWith("managedTests/"))
+    .map((request) => request.method), [
+    "coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list",
+    "coverage/details/lines/list", "managedTests/records/list", "managedTests/reviews/get", "managedTests/reviews/apply"
+  ]);
+  fixture.client.close();
+});
+
+test("protocol 1.6 keeps pre-existing coverage and generation queries callable", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+    : request.method === "coverage/reports/get" ? response(request, coverageReport(), "1.6")
+    : response(request, { runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
+      projectId: "core", state: "queued", createdAt: SENT_AT, lastSequence: 0 }, "1.6"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  assert.equal((await fixture.client.getCoverageReport(REPORT_ID)).reportId, REPORT_ID);
+  assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).runId, RUN_ID);
+  fixture.client.close();
+});
+
+test("protocol 1.6 blocks new methods after downgrade or invalid capabilities", async () => {
+  for (const version of ["1.5", "1.6"] as const) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: version, serviceVersion: "0.7.0" }, version)
+      : response(request, capabilitiesV16({ coverageDetails: false, managedTests: false }), version));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+    const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, projectId: "core" };
+    await assert.rejects(() => fixture.client.getCoverageProject(context),
+      version === "1.5" ? /feature unavailable|protocol 1.6/i : /invalid protocol message/i);
+    if (version === "1.5") {
+      await assert.rejects(() => fixture.client.listManagedTests(context), /feature unavailable|protocol 1.6/i);
+    }
+    assert.equal(fixture.requests.some((request) => String(request.method).startsWith("managedTests/")), false);
+    fixture.client.close();
+  }
+});
+
+test("protocol 1.6 rejects malformed detail and review data and request duplicates", async () => {
+  const invalidPages: Array<[string, JsonObject]> = [
+    ["coverage/details/project/get", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+      projectId: "core", status: "surprise", reasons: [], summary: detailSummary(), fileCount: 1 }],
+    ["coverage/details/files/list", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+      items: [{ fileId: FILE_ID, relativePath: "src/a.cpp", sourceSha256: "a".repeat(64), status: "current",
+        reasons: [], summary: { ...detailSummary(), lines: { covered: Number.MAX_SAFE_INTEGER + 1, total: 3, coveredDelta: 0 } }, functionCount: 1 }] }],
+    ["coverage/details/functions/list", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+      items: [{ functionId: FUNCTION_ID, fileId: FILE_ID, qualifiedName: "f", startLine: 1, endLine: 2,
+        status: "current", reasons: ["invented"], summary: detailSummary() }] }],
+    ["managedTests/records/list", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+      items: [{ caseId: CASE_ID, fileId: FILE_ID, functionId: FUNCTION_ID, status: "current",
+        acceptedDigest: "a".repeat(64), currentDigest: "a".repeat(64) },
+      { caseId: CASE_ID, fileId: FILE_ID, functionId: FUNCTION_ID, status: "current",
+        acceptedDigest: "a".repeat(64), currentDigest: "a".repeat(64) }] }],
+    ["managedTests/reviews/get", { reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
+      workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, cases: [
+        { caseId: CASE_ID, status: "conflicted", acceptedDigest: "a".repeat(64), currentDigest: "b".repeat(64),
+          generatedDigest: "c".repeat(64), diff: "changed" }] }]
+  ];
+  for (const [method, payload] of invalidPages) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+      : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+      : response(request, method === "managedTests/reviews/get" ? { ...payload, reviewDigest: "x".repeat(64) } : payload, "1.6"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+    const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID };
+    const call = method === "coverage/details/project/get" ? () => fixture.client.getCoverageProject({ ...context, projectId: "core" })
+      : method === "coverage/details/files/list" ? () => fixture.client.listCoverageFiles({ ...context, projectId: "core" })
+      : method === "coverage/details/functions/list" ? () => fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })
+      : method === "managedTests/records/list" ? () => fixture.client.listManagedTests({ ...context, projectId: "core" })
+      : () => fixture.client.getManagedReview({ reviewId: REVIEW_ID });
+    await assert.rejects(call);
+    fixture.client.close();
+  }
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+    : response(request, capabilitiesV16(), "1.6"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  await assert.rejects(() => fixture.client.applyManagedReview({ reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
+    resolutions: [{ caseId: CASE_ID, choice: ManagedConflictChoiceV16.KeepCurrent },
+      { caseId: CASE_ID, choice: ManagedConflictChoiceV16.UseGenerated }] }), /duplicate/i);
+  assert.equal(fixture.requests.some((request) => request.method === "managedTests/reviews/apply"), false);
+  fixture.client.close();
+});
+
+test("protocol 1.6 rejects cross-report pages and review apply digest mismatches", async () => {
+  for (const [method, payload] of [
+    ["coverage/details/project/get", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: ARTIFACT_ID,
+      projectId: "core", status: "current", reasons: [], summary: detailSummary(), fileCount: 0 }],
+    ["coverage/details/files/list", { workspaceGeneration: "3".repeat(64), coverageReportId: REPORT_ID, items: [] }],
+    ["managedTests/records/list", { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: ARTIFACT_ID, items: [] }],
+    ["managedTests/reviews/apply", { reviewId: REVIEW_ID, reviewDigest: "a".repeat(64), applied: true }]
+  ] as const) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+      : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+      : response(request, payload, "1.6"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+    const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, projectId: "core" };
+    const call = method === "coverage/details/project/get" ? () => fixture.client.getCoverageProject(context)
+      : method === "coverage/details/files/list" ? () => fixture.client.listCoverageFiles(context)
+      : method === "managedTests/records/list" ? () => fixture.client.listManagedTests(context)
+      : () => fixture.client.applyManagedReview({ reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
+        resolutions: [{ caseId: CASE_ID, choice: ManagedConflictChoiceV16.KeepCurrent }] });
+    await assert.rejects(call, /mismatch|does not match/i);
+    fixture.client.close();
+  }
+});
+
+test("protocol 1.6 binds responses to the sent request snapshot, not caller mutation", async () => {
+  const input = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, projectId: "core" };
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6");
+    if (request.method === "capabilities/get") return response(request, capabilitiesV16(), "1.6");
+    input.coverageReportId = ARTIFACT_ID;
+    input.projectId = "other";
+    return response(request, { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID,
+      projectId: "core", status: "current", reasons: [], summary: detailSummary(), fileCount: 0 }, "1.6");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  assert.equal((await fixture.client.getCoverageProject(input)).projectId, "core");
+  fixture.client.close();
+});
+
+test("protocol 1.6 rejects a review cursor page from a changed review digest", async () => {
+  let page = 0;
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6");
+    if (request.method === "capabilities/get") return response(request, capabilitiesV16(), "1.6");
+    page++;
+    return response(request, {
+      reviewId: REVIEW_ID, reviewDigest: page === 1 ? REVIEW_DIGEST : "a".repeat(64),
+      workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, cases: [],
+      ...(page === 1 ? { nextCursor: "page-2" } : {})
+    }, "1.6");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  assert.equal((await fixture.client.getManagedReview({ reviewId: REVIEW_ID })).nextCursor, "page-2");
+  await assert.rejects(() => fixture.client.getManagedReview({ reviewId: REVIEW_ID, cursor: "page-2" }), /digest|binding/i);
+  fixture.client.close();
+});
+
+test("protocol 1.6 rejects a response over 2 MiB", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6"))}\n`);
+    } else if (request.method === "capabilities/get") {
+      serverStream.write(`${JSON.stringify(response(request, capabilitiesV16(), "1.6"))}\n`);
+    } else {
+      serverStream.write(`${"x".repeat(MAX_MESSAGE_BYTES + 1)}\n`);
+    }
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.7.0");
+  await assert.rejects(() => client.listCoverageFiles({ workspaceGeneration: WORKSPACE_GENERATION,
+    coverageReportId: REPORT_ID, projectId: "core" }), /2 MiB/);
+  client.close();
+});
+
 test("protocol 1.5 client decodes an escape-heavy preview over 1 MiB", async () => {
   const diff = "--- a/tests/generated.cpp\n+++ b/tests/generated.cpp\n@@ -0,0 +1 @@\n+" + "\u0000".repeat(261_000) + "\n";
   const run = {
@@ -567,7 +802,7 @@ test("protocol 1.5 keeps common capabilities and artifact listing typed", async 
   fixture.client.close();
 });
 
-test("client prefers protocol 1.5 and accepts negotiated downgrades", async () => {
+test("client prefers protocol 1.6 and accepts negotiated downgrades", async () => {
   for (const negotiated of ["1.5", "1.4", "1.3", "1.2", "1.1"] as const) {
     const fixture = scriptedClient((request) => response(request, {
       negotiatedProtocolVersion: negotiated,
@@ -575,18 +810,18 @@ test("client prefers protocol 1.5 and accepts negotiated downgrades", async () =
     }, negotiated));
     const result = await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
     assert.equal(result.negotiatedProtocolVersion, negotiated);
-    assert.equal(fixture.requests[0]?.protocolVersion, "1.5");
-    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
+    assert.equal(fixture.requests[0]?.protocolVersion, "1.6");
+    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
     fixture.client.close();
   }
 });
 
-test("client retries legacy services from the v1.5 ceiling", async () => {
+test("client retries legacy services from the v1.6 ceiling", async () => {
   const fixture = scriptedClient((request) => request.protocolVersion === "1.2"
     ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
     : error(request, "UNSUPPORTED_PROTOCOL", false, "1.0"));
   await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.5", "1.4", "1.3", "1.2"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.6", "1.5", "1.4", "1.3", "1.2"]);
   fixture.client.close();
 });
 
@@ -1809,7 +2044,7 @@ test("legacy unsupported handshake retries do not lock the event version", async
   try {
     const negotiated = await client.handshake("0123456789abcdef", "test", "0.5.0");
     assert.equal(negotiated.negotiatedProtocolVersion, "1.2");
-    assert.deepEqual(handshakeVersions, ["1.5", "1.4", "1.3", "1.2"]);
+    assert.deepEqual(handshakeVersions, ["1.6", "1.5", "1.4", "1.3", "1.2"]);
     const subscription = await client.subscribeEvents(0);
     const event = (await take(subscription, 1))[0];
     assert.equal(event?.protocolVersion, "1.2");
@@ -2085,7 +2320,7 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
 });
 
 test("client exposes stable server error codes", async () => {
-  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.5"));
+  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.6"));
   await assert.rejects(
     () => client.handshake("wrong-token-value", "test", "0.1.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
@@ -2184,15 +2419,15 @@ test("client falls back to an exact 1.0 handshake", async () => {
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
   assert.deepEqual(
     fixture.requests.map(({ protocolVersion }) => protocolVersion),
-    ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
+    ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
   );
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
-    supportedProtocolVersions: ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
+    supportedProtocolVersions: ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
   });
-  assert.equal("supportedProtocolVersions" in (fixture.requests[5]?.payload as JsonObject), false);
+  assert.equal("supportedProtocolVersions" in (fixture.requests[6]?.payload as JsonObject), false);
   fixture.client.close();
 });
 
@@ -2236,7 +2471,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
   let handshakeCount = 0;
   const fixture = scriptedClient((request) => {
     handshakeCount++;
-    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.5");
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.6");
     if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
@@ -2248,7 +2483,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     /protocol version/
   );
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.5", "1.5"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.6", "1.6"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {
@@ -2746,7 +2981,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
   assert.equal(calls, 2);
-  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(requests[1]?.[1]?.payload, { afterSequence: 4 });
 
   first[1].write(`${JSON.stringify(taskEvent(5, "task.output", { payload: { old: true } }))}\n`);
