@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
@@ -31,13 +32,25 @@ type CandidateSet struct {
 	SymbolID                                      string
 	Files                                         []testgenrender.StagedFile
 	Diff                                          string
+	Managed                                       *ManagedCandidateSet
 }
+
+type ManagedCandidateSet struct {
+	ReviewID, ToolchainID, ValidationReceiptDigest, CMakePath string
+	ValidationReceipt                                         []byte
+	Inputs                                                    []managedtest.ReconcileInput
+	Records                                                   []managedtest.Record
+}
+
+type Plan = PublishPlan
 
 type PlannedEdit struct{ Path, BeforeDigest, AfterDigest string }
 type PublishPlan struct {
-	RunID, CandidateSetDigest, SnapshotDigest                    string
-	Diff, DiffDigest, ConfirmationDigest, CharacterizationDigest string
-	Edits                                                        []PlannedEdit
+	RunID, CandidateSetDigest, SnapshotDigest                                          string
+	Diff, DiffDigest, ConfirmationDigest, CharacterizationDigest                       string
+	Edits                                                                              []PlannedEdit
+	ManagedReadOnly                                                                    []PlannedEdit
+	ManagedReviewID, ManagedReviewDigest, ManagedDecisionDigest, ManagedEvidenceDigest string
 }
 
 type preparedFile struct {
@@ -49,8 +62,9 @@ type preparedFile struct {
 	identity os.FileInfo
 }
 type preparedPlan struct {
-	public PublishPlan
-	files  []preparedFile
+	public  PublishPlan
+	files   []preparedFile
+	managed *managedPublication
 }
 
 func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
@@ -96,7 +110,14 @@ func cmakePath(s string) bool {
 }
 
 func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, error) {
-	if p == nil || ctx == nil || p.root == nil || p.verify == nil || !validHex(set.RunID, 32) || !validHex(set.SnapshotDigest, 64) || len(set.CaseIDs) == 0 || len(set.CaseIDs) > 1000 || len(set.Files) < 2 || len(set.Files) > maxFiles || !identifier.MatchString(set.TestTarget) || !identifier.MatchString(set.ProductionTarget) || !identifier.MatchString(set.FrameworkTarget) || set.TestTarget == set.ProductionTarget || set.TestTarget == set.FrameworkTarget || set.ProductionTarget == set.FrameworkTarget || (set.FrameworkTarget != "CppUTest" && set.FrameworkTarget != "Unity" && set.FrameworkTarget != "unity") || ((set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !validHex(set.SymbolID, 64)) {
+	if set.Managed != nil {
+		return PublishPlan{}, ErrInvalidPlan
+	}
+	return p.plan(ctx, set, false)
+}
+
+func (p *Publisher) plan(ctx context.Context, set CandidateSet, managed bool) (PublishPlan, error) {
+	if p == nil || ctx == nil || p.root == nil || p.verify == nil || !validHex(set.RunID, 32) || !validHex(set.SnapshotDigest, 64) || len(set.CaseIDs) == 0 || len(set.CaseIDs) > 1000 || len(set.Files) < 2 && !managed || len(set.Files) < 1 || len(set.Files) > maxFiles || !identifier.MatchString(set.TestTarget) || !identifier.MatchString(set.ProductionTarget) || !identifier.MatchString(set.FrameworkTarget) || set.TestTarget == set.ProductionTarget || set.TestTarget == set.FrameworkTarget || set.ProductionTarget == set.FrameworkTarget || (set.FrameworkTarget != "CppUTest" && set.FrameworkTarget != "Unity" && set.FrameworkTarget != "unity") || ((set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !validHex(set.SymbolID, 64)) {
 		return PublishPlan{}, ErrInvalidPlan
 	}
 	if err := ctx.Err(); err != nil {
@@ -155,10 +176,20 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 		}
 		files = append(files, preparedFile{edit: PlannedEdit{Path: edit.Path, BeforeDigest: edit.BeforeDigest, AfterDigest: edit.AfterDigest}, after: append([]byte(nil), edit.Content...), before: before, mode: mode, existed: exists, identity: identity})
 	}
-	if cmakeIndex < 0 {
+	if cmakeIndex < 0 && !managed {
 		return PublishPlan{}, ErrInvalidPlan
 	}
-	cmake := files[cmakeIndex]
+	cmakeFile := ""
+	var cmake preparedFile
+	if cmakeIndex >= 0 {
+		cmake = files[cmakeIndex]
+		cmakeFile = cmake.edit.Path
+	} else if set.Managed != nil {
+		cmakeFile = set.Managed.CMakePath
+	}
+	if !cmakePath(cmakeFile) {
+		return PublishPlan{}, ErrInvalidPlan
+	}
 	sources := []string{}
 	for i, file := range files {
 		if i == cmakeIndex {
@@ -170,13 +201,13 @@ func (p *Publisher) Plan(ctx context.Context, set CandidateSet) (PublishPlan, er
 		if (set.FrameworkTarget == "Unity" || set.FrameworkTarget == "unity") && !strings.HasSuffix(file.edit.Path, ".c") || set.FrameworkTarget == "CppUTest" && !strings.HasSuffix(file.edit.Path, ".cpp") {
 			return PublishPlan{}, ErrInvalidPlan
 		}
-		ref, ok := cmakeSourceRef(cmake.edit.Path, file.edit.Path)
+		ref, ok := cmakeSourceRef(cmakeFile, file.edit.Path)
 		if !ok {
 			return PublishPlan{}, ErrInvalidPlan
 		}
 		sources = append(sources, ref)
 	}
-	if !validCMakePatch(string(cmake.before), string(cmake.after), set, sources) {
+	if cmakeIndex >= 0 && !validCMakePatch(string(cmake.before), string(cmake.after), set, sources) {
 		return PublishPlan{}, ErrInvalidPlan
 	}
 	// Preserve the renderer's source-first order for the canonical unified diff.

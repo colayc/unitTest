@@ -6,6 +6,8 @@ import "encoding/json"
 type Receipt struct {
 	RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string
 	Edits                                                                                             []PlannedEdit
+	ManagedReadOnly                                                                                   []PlannedEdit
+	ManagedReviewID, ManagedReviewDigest, ManagedDecisionDigest, ManagedEvidenceDigest                string
 }
 
 func (r Receipt) String() string { data, _ := json.Marshal(r); return string(data) }

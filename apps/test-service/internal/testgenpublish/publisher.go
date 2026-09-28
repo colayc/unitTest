@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unit-test-ide.local/test-service/internal/managedtest"
 )
 
 type SnapshotVerifier func(context.Context, string) error
@@ -29,11 +30,16 @@ type publisherHooks struct {
 	cleanupRemove      func(string) error
 }
 type Publisher struct {
-	root, journal *os.Root
-	verify        SnapshotVerifier
-	mu            sync.Mutex
-	plans         map[string]preparedPlan
-	hooks         publisherHooks
+	root, journal   *os.Root
+	verify          SnapshotVerifier
+	mu              sync.Mutex
+	plans           map[string]preparedPlan
+	hooks           publisherHooks
+	ManagedRegistry interface {
+		managedtest.Registry
+		managedtest.AcceptanceJournal
+		managedtest.RetirementRegistry
+	}
 }
 
 type journalFile struct {
@@ -54,6 +60,8 @@ type journalRecord struct {
 	Receipt            Receipt
 	Files              []journalFile
 	CreatedDirs        []string
+	ManagedAcceptances []managedtest.Acceptance `json:",omitempty"`
+	ManagedRetirements []managedtest.Retirement `json:",omitempty"`
 }
 
 var errMissingParent = errors.New("missing generated-test directory")
@@ -241,6 +249,10 @@ func exactEntryAlias(parent *os.Root, name string) bool {
 }
 
 func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, error) {
+	return p.accept(ctx, req, false)
+}
+
+func (p *Publisher) accept(ctx context.Context, req AcceptRequest, managed bool) (Receipt, error) {
 	if p == nil || ctx == nil || !validHex(req.RunID, 32) || !validHex(req.CandidateSetDigest, 64) || !validHex(req.SnapshotDigest, 64) || !validHex(req.DiffDigest, 64) || !validHex(req.ConfirmationDigest, 64) || req.CharacterizationDigest != "" && !validHex(req.CharacterizationDigest, 64) {
 		return Receipt{}, ErrConflict
 	}
@@ -255,6 +267,9 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	if receipt, exists, err := p.readReceipt(req.ConfirmationDigest); err != nil {
 		return Receipt{}, err
 	} else if exists {
+		if managed != (receipt.ManagedReviewDigest != "") {
+			return Receipt{}, ErrConflict
+		}
 		if !matchesReceiptRequest(receipt, req) || p.verifyReceiptCurrent(receipt) != nil {
 			return Receipt{}, ErrConflict
 		}
@@ -266,13 +281,20 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 		return receipt, nil
 	}
 	plan, ok := p.plans[req.ConfirmationDigest]
-	if !ok || !matchesRequest(plan.public, req) {
+	if !ok || !matchesRequest(plan.public, req) || managed != (plan.managed != nil) {
+		return Receipt{}, ErrConflict
+	}
+	if managed && p.verifyManagedSources(plan.managed.sources) != nil {
 		return Receipt{}, ErrConflict
 	}
 	if err := p.verifyCurrent(plan.files, false); err != nil {
 		return Receipt{}, err
 	}
 	journal := journalRecord{Version: 1, ConfirmationDigest: req.ConfirmationDigest, Receipt: receiptFor(plan.public)}
+	if managed {
+		journal.ManagedAcceptances = append([]managedtest.Acceptance(nil), plan.managed.acceptances...)
+		journal.ManagedRetirements = append([]managedtest.Retirement(nil), plan.managed.retirements...)
+	}
 	created, err := p.missingDirectories(plan.files)
 	if err != nil {
 		return Receipt{}, err
@@ -290,11 +312,21 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	}
 	rollback := func(cause error) (Receipt, error) {
 		recoverErr := p.rollback(journal)
+		if recoverErr == nil && managed {
+			recoverErr = p.resolveManagedRollback(context.Background(), journal)
+		}
 		if recoverErr == nil {
 			_ = p.journal.Remove(journalName(req.ConfirmationDigest))
 			return Receipt{}, cause
 		}
 		return Receipt{}, errors.Join(cause, recoverErr, ErrRecoveryRequired)
+	}
+	if managed {
+		for _, acceptance := range journal.ManagedAcceptances {
+			if err := p.ManagedRegistry.BeginManagedAcceptance(ctx, acceptance); err != nil {
+				return rollback(err)
+			}
+		}
 	}
 	for i, file := range plan.files {
 		stage := "stage-first"
@@ -314,6 +346,9 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	if err := p.verifyCurrent(plan.files, false); err != nil {
 		return rollback(err)
 	}
+	if managed && p.verifyManagedSources(plan.managed.sources) != nil {
+		return rollback(ErrConflict)
+	}
 	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
 		return rollback(ErrConflict)
 	}
@@ -329,6 +364,9 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 			return rollback(err)
 		}
 		if err := p.verify(ctx, req.SnapshotDigest); err != nil {
+			return rollback(ErrConflict)
+		}
+		if managed && p.verifyManagedSources(plan.managed.sources) != nil {
 			return rollback(ErrConflict)
 		}
 		if err := p.commitFile(&journal.Files[i], plan.files[i]); err != nil {
@@ -347,11 +385,26 @@ func (p *Publisher) Accept(ctx context.Context, req AcceptRequest) (Receipt, err
 	if err := p.verify(ctx, req.SnapshotDigest); err != nil {
 		return rollback(ErrConflict)
 	}
+	if managed && p.verifyManagedSources(plan.managed.sources) != nil {
+		return rollback(ErrConflict)
+	}
 	if err := p.fail("cleanup"); err != nil {
 		return rollback(err)
 	}
+	if managed {
+		for _, acceptance := range journal.ManagedAcceptances {
+			if err := p.ManagedRegistry.MarkManagedFileWritten(ctx, acceptance.AcceptanceID, acceptance.PublishedFileDigest); err != nil {
+				return rollback(err)
+			}
+		}
+	}
 	if err := p.writeReceipt(journal.Receipt); err != nil {
 		return rollback(err)
+	}
+	if managed {
+		if err := p.finalizeManaged(context.Background(), journal); err != nil {
+			return journal.Receipt, errors.Join(ErrRecoveryRequired, err)
+		}
 	}
 	// A durable receipt marks commit. Leftover backups/journal are safely cleaned on restart.
 	if err := p.cleanupCommitted(journal); err != nil {
@@ -395,16 +448,26 @@ func matchesReceiptRequest(p Receipt, r AcceptRequest) bool {
 	return p.RunID == r.RunID && p.CandidateSetDigest == r.CandidateSetDigest && p.SnapshotDigest == r.SnapshotDigest && p.DiffDigest == r.DiffDigest && p.ConfirmationDigest == r.ConfirmationDigest && p.CharacterizationDigest == r.CharacterizationDigest
 }
 func receiptFor(p PublishPlan) Receipt {
-	return Receipt{RunID: p.RunID, CandidateSetDigest: p.CandidateSetDigest, SnapshotDigest: p.SnapshotDigest, DiffDigest: p.DiffDigest, ConfirmationDigest: p.ConfirmationDigest, CharacterizationDigest: p.CharacterizationDigest, Edits: append([]PlannedEdit(nil), p.Edits...)}
+	return Receipt{RunID: p.RunID, CandidateSetDigest: p.CandidateSetDigest, SnapshotDigest: p.SnapshotDigest, DiffDigest: p.DiffDigest, ConfirmationDigest: p.ConfirmationDigest, CharacterizationDigest: p.CharacterizationDigest, Edits: append([]PlannedEdit(nil), p.Edits...), ManagedReadOnly: append([]PlannedEdit(nil), p.ManagedReadOnly...), ManagedReviewID: p.ManagedReviewID, ManagedReviewDigest: p.ManagedReviewDigest, ManagedDecisionDigest: p.ManagedDecisionDigest, ManagedEvidenceDigest: p.ManagedEvidenceDigest}
 }
 func matchesReceipt(r Receipt, p PublishPlan) bool { return r.String() == receiptFor(p).String() }
 func (p *Publisher) verifyReceiptCurrent(r Receipt) error {
-	if len(r.Edits) == 0 || len(r.Edits) > maxFiles {
+	if len(r.Edits)+len(r.ManagedReadOnly) == 0 || len(r.Edits)+len(r.ManagedReadOnly) > maxFiles {
 		return ErrConflict
 	}
 	seen := map[string]bool{}
 	for _, edit := range r.Edits {
 		if !generatedTestPath(edit.Path) && !cmakePath(edit.Path) || !validHex(edit.AfterDigest, 64) || seen[strings.ToLower(edit.Path)] {
+			return ErrConflict
+		}
+		seen[strings.ToLower(edit.Path)] = true
+		data, _, exists, _, err := p.readTarget(edit.Path)
+		if err != nil || !exists || digest(data) != edit.AfterDigest {
+			return ErrConflict
+		}
+	}
+	for _, edit := range r.ManagedReadOnly {
+		if !generatedTestPath(edit.Path) || !validHex(edit.BeforeDigest, 64) || edit.BeforeDigest != edit.AfterDigest || seen[strings.ToLower(edit.Path)] {
 			return ErrConflict
 		}
 		seen[strings.ToLower(edit.Path)] = true
@@ -990,6 +1053,14 @@ func (p *Publisher) Recover(ctx context.Context) error {
 			if receipt.String() != j.Receipt.String() {
 				return ErrConflict
 			}
+			if len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0 {
+				if p.ManagedRegistry == nil || p.verifyReceiptCurrent(receipt) != nil {
+					return ErrConflict
+				}
+				if err := p.finalizeManaged(ctx, j); err != nil {
+					return err
+				}
+			}
 			if err := p.cleanupCommitted(j); err != nil {
 				return err
 			}
@@ -997,6 +1068,14 @@ func (p *Publisher) Recover(ctx context.Context) error {
 		}
 		if err := p.rollback(j); err != nil {
 			return err
+		}
+		if len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0 {
+			if p.ManagedRegistry == nil {
+				return ErrConflict
+			}
+			if err := p.resolveManagedRollback(ctx, j); err != nil {
+				return err
+			}
 		}
 		if err := p.journal.Remove(name); err != nil {
 			return ErrConflict
@@ -1017,11 +1096,18 @@ func (p *Publisher) readJournal(name string) ([]byte, error) {
 	return data, nil
 }
 func validJournal(j journalRecord) bool {
-	if !validHex(j.ConfirmationDigest, 64) || j.Receipt.ConfirmationDigest != j.ConfirmationDigest || len(j.Files) == 0 || len(j.Files) > maxFiles {
+	if !validHex(j.ConfirmationDigest, 64) || j.Receipt.ConfirmationDigest != j.ConfirmationDigest || len(j.Files)+len(j.Receipt.ManagedReadOnly) == 0 || len(j.Files)+len(j.Receipt.ManagedReadOnly) > maxFiles {
+		return false
+	}
+	managedFields := j.Receipt.ManagedReviewID != "" || j.Receipt.ManagedReviewDigest != "" || j.Receipt.ManagedDecisionDigest != "" || j.Receipt.ManagedEvidenceDigest != "" || len(j.Receipt.ManagedReadOnly) > 0
+	if managedFields != (len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0) || len(j.Receipt.Edits) != len(j.Files) {
 		return false
 	}
 	seen := map[string]bool{}
-	for _, f := range j.Files {
+	for index, f := range j.Files {
+		if j.Receipt.Edits[index] != (PlannedEdit{Path: f.Path, BeforeDigest: f.BeforeDigest, AfterDigest: f.AfterDigest}) {
+			return false
+		}
 		if !generatedTestPath(f.Path) && !cmakePath(f.Path) || seen[strings.ToLower(f.Path)] || !validHex(f.AfterDigest, 64) || f.Existed && (!validHex(f.BeforeDigest, 64) || digest(f.Before) != f.BeforeDigest) || !f.Existed && (f.BeforeDigest != "" || len(f.Before) > 0) || len(f.Before) > maxEditBytes || !strings.HasPrefix(f.StageName, ".testgen-") || !strings.HasSuffix(f.StageName, ".stage") || !strings.HasPrefix(f.BackupName, ".testgen-") || !strings.HasSuffix(f.BackupName, ".backup") || !strings.HasPrefix(f.HoldName, ".testgen-") || !strings.HasSuffix(f.HoldName, ".hold") {
 			return false
 		}
@@ -1030,9 +1116,64 @@ func validJournal(j journalRecord) bool {
 		}
 		seen[strings.ToLower(f.Path)] = true
 	}
+	for _, f := range j.Receipt.ManagedReadOnly {
+		if !generatedTestPath(f.Path) || !validHex(f.BeforeDigest, 64) || f.BeforeDigest != f.AfterDigest || seen[strings.ToLower(f.Path)] {
+			return false
+		}
+		seen[strings.ToLower(f.Path)] = true
+	}
 	for _, dir := range j.CreatedDirs {
 		if !validRelative(dir) || !strings.HasPrefix(dir, "tests/") {
 			return false
+		}
+	}
+	if len(j.ManagedAcceptances) > 1000 || len(j.ManagedRetirements) > 1000 {
+		return false
+	}
+	if len(j.ManagedAcceptances)+len(j.ManagedRetirements) > 0 {
+		if !validHex(j.Receipt.ManagedReviewID, 32) || !validHex(j.Receipt.ManagedReviewDigest, 64) || !validHex(j.Receipt.ManagedDecisionDigest, 64) || !validHex(j.Receipt.ManagedEvidenceDigest, 64) {
+			return false
+		}
+		seenCases := map[string]bool{}
+		for _, a := range j.ManagedAcceptances {
+			if !managedtest.ValidAcceptance(a) || a.ReviewDigest != j.Receipt.ManagedReviewDigest || seenCases[a.Record.CaseID] {
+				return false
+			}
+			seenCases[a.Record.CaseID] = true
+			matched := false
+			for _, f := range j.Files {
+				if f.Path == a.Record.TestRelativePath && f.AfterDigest == a.PublishedFileDigest && (f.BeforeDigest == a.PreimageDigest || !f.Existed && a.PreimageDigest == digest(nil)) {
+					matched = true
+				}
+			}
+			for _, f := range j.Receipt.ManagedReadOnly {
+				if f.Path == a.Record.TestRelativePath && f.BeforeDigest == a.PreimageDigest && f.AfterDigest == a.PublishedFileDigest {
+					matched = true
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		for _, r := range j.ManagedRetirements {
+			if !managedtest.ValidRetirement(r) || r.ReviewDigest != j.Receipt.ManagedReviewDigest || r.ConfirmationDigest != j.ConfirmationDigest || seenCases[r.CaseID] {
+				return false
+			}
+			seenCases[r.CaseID] = true
+			matched := false
+			for _, f := range j.Files {
+				if f.Path == r.TestRelativePath && f.AfterDigest == r.PublishedFileDigest {
+					matched = true
+				}
+			}
+			for _, f := range j.Receipt.ManagedReadOnly {
+				if f.Path == r.TestRelativePath && f.AfterDigest == r.PublishedFileDigest {
+					matched = true
+				}
+			}
+			if !matched {
+				return false
+			}
 		}
 	}
 	return true

@@ -138,11 +138,65 @@ func (s *Store) ManagedTestsReady() bool {
 
 func validManagedTransitionReason(reason string) bool {
 	switch reason {
-	case "marker_corrupt_or_missing", "source_function_missing", "managed_block_edited", "source_digest_changed", "toolchain_changed":
+	case "marker_corrupt_or_missing", "source_function_missing", "managed_block_edited", "source_digest_changed", "toolchain_changed", "converted_to_manual":
 		return true
 	default:
 		return false
 	}
+}
+
+// RetireAccepted records a reviewed conversion after the publisher writes its
+// durable receipt. The publisher's original journal replays it after a crash.
+func (r *ManagedRegistry) RetireAccepted(ctx context.Context, value managedtest.Retirement) error {
+	if !r.usable() {
+		return task.ErrStorageUnavailable
+	}
+	if ctx == nil || !managedtest.ValidRetirement(value) {
+		return task.ErrInvalidArgument
+	}
+	tx, err := r.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError("begin managed retirement", err)
+	}
+	defer tx.Rollback()
+	if err := noPendingManagedReads(ctx, tx); err != nil {
+		return err
+	}
+	record, revision, err := getManagedRecordTx(ctx, tx, value.CaseID)
+	if err != nil {
+		return err
+	}
+	if record.TestRelativePath != value.TestRelativePath || !value.At.After(record.LastVerifiedAt) {
+		return task.ErrConflict
+	}
+	if err := validateManagedRecordBinding(ctx, tx, record); err != nil {
+		return err
+	}
+	if record.Status == managedtest.StatusInvalid {
+		var reason, receipt string
+		if err := tx.QueryRowContext(ctx, `SELECT reason,receipt_digest FROM managed_test_transitions WHERE case_id=? AND revision=?`, value.CaseID, revision).Scan(&reason, &receipt); err != nil {
+			return storageError("read managed retirement", err)
+		}
+		if reason != "converted_to_manual" || receipt != value.ConfirmationDigest {
+			return task.ErrConflict
+		}
+		return tx.Commit()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE managed_test_records SET status='invalid',revision=? WHERE case_id=? AND revision=?`, revision+1, value.CaseID, revision)
+	if err != nil {
+		return storageError("write managed retirement", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return task.ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_test_transitions(case_id,revision,from_status,to_status,reason,receipt_digest,occurred_at) VALUES(?,?,?,'invalid','converted_to_manual',?,?)`, value.CaseID, revision+1, record.Status, value.ConfirmationDigest, formatTime(value.At)); err != nil {
+		return storageError("write retirement transition", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit managed retirement", err)
+	}
+	return nil
 }
 
 func (r *ManagedRegistry) usable() bool {

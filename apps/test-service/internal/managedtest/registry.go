@@ -45,6 +45,23 @@ type Acceptance struct {
 	At                                                              time.Time
 }
 
+// Retirement is an explicit, receipt-bound transition for a block deliberately
+// converted to user-owned text or removed by a reviewed generator decision.
+type Retirement struct {
+	CaseID, ReviewDigest, PublishedFileDigest, ConfirmationDigest, TestRelativePath string
+	At                                                                              time.Time
+}
+
+func ValidRetirement(value Retirement) bool {
+	return strings.HasPrefix(value.CaseID, "utc_") && validLowerHex(strings.TrimPrefix(value.CaseID, "utc_"), 32) &&
+		ValidDigest(value.ReviewDigest) && ValidDigest(value.PublishedFileDigest) && ValidDigest(value.ConfirmationDigest) &&
+		ValidTestPath(value.TestRelativePath) && !value.At.IsZero()
+}
+
+type RetirementRegistry interface {
+	RetireAccepted(context.Context, Retirement) error
+}
+
 type PendingAcceptance struct {
 	Acceptance Acceptance
 	Phase      string
