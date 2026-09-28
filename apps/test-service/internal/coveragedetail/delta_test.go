@@ -13,6 +13,9 @@ func TestBuildDeltaRequiresCompatibleBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if baseline.Project.BaselineReportID != "" {
+		t.Fatalf("unbased index has provenance %q", baseline.Project.BaselineReportID)
+	}
 	input.Baseline = &baseline
 	input.Report.ID = strings.Repeat("9", 32)
 	input.Functions[2].ExecutionCount = 1
@@ -23,6 +26,9 @@ func TestBuildDeltaRequiresCompatibleBaseline(t *testing.T) {
 	}
 	if current.Project.Delta.Functions.Covered != 1 || current.Project.Delta.Functions.Total != 0 {
 		t.Fatalf("delta = %#v", current.Project.Delta)
+	}
+	if current.Project.BaselineReportID != baseline.ReportID {
+		t.Fatalf("baseline provenance = %q, want %q", current.Project.BaselineReportID, baseline.ReportID)
 	}
 	input.Report.Toolchain.Compiler.Version = "16"
 	if _, err := Build(input); err == nil {

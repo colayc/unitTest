@@ -90,22 +90,20 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 	projectID = run.Request.ProjectID
 	switch request.Method {
 	case "coverage/details/project/get":
-		value, err := backend.GetCoverageProject(ctx, reportID)
+		value, err := detailSummaryProject(ctx, backend, reportID)
 		if err != nil {
 			return detailFailure(version, request, err)
 		}
-		if !validDetailProjection(value.Status, value.Summary, value.Delta) || !validDetailReasons(value.Reasons) {
-			return detailFailure(version, request, coveragedetail.ErrInvalidDetail)
-		}
 		var count int64
-		if value.Status != coveragedetail.StatusStale {
-			count, err = countDetailFiles(ctx, backend, reportID, generation)
-			if err != nil {
-				return detailFailure(version, request, err)
-			}
+		count, err = countDetailFiles(ctx, backend, reportID, generation)
+		if err != nil {
+			return detailFailure(version, request, err)
 		}
 		return handled(protocol.Success(version, request, coveragev16.CoverageProjectV16{CoverageReportID: reportID, WorkspaceGeneration: generation, ProjectID: projectID, FileCount: count, Status: coveragev16.CoverageDetailStatusV16(value.Status), Reasons: detailReasons(value.Reasons), Summary: detailSummary(value.Summary, value.Delta)}))
 	case "coverage/details/files/list":
+		if _, err := detailSummaryProject(ctx, backend, reportID); err != nil {
+			return detailFailure(version, request, err)
+		}
 		page, err := backend.ListCoverageFiles(ctx, coveragedetail.FileQuery{ReportID: reportID, WorkspaceGeneration: generation, Cursor: cursor, Limit: limit})
 		if err != nil {
 			return detailFailure(version, request, err)
@@ -124,6 +122,9 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 		}
 		return handled(protocol.Success(version, request, out))
 	case "coverage/details/functions/list":
+		if _, err := detailSummaryProject(ctx, backend, reportID); err != nil {
+			return detailFailure(version, request, err)
+		}
 		page, err := backend.ListCoverageFunctions(ctx, coveragedetail.FunctionQuery{ReportID: reportID, WorkspaceGeneration: generation, FileID: fileID, Cursor: cursor, Limit: limit})
 		if err != nil {
 			return detailFailure(version, request, err)
@@ -151,6 +152,23 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 		return handled(protocol.Success(version, request, out))
 	}
 	return invalidPayload(version, request)
+}
+
+// Summary deltas are mandatory wire fields. A zero value is not evidence of
+// equality with a baseline; require a durable provider to return provenance
+// for compatible baseline deltas before serializing any summary-bearing page.
+func detailSummaryProject(ctx context.Context, backend CoverageDetailBackend, reportID string) (coveragedetail.Project, error) {
+	value, err := backend.GetCoverageProject(ctx, reportID)
+	if err != nil {
+		return coveragedetail.Project{}, err
+	}
+	if value.Status == coveragedetail.StatusStale {
+		return coveragedetail.Project{}, coveragedetail.ErrStale
+	}
+	if value.Status != coveragedetail.StatusCurrent || !validDetailProjection(value.Status, value.Summary, value.Delta) || !validDetailReasons(value.Reasons) || !validID(value.BaselineReportID) || value.BaselineReportID == reportID {
+		return coveragedetail.Project{}, coveragedetail.ErrInvalidDetail
+	}
+	return value, nil
 }
 
 func detailPage(c *string, l *int64, max int) (string, int, error) {

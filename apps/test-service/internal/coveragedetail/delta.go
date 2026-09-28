@@ -40,6 +40,7 @@ func applyDelta(current *Index, baseline Index) error {
 		return fmt.Errorf("%w: baseline source set changed", ErrInvalidDetail)
 	}
 	current.Project.Delta = summaryDelta(current.Project.Summary, baseline.Project.Summary)
+	current.Project.BaselineReportID = baseline.ReportID
 	return nil
 }
 

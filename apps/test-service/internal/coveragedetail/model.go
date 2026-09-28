@@ -17,8 +17,12 @@ type DeltaSummary struct{ Functions, Lines, Branches DeltaMetric }
 type Project struct {
 	Summary coveragedomain.Summary
 	Delta   DeltaSummary
-	Status  Status
-	Reasons []string
+	// BaselineReportID is nonempty only when a compatible baseline produced
+	// Delta. Detail storage does not persist this provenance yet, so reads
+	// remain unavailable for summary-bearing v1.6 routes.
+	BaselineReportID string
+	Status           Status
+	Reasons          []string
 }
 
 func (value Project) Percent(kind string) (float64, bool) {
