@@ -21,7 +21,7 @@ import (
 )
 
 // A 262144-byte preview diff can expand sixfold when JSON-escaped. Keep the
-// complete wire envelope bounded while allowing every valid v1.5 preview.
+// complete wire envelope bounded while allowing v1.5/v1.6 previews.
 const MaxMessageBytes = 2 * 1024 * 1024
 const LegacyMaxMessageBytes = 1024 * 1024
 
@@ -243,14 +243,14 @@ func encodeOutboundLine(value any) ([]byte, error) {
 }
 
 func messageLimitForVersion(version string) int {
-	if version == protocol.Version15 {
+	if version == protocol.Version15 || version == protocol.Version16 {
 		return MaxMessageBytes
 	}
 	return LegacyMaxMessageBytes
 }
 
 func inboundLimitMessage(version string) string {
-	if version == protocol.Version15 {
+	if version == protocol.Version15 || version == protocol.Version16 {
 		return "message exceeds the 2 MiB limit"
 	}
 	return "message exceeds the 1 MiB limit"

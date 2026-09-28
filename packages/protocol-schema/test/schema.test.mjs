@@ -6,6 +6,130 @@ import addFormats from "ajv-formats";
 
 const load = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
 
+async function compileV16() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.6/${name}.schema.json`));
+  }
+  return { ajv, message: ajv.compile(await load("../schema/v1.6/message.schema.json")) };
+}
+
+test("protocol 1.6 accepts all seven closed detail and managed-test routes", async () => {
+  const { message } = await compileV16();
+  const requests = await load("../fixtures/v1.6/methods.valid.json");
+  assert.equal(requests.length, 7);
+  for (const request of requests) assert.equal(message(request), true, `${request.method}: ${JSON.stringify(message.errors)}`);
+  const old = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(old);
+  old.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) old.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  const v15 = old.compile(await load("../schema/v1.5/message.schema.json"));
+  for (const request of requests) assert.equal(v15({ ...request, protocolVersion: "1.5" }), false, request.method);
+  const previousStart = await load("../fixtures/v1.5/test-generation-start.valid.json");
+  assert.equal(v15({ ...previousStart, payload: { ...previousStart.payload, functionId: "a".repeat(32) } }), false, "v1.5 function ID selector");
+  assert.equal(v15({ ...previousStart, payload: { ...previousStart.payload, coverageGapId: "a".repeat(32) } }), false, "v1.5 gap ID selector");
+  const capabilitiesAjv = new Ajv2020({ strict: true });
+  const oldCapabilities = capabilitiesAjv.compile(await load("../schema/v1.5/capabilities.schema.json"));
+  const previous = (await load("../schema/v1.5/capabilities.schema.json")).properties;
+  const basic = Object.fromEntries(Object.entries(previous).map(([key, schema]) => [key,
+    key === "frameworkAdapters" ? [] : schema.const ?? (schema.type === "boolean" ? false : "1")]));
+  assert.equal(oldCapabilities({ ...basic, coverageDetails: true, managedTests: true }), false, "v1.5 capability bitset remains closed");
+  for (const request of requests) {
+    for (const field of ["source", "sourcePath", "argv", "environment", "outputPath", "collectorOutput"]) {
+      assert.equal(message({ ...request, payload: { ...request.payload, [field]: "secret" } }), false, `${request.method}/${field}`);
+    }
+  }
+});
+
+test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", async () => {
+  const { ajv, message } = await compileV16();
+  const requests = await load("../fixtures/v1.6/methods.valid.json");
+  const start = { ...await load("../fixtures/v1.5/test-generation-start.valid.json"), protocolVersion: "1.6" };
+  const identity = "a".repeat(32);
+  const selectors = [
+    ["functionId", "symbol", identity], ["fileId", "file", identity],
+    ["targetId", "target", "a".repeat(64)], ["coverageGapId", "coverage-gap", identity]
+  ];
+  for (const [key, scope, value] of selectors) {
+    const payload = { ...start.payload, scope, [key]: value };
+    if (scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
+    delete payload.symbolId;
+    assert.equal(message({ ...start, payload }), true, `${key}: ${JSON.stringify(message.errors)}`);
+    assert.equal(message({ ...start, payload: { ...payload, file: "src/source.cpp" } }), false, `${key} with legacy file`);
+    assert.equal(message({ ...start, payload: { ...payload, symbolId: "target:symbol" } }), false, `${key} with legacy symbol`);
+  }
+  assert.equal(message({ ...start, payload: { ...start.payload, scope: "symbol" } }), false, "legacy symbol selector");
+  assert.equal(message({ ...start, payload: { ...start.payload, scope: "file", file: "../escape.cpp" } }), false, "path traversal");
+  for (const request of requests.filter((item) => item.method.endsWith("/list"))) {
+    assert.equal(message({ ...request, payload: { ...request.payload, limit: 0 } }), false, `${request.method} zero limit`);
+    assert.equal(message({ ...request, payload: { ...request.payload, limit: request.method === "coverage/details/lines/list" ? 1001 : 201 } }), false, `${request.method} oversized page`);
+    assert.equal(message({ ...request, payload: { ...request.payload, cursor: "" } }), false, `${request.method} empty cursor`);
+  }
+  assert.equal(message({ ...requests[1], payload: { ...requests[1].payload, coverageReportId: "ABC" } }), false, "malformed report ID");
+  assert.equal(message({ ...requests[2], payload: { ...requests[2].payload, fileId: "ABC" } }), false, "malformed file ID");
+  assert.equal(message({ ...requests[6], payload: { ...requests[6].payload, reviewDigest: "ABC" } }), false, "malformed or stale-shaped digest");
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const metric = ajv.compile({ ...coverage.$defs.detailMetric, $defs: coverage.$defs });
+  const valid = { covered: 4, total: 5, coveredDelta: -1 };
+  assert.equal(metric(valid), true);
+  for (const value of [{ ...valid, covered: -1 }, { ...valid, total: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, raw: "secret" }]) {
+    assert.equal(metric(value), false, JSON.stringify(value));
+  }
+});
+
+test("protocol 1.6 closes detail status, reasons, managed states, and digest-bound review choices", async () => {
+  const { ajv, message } = await compileV16();
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const generation = await load("../schema/v1.6/test-generation.schema.json");
+  for (const [definition, valid, invalid] of [
+    [coverage.$defs.detailStatus, ["current", "stale", "incomplete"], ["unknown", "partial"]],
+    [coverage.$defs.detailReason, ["source_changed", "tool_identity_changed", "report_partial", "attribution_ambiguous", "baseline_unavailable", "source_missing"], ["other", "sourceChanged"]],
+    [generation.$defs.managedStatus, ["current", "stale", "conflicted", "orphaned", "invalid"], ["deleted", "unknown"]],
+    [generation.$defs.conflictChoice, ["keep-current", "use-generated", "convert-to-manual"], ["delete", "accept"]]
+  ]) {
+    const validate = ajv.compile(definition);
+    for (const value of valid) assert.equal(validate(value), true, value);
+    for (const value of invalid) assert.equal(validate(value), false, value);
+  }
+  const apply = (await load("../fixtures/v1.6/methods.valid.json"))[6];
+  assert.equal(message(apply), true, JSON.stringify(message.errors));
+  assert.equal(message({ ...apply, payload: { ...apply.payload, reviewDigest: "b".repeat(63) } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "a".repeat(32), choice: "keep-current" }] } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "utc_" + "a".repeat(32), choice: "delete" }] } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ ...apply.payload.resolutions[0], extra: true }] } }), false);
+});
+
+test("protocol 1.6 validates paginated detail and managed-review responses", async () => {
+  const { message } = await compileV16();
+  const id = "a".repeat(32);
+  const digest = "b".repeat(64);
+  const summary = Object.fromEntries(["functions", "lines", "branches"].map((key) => [key, { covered: 1, total: 2, coveredDelta: 1 }]));
+  const file = { fileId: id, relativePath: "src/math.cpp", sourceSha256: digest, status: "current", reasons: [], summary, functionCount: 1 };
+  const fn = { functionId: id, fileId: id, qualifiedName: "math::add", startLine: 1, endLine: 4, status: "current", reasons: [], summary };
+  const line = { line: 1, count: 1, baselineCount: 0, branchesCovered: 1, branchesTotal: 2, baselineBranchesCovered: 0, baselineBranchesTotal: 2 };
+  const record = { caseId: "utc_" + id, fileId: id, functionId: id, status: "current", acceptedDigest: digest, currentDigest: digest };
+  const metadata = { workspaceGeneration: digest, coverageReportId: id };
+  const responses = [
+    ["coverage/details/project/get", { ...metadata, projectId: "core", status: "current", reasons: [], summary, fileCount: 1 }],
+    ["coverage/details/files/list", { ...metadata, items: [file] }],
+    ["coverage/details/functions/list", { ...metadata, items: [fn] }],
+    ["coverage/details/lines/list", { ...metadata, items: [line] }],
+    ["managedTests/records/list", { ...metadata, items: [record] }],
+    ["managedTests/reviews/get", { reviewId: id, reviewDigest: digest, ...metadata, cases: [{ caseId: record.caseId, status: "conflicted", acceptedDigest: digest, currentDigest: digest, generatedDigest: digest }] }],
+    ["managedTests/reviews/apply", { reviewId: id, reviewDigest: digest, applied: true }]
+  ];
+  const base = { protocolVersion: "1.6", kind: "response", messageId: id, requestId: id, sentAt: "2026-09-28T00:00:00Z" };
+  for (const [method, payload] of responses) assert.equal(message({ ...base, method, payload }), true, `${method}: ${JSON.stringify(message.errors)}`);
+  assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, relativePath: "../secret.cpp" }] } }), false, "traversal path");
+  assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, source: "int secret;" }] } }), false, "unknown file key");
+  assert.equal(message({ ...base, method: responses[3][0], payload: { ...responses[3][1], items: [{ ...line, count: -1 }] } }), false, "negative line count");
+  assert.equal(message({ ...base, method: responses[3][0], payload: { ...responses[3][1], items: [{ ...line, branchesTotal: Number.MAX_SAFE_INTEGER + 1 }] } }), false, "overflow branch count");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: [{ ...record, caseId: id }] } }), false, "malformed case ID");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: Array(201).fill(record) } }), false, "oversized record page");
+});
+
 test("protocol 1.5 generation boundaries reject caller classification, leaked text, and filesystem artifacts", async () => {
   const ajv = new Ajv2020({ strict: true, strictRequired: false });
   addFormats(ajv);

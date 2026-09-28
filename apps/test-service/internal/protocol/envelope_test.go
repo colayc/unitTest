@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/protocol"
+	coveragev16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/coverage"
 )
 
 func TestSupportedVersionRecognizesEveryShippedVersion(t *testing.T) {
@@ -24,6 +25,29 @@ func TestSupportedVersionRecognizesEveryShippedVersion(t *testing.T) {
 func TestProtocolV15RequestEnvelopeIsSupported(t *testing.T) {
 	if !protocol.SupportedVersion("1.5") {
 		t.Fatal("protocol 1.5 generation requests are not supported")
+	}
+}
+
+func TestProtocolV16RequestEnvelopeIsSupported(t *testing.T) {
+	if !protocol.SupportedVersion(protocol.Version16) {
+		t.Fatal("protocol 1.6 detail requests are not supported")
+	}
+}
+
+func TestV16CoverageMetricInvariantRejectsCoveredGreaterThanTotal(t *testing.T) {
+	for _, tc := range []struct {
+		metric coveragev16.CoverageMetricV16
+		valid  bool
+	}{
+		{coveragev16.CoverageMetricV16{Covered: 4, Total: 5, CoveredDelta: -1}, true},
+		{coveragev16.CoverageMetricV16{Covered: 6, Total: 5, CoveredDelta: 1}, false},
+		{coveragev16.CoverageMetricV16{Covered: -1, Total: 5}, false},
+		{coveragev16.CoverageMetricV16{Covered: 1, Total: 9007199254740992}, false},
+		{coveragev16.CoverageMetricV16{Covered: 1, Total: 5, CoveredDelta: -9007199254740992}, false},
+	} {
+		if got := protocol.ValidCoverageMetricV16(tc.metric); got != tc.valid {
+			t.Fatalf("metric %+v valid=%t, want %t", tc.metric, got, tc.valid)
+		}
 	}
 }
 

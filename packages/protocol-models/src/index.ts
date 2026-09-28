@@ -349,3 +349,26 @@ export {
   ArtifactKindV15,
   ArtifactMIMETypeV15
 } from "./generated/artifact-v1-5.js";
+export type { CapabilitiesV16, FrameworkAdapterCapabilityV16 } from "./generated/capabilities-v1-6.js";
+export { FrameworkAdapterIDV16 } from "./generated/capabilities-v1-6.js";
+export type { DiagnosticV16 } from "./generated/diagnostic-v1-6.js";
+export type { TestContractV16 } from "./generated/test-v1-6.js";
+export type {
+  CoverageContractV16, CoverageProjectV16, CoverageFileV16, CoverageFunctionV16,
+  CoverageLineDetailV16, CoverageFilePageV16, CoverageFunctionPageV16,
+  CoverageLinePageV16, CoverageMetricV16, CoverageSummaryV16,
+  CoverageRunV16, CoverageRunPageV16, CoverageReportV16
+} from "./generated/coverage-v1-6.js";
+export { CoverageDetailStatusV16, CoverageDetailReasonV16 } from "./generated/coverage-v1-6.js";
+export type {
+  TestGenerationContractV16, TestGenerationStartRequestV16,
+  TestGenerationRunV16, TestGenerationCandidatePageV16,
+  ManagedTestRecordV16, ManagedTestRecordPageV16,
+  ManagedReviewV16, ManagedReviewCaseV16,
+  ManagedReviewApplyRequestV16, ManagedReviewApplyResultV16
+} from "./generated/test-generation-v1-6.js";
+export { ManagedTestStatusV16, ManagedConflictChoiceV16 } from "./generated/test-generation-v1-6.js";
+export type { TaskSnapshotV16 } from "./generated/task-v1-6.js";
+export type { TaskEventV16 } from "./generated/event-v1-6.js";
+export type { ArtifactMetadataV16 } from "./generated/artifact-v1-6.js";
+export { validateCoverageMetricV16, validateCoverageSummaryV16 } from "./coverage-v1-6-validation.js";

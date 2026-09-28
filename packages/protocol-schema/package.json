@@ -41,7 +41,16 @@
     "./v1.5/test-generation": "./schema/v1.5/test-generation.schema.json",
     "./v1.5/task": "./schema/v1.5/task.schema.json",
     "./v1.5/event": "./schema/v1.5/event.schema.json",
-    "./v1.5/artifact": "./schema/v1.5/artifact.schema.json"
+    "./v1.5/artifact": "./schema/v1.5/artifact.schema.json",
+    "./v1.6/message": "./schema/v1.6/message.schema.json",
+    "./v1.6/capabilities": "./schema/v1.6/capabilities.schema.json",
+    "./v1.6/diagnostic": "./schema/v1.6/diagnostic.schema.json",
+    "./v1.6/test": "./schema/v1.6/test.schema.json",
+    "./v1.6/coverage": "./schema/v1.6/coverage.schema.json",
+    "./v1.6/test-generation": "./schema/v1.6/test-generation.schema.json",
+    "./v1.6/task": "./schema/v1.6/task.schema.json",
+    "./v1.6/event": "./schema/v1.6/event.schema.json",
+    "./v1.6/artifact": "./schema/v1.6/artifact.schema.json"
   },
   "scripts": {
     "test": "node --test test/schema.test.mjs"

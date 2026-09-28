@@ -28,6 +28,10 @@ func TestConnectionWriterEnforcesEncodedLineLimitForResponsesAndEvents(t *testin
 		{"v1.5 response over limit", "response", protocol.Version15, MaxMessageBytes + 1, true},
 		{"v1.5 event at limit", "event", protocol.Version15, MaxMessageBytes, false},
 		{"v1.5 event over limit", "event", protocol.Version15, MaxMessageBytes + 1, true},
+		{"v1.6 response at limit", "response", protocol.Version16, MaxMessageBytes, false},
+		{"v1.6 response over limit", "response", protocol.Version16, MaxMessageBytes + 1, true},
+		{"v1.6 event at limit", "event", protocol.Version16, MaxMessageBytes, false},
+		{"v1.6 event over limit", "event", protocol.Version16, MaxMessageBytes + 1, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -71,7 +75,7 @@ func TestConnectionWriterEnforcesEncodedLineLimitForResponsesAndEvents(t *testin
 			}
 			limit := LegacyMaxMessageBytes
 			message := "outbound message exceeds the 1 MiB limit"
-			if test.version == protocol.Version15 {
+			if test.version == protocol.Version15 || test.version == protocol.Version16 {
 				limit = MaxMessageBytes
 				message = "outbound message exceeds the 2 MiB limit"
 			}

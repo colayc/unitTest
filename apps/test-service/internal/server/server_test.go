@@ -271,6 +271,21 @@ func TestServeConnectionAcceptsV15LineAtTwoMiB(t *testing.T) {
 	}
 }
 
+func TestServeConnectionAcceptsV16LineAtTwoMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSizeVersion(t, server.MaxMessageBytes, protocol.Version16)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "AUTH_REQUIRED" {
+		t.Fatalf("v1.6 at-limit response: %#v", response)
+	}
+}
+
 func TestServeConnectionLegacySessionRejectsSpoofedV15OversizeLine(t *testing.T) {
 	client, service := net.Pipe()
 	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))

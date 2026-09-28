@@ -33,6 +33,7 @@ import (
 	taskv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task"
 	testv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test"
 	taskv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task"
+	capabilitiesv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/capabilities"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 	"unit-test-ide.local/test-service/internal/toolchain"
@@ -120,6 +121,8 @@ type Session struct {
 	backend                    Backend
 	coverageBackend            CoverageBackend
 	generationBackend          GenerationBackend
+	coverageDetails            CoverageDetailsProvider
+	managedTests               ManagedTestsProvider
 	shutdown                   chan struct{}
 	shutdownOnce               sync.Once
 }
@@ -130,6 +133,11 @@ type handshake struct {
 	ClientVersion             string   `json:"clientVersion"`
 	SupportedProtocolVersions []string `json:"supportedProtocolVersions,omitempty"`
 }
+
+// Providers are readiness-gated here; their durable read/write contracts are
+// introduced by the later coverage-detail and managed-test tasks.
+type CoverageDetailsProvider interface{ CoverageDetailsReady() bool }
+type ManagedTestsProvider interface{ ManagedTestsReady() bool }
 
 type startPayload struct {
 	IdempotencyKey string        `json:"idempotencyKey"`
@@ -275,6 +283,78 @@ func NewWithGeneration(token, platform, transport string, backend Backend, cover
 	return s
 }
 
+// NewWithManagedDetails is the only constructor that may negotiate v1.6.
+// Both durable providers must be healthy as well as v1.5's providers.
+func NewWithManagedDetails(token, platform, transport string, backend Backend, coverage CoverageBackend, generation GenerationBackend, details CoverageDetailsProvider, managed ManagedTestsProvider) *Session {
+	s := NewWithGeneration(token, platform, transport, backend, coverage, generation)
+	s.coverageDetails = details
+	s.managedTests = managed
+	return s
+}
+
+func (s *Session) detailsReady() bool {
+	return s.coverageBackend != nil && s.generationBackend != nil && s.generationBackend.TestGenerationReady() &&
+		s.coverageDetails != nil && s.coverageDetails.CoverageDetailsReady() &&
+		s.managedTests != nil && s.managedTests.ManagedTestsReady()
+}
+
+func coverageDetailMethod(method string) bool {
+	switch method {
+	case "coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list", "coverage/details/lines/list":
+		return true
+	}
+	return false
+}
+
+func managedTestMethod(method string) bool {
+	switch method {
+	case "managedTests/records/list", "managedTests/reviews/get", "managedTests/reviews/apply":
+		return true
+	}
+	return false
+}
+
+func (s *Session) negotiateVersion(envelope string, supported []string) (string, bool) {
+	if envelope != protocol.Version16 {
+		return negotiateForGeneration(envelope, supported, s.coverageBackend, s.generationBackend)
+	}
+	if s.detailsReady() {
+		return negotiateCandidates(envelope, supported, []string{protocol.Version16, protocol.Version15, protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	if s.coverageBackend != nil && s.generationBackend != nil && s.generationBackend.TestGenerationReady() {
+		return negotiateCandidates(protocol.Version15, supported, []string{protocol.Version15, protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	if s.coverageBackend != nil {
+		return negotiateCandidates(protocol.Version14, supported, []string{protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	return negotiateCandidates(protocol.Version13, supported, []string{protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+}
+
+func capabilitiesV16() capabilitiesv16.CapabilitiesV16 {
+	old := capabilitiesV15()
+	adapters := make([]capabilitiesv16.FrameworkAdapterCapabilityV16, len(old.FrameworkAdapters))
+	for i, adapter := range old.FrameworkAdapters {
+		adapters[i] = capabilitiesv16.FrameworkAdapterCapabilityV16{
+			ID: capabilitiesv16.FrameworkAdapterIDV16(adapter.ID), ContractVersion: adapter.ContractVersion,
+			DisplayName: adapter.DisplayName, CanDiscoverCases: adapter.CanDiscoverCases,
+			CanRunCase: adapter.CanRunCase, CanReportSkipped: adapter.CanReportSkipped,
+			CanReportSourceLocation: adapter.CanReportSourceLocation, CanReportMockDetails: adapter.CanReportMockDetails,
+		}
+	}
+	return capabilitiesv16.CapabilitiesV16{
+		WorkspaceInspect: old.WorkspaceInspect, TargetList: old.TargetList, CmakeBuild: old.CmakeBuild,
+		TestDiscovery: old.TestDiscovery, TestRun: old.TestRun, CoverageRun: old.CoverageRun,
+		CoverageReport: old.CoverageReport, CtestJSON: old.CtestJSON, OpaqueCTestFallback: old.OpaqueCTestFallback,
+		MaxRepeatCount: old.MaxRepeatCount, MaxSelectionSize: old.MaxSelectionSize,
+		MaxCatalogPageSize: old.MaxCatalogPageSize, MaxCoveragePageSize: old.MaxCoveragePageSize,
+		MaxCoverageTimeoutMS: old.MaxCoverageTimeoutMS, UnityHelperContractVersion: old.UnityHelperContractVersion,
+		UnityRunnerContractVersion: old.UnityRunnerContractVersion, FrameworkAdapters: adapters,
+		TestGeneration: old.TestGeneration, MaxTestGenerationCandidates: old.MaxTestGenerationCandidates,
+		CoverageDetails: true, ManagedTests: true, MaxCoverageDetailPageSize: 200,
+		MaxCoverageLinePageSize: 1000, MaxManagedTestPageSize: 200,
+	}
+}
+
 func (s *Session) ShutdownRequested() <-chan struct{} { return s.shutdown }
 
 func (s *Session) Authenticated() bool {
@@ -313,7 +393,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "invalid handshake payload", false))
 		}
-		negotiatedVersion, ok := negotiateForGeneration(request.ProtocolVersion, payload.SupportedProtocolVersions, s.coverageBackend, s.generationBackend)
+		negotiatedVersion, ok := s.negotiateVersion(request.ProtocolVersion, payload.SupportedProtocolVersions)
 		if !ok {
 			return handled(protocol.Failure(responseVersion, request, "UNSUPPORTED_PROTOCOL", "protocol version is not supported", false))
 		}
@@ -326,6 +406,12 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	case "capabilities/get":
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
+		}
+		if s.negotiatedVersion == protocol.Version16 {
+			if !s.detailsReady() {
+				return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "detail service is unavailable", true))
+			}
+			return handled(protocol.Success(responseVersion, request, capabilitiesV16()))
 		}
 		if s.negotiatedVersion == protocol.Version15 {
 			return handled(protocol.Success(responseVersion, request, capabilitiesV15()))
@@ -369,7 +455,13 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
 	}
+	if coverageDetailMethod(request.Method) || managedTestMethod(request.Method) {
+		return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "managed detail routes are not initialized", false))
+	}
 	if generationMethod(request.Method) {
+		if s.negotiatedVersion == protocol.Version16 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "v1.6 generation route is not initialized", false))
+		}
 		if s.negotiatedVersion != protocol.Version15 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.5", false))
 		}
@@ -379,7 +471,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		return s.handleGeneration(ctx, responseVersion, request, s.generationBackend)
 	}
 	if coverageMethod(request.Method) {
-		if s.negotiatedVersion != protocol.Version14 && s.negotiatedVersion != protocol.Version15 {
+		if s.negotiatedVersion != protocol.Version14 && s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.4", false))
 		}
 		if s.coverageBackend == nil {
@@ -392,7 +484,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion != protocol.Version12 &&
 			s.negotiatedVersion != protocol.Version13 &&
 			s.negotiatedVersion != protocol.Version14 &&
-			s.negotiatedVersion != protocol.Version15 {
+			s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
 		}
 		if s.backend == nil {
@@ -403,7 +495,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	if phase4Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version13 &&
 			s.negotiatedVersion != protocol.Version14 &&
-			s.negotiatedVersion != protocol.Version15 {
+			s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(
 				responseVersion,
 				request,
@@ -442,7 +534,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
 		}
-		if s.negotiatedVersion == protocol.Version15 {
+		if s.negotiatedVersion == protocol.Version15 || s.negotiatedVersion == protocol.Version16 {
 			// The legacy task and artifact projections cannot encode generation
 			// ownership; the broker is workspace-global. Do not misproject or
 			// expose another realm's generation rows via inherited methods.

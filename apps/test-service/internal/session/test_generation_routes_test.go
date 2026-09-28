@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -65,6 +66,76 @@ func generationRun() generationv15.TestGenerationRunV15 {
 		RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core",
 		WorkspaceGeneration: strings.Repeat("c", 64), State: generationv15.Queued,
 		CreatedAt: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC), LastSequence: 1,
+	}
+}
+
+type detailProvider struct{ ready bool }
+
+func (p *detailProvider) CoverageDetailsReady() bool { return p.ready }
+
+type managedProvider struct{ ready bool }
+
+func (p *managedProvider) ManagedTestsReady() bool { return p.ready }
+
+func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t *testing.T) {
+	coverage := &coverageBackend{fakeBackend: &fakeBackend{}}
+	generation := &generationBackend{ready: true}
+	for _, tc := range []struct {
+		name        string
+		makeSession func() *session.Session
+		ceiling     string
+	}{
+		{"base", func() *session.Session {
+			return session.New("0123456789abcdef", "linux", "unix-socket", &fakeBackend{})
+		}, protocol.Version13},
+		{"coverage", func() *session.Session {
+			return session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage)
+		}, protocol.Version14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy := tc.makeSession()
+			response := legacy.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{
+				"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
+				"supportedProtocolVersions": []string{protocol.Version16, protocol.Version15, protocol.Version14, protocol.Version13},
+			}))
+			if response.Response.Error != nil || legacy.NegotiatedVersion() != tc.ceiling {
+				t.Fatalf("legacy constructor negotiated %#v, %q; want %q", response.Response, legacy.NegotiatedVersion(), tc.ceiling)
+			}
+		})
+	}
+	legacy := session.NewWithGeneration("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, generation)
+	request := requestVersion(t, protocol.Version16, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
+		"supportedProtocolVersions": []string{protocol.Version16, protocol.Version15},
+	})
+	result := legacy.Handle(context.Background(), request)
+	if result.Response.Error != nil || legacy.NegotiatedVersion() != protocol.Version15 {
+		t.Fatalf("legacy constructor negotiated %#v, %q", result.Response, legacy.NegotiatedVersion())
+	}
+	for _, ready := range []struct{ coverage, managed bool }{{false, true}, {true, false}} {
+		active := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, generation, &detailProvider{ready.coverage}, &managedProvider{ready.managed})
+		result = active.Handle(context.Background(), request)
+		if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
+			t.Fatalf("unhealthy providers %#v negotiated %#v, %q", ready, result.Response, active.NegotiatedVersion())
+		}
+	}
+	active := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, generation, &detailProvider{true}, &managedProvider{true})
+	result = active.Handle(context.Background(), request)
+	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version16 {
+		t.Fatalf("healthy providers negotiated %#v, %q", result.Response, active.NegotiatedVersion())
+	}
+	capability := active.Handle(context.Background(), requestVersion(t, protocol.Version16, "capabilities/get", map[string]any{}))
+	var value map[string]any
+	encoded, err := json.Marshal(capability.Response.Payload)
+	if err != nil || json.Unmarshal(encoded, &value) != nil || value["coverageDetails"] != true || value["managedTests"] != true ||
+		value["maxCoverageDetailPageSize"] != float64(200) || value["maxCoverageLinePageSize"] != float64(1000) || value["maxManagedTestPageSize"] != float64(200) {
+		t.Fatalf("v1.6 capabilities = %#v", capability.Response.Payload)
+	}
+	for _, method := range []string{"coverage/details/project/get", "managedTests/reviews/apply"} {
+		response := active.Handle(context.Background(), requestVersion(t, protocol.Version16, method, map[string]any{}))
+		if response.Response.Error == nil || response.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
+			t.Fatalf("unimplemented v1.6 route %s = %#v", method, response.Response)
+		}
 	}
 }
 

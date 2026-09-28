@@ -100,6 +100,34 @@ import {
   TestGenerationDiagnosticReasonV15,
   TestGenerationDiagnosticSeverityV15
 } from "./index.js";
+import type { CoverageFileV16, CoverageFunctionV16, CoverageLineDetailV16, ManagedReviewApplyRequestV16 } from "./index.js";
+import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16 } from "./index.js";
+
+test("protocol 1.6 generated models expose bounded detail and digest-bound review contracts", () => {
+  const summary = {
+    functions: { covered: 1, total: 2, coveredDelta: 1 },
+    lines: { covered: 4, total: 5, coveredDelta: 2 },
+    branches: { covered: 2, total: 4, coveredDelta: 1 }
+  };
+  const file: CoverageFileV16 = { fileId: "a".repeat(32), relativePath: "src/math.cpp", sourceSha256: "b".repeat(64), status: CoverageDetailStatusV16.Current, reasons: [], summary, functionCount: 1 };
+  const fn: CoverageFunctionV16 = { functionId: "c".repeat(32), fileId: file.fileId, qualifiedName: "math::add", startLine: 1, endLine: 8, status: CoverageDetailStatusV16.Current, reasons: [], summary };
+  const line: CoverageLineDetailV16 = { line: 3, count: 2, baselineCount: 1, branchesCovered: 1, branchesTotal: 2, baselineBranchesCovered: 0, baselineBranchesTotal: 2 };
+  const apply: ManagedReviewApplyRequestV16 = { reviewId: "d".repeat(32), reviewDigest: "e".repeat(64), resolutions: [{ caseId: "utc_" + "f".repeat(32), choice: ManagedConflictChoiceV16.KeepCurrent }] };
+  assert.equal(file.summary.lines.coveredDelta, 2);
+  assert.equal(fn.startLine, 1);
+  assert.equal(line.branchesCovered, 1);
+  assert.equal(apply.resolutions[0]?.choice, "keep-current");
+});
+
+test("protocol 1.6 decoded coverage metrics reject covered greater than total", () => {
+  assert.equal(validateCoverageMetricV16({ covered: 4, total: 5, coveredDelta: -1 }), true);
+  for (const metric of [
+    { covered: 6, total: 5, coveredDelta: 1 },
+    { covered: -1, total: 5, coveredDelta: 0 },
+    { covered: 1, total: Number.MAX_SAFE_INTEGER + 1, coveredDelta: 0 },
+    { covered: 1, total: 5, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }
+  ]) assert.equal(validateCoverageMetricV16(metric), false);
+});
 
 test("protocol 1.5 generated models expose typed generation contracts", () => {
   const request: TestGenerationStartRequestV15 = {
