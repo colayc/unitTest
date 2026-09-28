@@ -71,6 +71,10 @@ func (s *Store) CommitManagedReview(ctx context.Context, draft managedtest.Revie
 		return task.ErrInvalidArgument
 	}
 	m := draft.Manifest
+	current, generated := managedtest.ReviewPreimageSetDigests(draft.Candidates)
+	if m.CurrentPreimageDigest != current || m.GeneratedPreimageDigest != generated {
+		return task.ErrInvalidArgument
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return storageError("begin managed review", err)
@@ -204,8 +208,10 @@ func loadReview(ctx context.Context, tx *sql.Tx, key []byte, reviewID string) (s
 			return storedReview{}, task.ErrStorageUnavailable
 		}
 	}
+	current, generated := managedtest.ReviewPreimageSetDigests(result.candidates)
 	if rows.Err() != nil || len(result.candidates) != count || count < 1 || count > 200 ||
-		managedtest.ReviewCandidateSetDigest(result.candidates) != setDigest {
+		managedtest.ReviewCandidateSetDigest(result.candidates) != setDigest ||
+		result.manifest.CurrentPreimageDigest != current || result.manifest.GeneratedPreimageDigest != generated {
 		return storedReview{}, task.ErrStorageUnavailable
 	}
 	return result, nil
@@ -273,7 +279,7 @@ func (s *Store) GetManagedReview(ctx context.Context, q managedtest.ReviewGetQue
 			page.NextCursor = encodeDetailCursor(key, scope, page.Cases[len(page.Cases)-1].CandidateID)
 			break
 		}
-		candidate := managedtest.ReviewCase{CandidateID: c.CandidateID, Status: c.Status, AcceptedDigest: c.AcceptedDigest, CurrentDigest: c.CurrentDigest, GeneratedDigest: c.GeneratedDigest, Diff: c.Diff}
+		candidate := managedtest.ReviewCase{CandidateID: c.CandidateID, Status: c.Status, AcceptedDigest: c.AcceptedDigest, CurrentDigest: c.CurrentDigest, GeneratedDigest: c.GeneratedDigest}
 		page.Cases = append(page.Cases, candidate)
 		encoded, _ := json.Marshal(page)
 		if len(encoded) > managedtest.MaxReviewBytes {
@@ -287,6 +293,10 @@ func (s *Store) GetManagedReview(ctx context.Context, q managedtest.ReviewGetQue
 		if i == len(stored.candidates)-1 {
 			page.NextCursor = ""
 		}
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil || len(encoded) > managedtest.MaxReviewBytes {
+		return managedtest.ReviewPage{}, task.ErrStorageUnavailable
 	}
 	if err := tx.Commit(); err != nil {
 		return managedtest.ReviewPage{}, storageError("commit managed review read", err)

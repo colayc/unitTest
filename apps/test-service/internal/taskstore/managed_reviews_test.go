@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -60,15 +61,15 @@ func reviewFixture(t *testing.T, s *Store) managedtest.ReviewDraft {
 	}
 	current := []byte("old exact bytes\n")
 	generated := []byte("new exact bytes\n")
-	candidate := managedtest.ReviewCandidate{CandidateID: caseID, Status: managedtest.StatusCurrent,
+	candidate := managedtest.ReviewCandidate{CandidateID: caseID, TestRelativePath: "tests/generated/src/a_test.cpp", Status: managedtest.StatusCurrent,
 		AcceptedDigest: strings.Repeat("7", 64), CurrentDigest: reviewHash(current), GeneratedDigest: reviewHash(generated),
-		Diff: "-old\n+new\n", CurrentBytes: current, GeneratedBytes: generated}
+		CurrentBytes: current, GeneratedBytes: generated}
 	manifest := managedtest.ReviewManifest{ReviewID: strings.Repeat("8", 32), OwnerDigest: run.Request.SessionOwnerDigest,
 		RunID: run.ID, RunRevision: run.Revision, ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
 		ReportID: index.ReportID, ToolchainID: "workspace-toolchain", SourceDigest: run.Request.SourceDigest,
-		CurrentPreimageDigest: reviewHash(current), GeneratedPreimageDigest: reviewHash(generated),
 		ArtifactRef: "artifact:review-1", CreatedAt: time.Date(2026, 9, 28, 2, 0, 0, 0, time.UTC)}
 	manifest.CandidateSetDigest = managedtest.ReviewCandidateSetDigest([]managedtest.ReviewCandidate{candidate})
+	manifest.CurrentPreimageDigest, manifest.GeneratedPreimageDigest = managedtest.ReviewPreimageSetDigests([]managedtest.ReviewCandidate{candidate})
 	return managedtest.ReviewDraft{Manifest: manifest, Candidates: []managedtest.ReviewCandidate{candidate}}
 }
 
@@ -104,6 +105,10 @@ func TestManagedReviewPersistsExactBytesAndIsOwnerBoundAfterRestart(t *testing.T
 	page, err := s.GetManagedReview(ctx, q)
 	if err != nil || len(page.Cases) != 1 || page.ReviewDigest != draft.Manifest.Digest() {
 		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	serialized, err := json.Marshal(page.Cases[0])
+	if err != nil || strings.Contains(strings.ToLower(string(serialized)), "diff") {
+		t.Fatalf("unverified diff was displayed: %s, %v", serialized, err)
 	}
 	selected, err := s.LookupManagedReviewSelection(ctx, q.Binding, q.ReviewID, draft.Manifest.Digest(), []string{draft.Candidates[0].CandidateID})
 	if err != nil || string(selected[0].GeneratedBytes) != "new exact bytes\n" {
@@ -165,6 +170,79 @@ func TestManagedReviewRejectsDuplicateAndStaleBindings(t *testing.T) {
 	}
 }
 
+func TestManagedReviewRejectsPlausibleButUnboundPreimageDigests(t *testing.T) {
+	for _, field := range []string{"current", "generated"} {
+		t.Run(field, func(t *testing.T) {
+			s := openTestStore(t)
+			draft := reviewFixture(t, s)
+			if field == "current" {
+				draft.Manifest.CurrentPreimageDigest = strings.Repeat("f", 64)
+			} else {
+				draft.Manifest.GeneratedPreimageDigest = strings.Repeat("f", 64)
+			}
+			if err := s.CommitManagedReview(context.Background(), draft); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("unbound %s preimage digest=%v", field, err)
+			}
+		})
+	}
+}
+
+func TestManagedReviewMultiCandidateBytesRemainBoundAfterStorageTamper(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	draft := reviewFixture(t, s)
+	second := draft.Candidates[0]
+	second.CandidateID = "utc_22222222222222222222222222222222"
+	second.TestRelativePath = "tests/generated/src/b_test.cpp"
+	second.CurrentBytes = []byte("old b\n")
+	second.GeneratedBytes = []byte("new b\n")
+	second.CurrentDigest, second.GeneratedDigest = reviewHash(second.CurrentBytes), reviewHash(second.GeneratedBytes)
+	draft.Candidates = append(draft.Candidates, second)
+	draft.Manifest.CandidateSetDigest = managedtest.ReviewCandidateSetDigest(draft.Candidates)
+	draft.Manifest.CurrentPreimageDigest, draft.Manifest.GeneratedPreimageDigest = managedtest.ReviewPreimageSetDigests(draft.Candidates)
+	if err := s.CommitManagedReview(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	reversed := draft
+	reversed.Candidates = []managedtest.ReviewCandidate{second, draft.Candidates[0]}
+	if !managedtest.ValidReviewDraft(reversed) {
+		t.Fatal("canonical multi-candidate order was not stable")
+	}
+	q := managedtest.ReviewGetQuery{Binding: reviewBinding(draft), ReviewID: draft.Manifest.ReviewID, Limit: 2}
+	if page, err := s.GetManagedReview(ctx, q); err != nil || len(page.Cases) != 2 {
+		t.Fatalf("genuine page=%+v err=%v", page, err)
+	}
+	key, err := reviewKey(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := draft.Candidates[0]
+	changed.CurrentBytes = []byte("newly edited old bytes\n")
+	changed.CurrentDigest = reviewHash(changed.CurrentBytes)
+	encodedCandidate, err := json.Marshal(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE managed_review_candidates SET candidate_json=?,candidate_mac=? WHERE review_id=? AND candidate_id=?`, encodedCandidate, reviewMAC(key, "managed-review-candidate-v1", encodedCandidate), draft.Manifest.ReviewID, changed.CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	forged := draft.Manifest
+	forged.CandidateSetDigest = managedtest.ReviewCandidateSetDigest([]managedtest.ReviewCandidate{changed, second})
+	encodedManifest, err := json.Marshal(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE managed_review_manifests SET candidate_set_digest=?,review_digest=?,manifest_json=?,manifest_mac=?,status_mac=? WHERE review_id=?`, forged.CandidateSetDigest, forged.Digest(), encodedManifest, reviewMAC(key, "managed-review-manifest-v1", encodedManifest), reviewStatusMAC(key, forged.ReviewID, forged.Digest(), "current"), forged.ReviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetManagedReview(ctx, q); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("forged internally consistent MACs but unbound preimage=%v", err)
+	}
+	if _, err := s.LookupManagedReviewSelection(ctx, q.Binding, q.ReviewID, forged.Digest(), []string{changed.CandidateID}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("forged exact-byte lookup=%v", err)
+	}
+}
+
 func TestManagedReviewCursorIsOwnerAndQueryBound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -173,6 +251,7 @@ func TestManagedReviewCursorIsOwnerAndQueryBound(t *testing.T) {
 	second.CandidateID = "utc_11111111111111111111111111111111"
 	draft.Candidates = append(draft.Candidates, second)
 	draft.Manifest.CandidateSetDigest = managedtest.ReviewCandidateSetDigest(draft.Candidates)
+	draft.Manifest.CurrentPreimageDigest, draft.Manifest.GeneratedPreimageDigest = managedtest.ReviewPreimageSetDigests(draft.Candidates)
 	if err := s.CommitManagedReview(ctx, draft); err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +290,7 @@ func TestManagedReviewRejectsOversizeAndTamperedArtifacts(t *testing.T) {
 	large.Candidates[0].GeneratedBytes = []byte(strings.Repeat("x", 400<<10))
 	large.Candidates[0].GeneratedDigest = reviewHash(large.Candidates[0].GeneratedBytes)
 	large.Manifest.CandidateSetDigest = managedtest.ReviewCandidateSetDigest(large.Candidates)
+	large.Manifest.CurrentPreimageDigest, large.Manifest.GeneratedPreimageDigest = managedtest.ReviewPreimageSetDigests(large.Candidates)
 	if err := s.CommitManagedReview(ctx, large); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("oversize review=%v", err)
 	}
