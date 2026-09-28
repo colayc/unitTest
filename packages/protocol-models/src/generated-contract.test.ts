@@ -102,6 +102,9 @@ import {
 } from "./index.js";
 import type { CoverageFileV16, CoverageFunctionV16, CoverageLineDetailV16, ManagedReviewApplyRequestV16 } from "./index.js";
 import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16 } from "./index.js";
+import { validateManagedReviewApplyV16, validateManagedReviewPageV16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16 } from "./index.js";
+import type { ManagedReviewV16, ManagedReviewIDRequestV16 } from "./index.js";
+import { ManagedTestStatusV16 } from "./index.js";
 
 test("protocol 1.6 generated models expose bounded detail and digest-bound review contracts", () => {
   const summary = {
@@ -127,6 +130,33 @@ test("protocol 1.6 decoded coverage metrics reject covered greater than total", 
     { covered: 1, total: Number.MAX_SAFE_INTEGER + 1, coveredDelta: 0 },
     { covered: 1, total: 5, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }
   ]) assert.equal(validateCoverageMetricV16(metric), false);
+});
+
+test("protocol 1.6 review requests paginate and reject stale or duplicate resolutions", () => {
+  const reviewId = "a".repeat(32);
+  const currentDigest = "b".repeat(64);
+  const request: ManagedReviewIDRequestV16 = { reviewId, cursor: "opaque", limit: 32 };
+  assert.equal(request.limit, 32);
+  const caseId = "utc_" + "c".repeat(32);
+  const apply: ManagedReviewApplyRequestV16 = { reviewId, reviewDigest: currentDigest, resolutions: [{ caseId, choice: ManagedConflictChoiceV16.KeepCurrent }] };
+  assert.equal(validateManagedReviewApplyV16(apply, reviewId, currentDigest), true);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, reviewDigest: "d".repeat(64) }, reviewId, currentDigest), false);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [apply.resolutions[0]!, { caseId, choice: ManagedConflictChoiceV16.UseGenerated }] }, reviewId, currentDigest), false);
+});
+
+test("protocol 1.6 review pages reject an escaped-byte budget overrun", () => {
+  const id = "a".repeat(32);
+  const digest = "b".repeat(64);
+  const makeCase = (diff: string) => ({ caseId: "utc_" + id, status: ManagedTestStatusV16.Conflicted, acceptedDigest: digest, currentDigest: digest, generatedDigest: digest, diff });
+  const small: ManagedReviewV16 = { reviewId: id, reviewDigest: digest, workspaceGeneration: digest, coverageReportId: id, cases: [makeCase("small")], nextCursor: "opaque" };
+  assert.equal(validateManagedReviewPageV16(small), true);
+  const oversized = { ...small, cases: Array(32).fill(makeCase("\0".repeat(4096))) };
+  assert.ok(JSON.stringify(oversized).length > MAX_MANAGED_REVIEW_PAGE_BYTES_V16);
+  assert.equal(validateManagedReviewPageV16(oversized), false);
+  const htmlEscaped = { ...small, cases: Array(32).fill(makeCase("<".repeat(4096))) };
+  assert.ok(JSON.stringify(htmlEscaped).length < MAX_MANAGED_REVIEW_PAGE_BYTES_V16);
+  assert.equal(validateManagedReviewPageV16(htmlEscaped), false, "Go's JSON encoder escapes HTML characters before the wire-byte check");
+  assert.equal(validateManagedReviewPageV16({ ...small, cases: Array(33).fill(makeCase("small")) }), false);
 });
 
 test("protocol 1.5 generated models expose typed generation contracts", () => {

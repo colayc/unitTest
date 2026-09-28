@@ -190,9 +190,15 @@ export interface ManagedRecordsRequestV16 {
     workspaceGeneration: string;
 }
 
+/**
+ * A bounded review page. The service MUST bind nextCursor to reviewId, reviewDigest and
+ * limit, and reject pages exceeding the 512 KiB serialized payload budget; callers continue
+ * with nextCursor rather than truncating cases.
+ */
 export interface ManagedReviewV16 {
     cases:               ManagedReviewCaseV16[];
     coverageReportId:    string;
+    nextCursor?:         string;
     reviewDigest:        string;
     reviewId:            string;
     workspaceGeneration: string;
@@ -231,6 +237,8 @@ export interface ManagedReviewApplyResultV16 {
 }
 
 export interface ManagedReviewIDRequestV16 {
+    cursor?:  string;
+    limit?:   number;
     reviewId: string;
 }
 

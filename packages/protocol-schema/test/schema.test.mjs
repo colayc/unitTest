@@ -95,6 +95,8 @@ test("protocol 1.6 closes detail status, reasons, managed states, and digest-bou
   }
   const apply = (await load("../fixtures/v1.6/methods.valid.json"))[6];
   assert.equal(message(apply), true, JSON.stringify(message.errors));
+  assert.equal(message({ ...apply, payload: { ...apply.payload, reviewDigest: "a".repeat(64) } }), true,
+    "a well-formed but stale digest is syntactically valid; the service must compare it to durable state");
   assert.equal(message({ ...apply, payload: { ...apply.payload, reviewDigest: "b".repeat(63) } }), false);
   assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "a".repeat(32), choice: "keep-current" }] } }), false);
   assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "utc_" + "a".repeat(32), choice: "delete" }] } }), false);
@@ -128,6 +130,13 @@ test("protocol 1.6 validates paginated detail and managed-review responses", asy
   assert.equal(message({ ...base, method: responses[3][0], payload: { ...responses[3][1], items: [{ ...line, branchesTotal: Number.MAX_SAFE_INTEGER + 1 }] } }), false, "overflow branch count");
   assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: [{ ...record, caseId: id }] } }), false, "malformed case ID");
   assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: Array(201).fill(record) } }), false, "oversized record page");
+  const reviewRequest = (await load("../fixtures/v1.6/methods.valid.json"))[5];
+  assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "opaque", limit: 32 } }), true, "review continuation");
+  for (const limit of [0, 33]) assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, limit } }), false, `review limit ${limit}`);
+  assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "" } }), false, "empty review cursor");
+  const review = responses[5][1];
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, nextCursor: "opaque" } }), true, "review continuation response");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: Array(33).fill(review.cases[0]) } }), false, "oversized review page");
 });
 
 test("protocol 1.5 generation boundaries reject caller classification, leaked text, and filesystem artifacts", async () => {

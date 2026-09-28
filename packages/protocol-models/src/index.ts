@@ -364,7 +364,7 @@ export type {
   TestGenerationContractV16, TestGenerationStartRequestV16,
   TestGenerationRunV16, TestGenerationCandidatePageV16,
   ManagedTestRecordV16, ManagedTestRecordPageV16,
-  ManagedReviewV16, ManagedReviewCaseV16,
+  ManagedReviewV16, ManagedReviewCaseV16, ManagedReviewIDRequestV16,
   ManagedReviewApplyRequestV16, ManagedReviewApplyResultV16
 } from "./generated/test-generation-v1-6.js";
 export { ManagedTestStatusV16, ManagedConflictChoiceV16 } from "./generated/test-generation-v1-6.js";
@@ -372,3 +372,7 @@ export type { TaskSnapshotV16 } from "./generated/task-v1-6.js";
 export type { TaskEventV16 } from "./generated/event-v1-6.js";
 export type { ArtifactMetadataV16 } from "./generated/artifact-v1-6.js";
 export { validateCoverageMetricV16, validateCoverageSummaryV16 } from "./coverage-v1-6-validation.js";
+export {
+  validateManagedReviewApplyV16, validateManagedReviewPageV16,
+  MAX_MANAGED_REVIEW_PAGE_ITEMS_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16
+} from "./managed-review-v1-6-validation.js";

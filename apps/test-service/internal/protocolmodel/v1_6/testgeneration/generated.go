@@ -127,9 +127,13 @@ type ManagedRecordsRequestV16 struct {
 	WorkspaceGeneration string                `json:"workspaceGeneration"`
 }
 
+// A bounded review page. The service MUST bind nextCursor to reviewId, reviewDigest and
+// limit, and reject pages exceeding the 512 KiB serialized payload budget; callers continue
+// with nextCursor rather than truncating cases.
 type ManagedReviewV16 struct {
 	Cases               []ManagedReviewCaseV16 `json:"cases"`
 	CoverageReportID    string                 `json:"coverageReportId"`
+	NextCursor          *string                `json:"nextCursor,omitempty"`
 	ReviewDigest        string                 `json:"reviewDigest"`
 	ReviewID            string                 `json:"reviewId"`
 	WorkspaceGeneration string                 `json:"workspaceGeneration"`
@@ -162,7 +166,9 @@ type ManagedReviewApplyResultV16 struct {
 }
 
 type ManagedReviewIDRequestV16 struct {
-	ReviewID string `json:"reviewId"`
+	Cursor   *string `json:"cursor,omitempty"`
+	Limit    *int64  `json:"limit,omitempty"`
+	ReviewID string  `json:"reviewId"`
 }
 
 type TestGenerationRunV16 struct {
