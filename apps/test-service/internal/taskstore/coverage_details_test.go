@@ -157,6 +157,33 @@ func TestCoverageDetailValidatorAcceptsCanonicalBuildIndex(t *testing.T) {
 	if err := validateDetailIndex(index); err != nil {
 		t.Fatalf("canonical Build index rejected: %v", err)
 	}
+	if !validDetailReportSemantics(index, report) {
+		t.Fatal("canonical current Build status rejected")
+	}
+	report.Sources = append(report.Sources, coveragedomain.SourceSnapshot{URI: "src/b.cpp", SHA256: strings.Repeat("9", 64)})
+	input := coveragedetail.BuildInput{WorkspaceGeneration: strings.Repeat("f", 64), ProjectID: "core", Report: report, Sources: report.Sources, Functions: []coveragedomain.FunctionObservation{{QualifiedName: "foo", File: "src/a.cpp", ExecutionCount: 1, Lines: []coveragedomain.LineObservation{{Line: 1, Count: 1}, {Line: 2, Count: 0}}, Branches: []coveragedomain.BranchObservation{{Line: 2, Column: 1, Ordinal: 0, HasOrdinal: true, Count: 0}}}, {QualifiedName: "bar", File: "src/b.cpp", IncompleteReason: coveragedomain.ObservationIncompleteAttributionAmbiguous}}}
+	index, err = coveragedetail.Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.Project.Status != coveragedetail.StatusIncomplete || index.Files[0].Status != coveragedetail.StatusCurrent || index.Files[1].Status != coveragedetail.StatusIncomplete {
+		t.Fatalf("Build sibling status = %#v", index)
+	}
+	if err := validateDetailIndex(index); err != nil || !validDetailReportSemantics(index, report) {
+		t.Fatalf("valid incomplete sibling rejected: %v", err)
+	}
+	report.Summary.Lines.Covered = 2
+	input.Report = report
+	index, err = coveragedetail.Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.Files[0].Status != coveragedetail.StatusIncomplete || index.Files[0].Functions[0].Status != coveragedetail.StatusCurrent {
+		t.Fatalf("Build mismatch status = %#v", index.Files[0])
+	}
+	if err := validateDetailIndex(index); err != nil || !validDetailReportSemantics(index, report) {
+		t.Fatalf("valid aggregate mismatch rejected: %v", err)
+	}
 }
 
 func TestCoverageDetailRejectsMissingReportMismatchReason(t *testing.T) {
@@ -187,6 +214,70 @@ func TestCoverageDetailRejectsCurrentChildOfPartialReport(t *testing.T) {
 	index := coveragedetail.Index{WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration, ProjectID: mutation.FinishCoverage.Run.Request.ProjectID, ReportID: report.ID, RunID: report.RunID, Toolchain: report.Toolchain, Project: coveragedetail.Project{Status: coveragedetail.StatusIncomplete, Reasons: []string{"detail_aggregate_mismatch", "test_crashed", "test_timed_out"}}, Files: []coveragedetail.File{{ID: fileID, RelativePath: "src/a.cpp", SourceSHA256: strings.Repeat("a", 64), Status: coveragedetail.StatusCurrent}}}
 	if err := store.PutCoverageDetail(ctx, index); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("partial report current child = %v", err)
+	}
+}
+
+func TestCoverageDetailRejectsUncausedParentStatusAndUnknownReasons(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*coveragedetail.Index)
+	}{
+		{"incomplete project without incomplete child", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"attribution_ambiguous"}
+			v.Gaps = nil
+		}},
+		{"incomplete project with arbitrary reason", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"invented_reason"}
+			v.Gaps = nil
+		}},
+		{"stale project with arbitrary reason", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusStale
+			v.Project.Reasons = []string{"invented_reason"}
+			v.Gaps = nil
+		}},
+		{"incomplete file without incomplete function", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"attribution_ambiguous"}
+			v.Files[0].Status = coveragedetail.StatusIncomplete
+			v.Files[0].Reasons = []string{"attribution_ambiguous"}
+			v.Gaps = nil
+		}},
+		{"unknown function reason", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"invented_reason"}
+			v.Files[0].Status = coveragedetail.StatusIncomplete
+			v.Files[0].Reasons = []string{"invented_reason"}
+			v.Files[0].Functions[0].Status = coveragedetail.StatusIncomplete
+			v.Files[0].Functions[0].Reasons = []string{"invented_reason"}
+			v.Gaps = nil
+		}},
+		{"mismatch reason without mismatch", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"detail_aggregate_mismatch"}
+			v.Gaps = nil
+		}},
+		{"partial reason on available report", func(v *coveragedetail.Index) {
+			v.Project.Status = coveragedetail.StatusIncomplete
+			v.Project.Reasons = []string{"test_crashed"}
+			v.Gaps = nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			index := detailStoreFixture(t, store, 7021)
+			bad := copyDetailIndex(index)
+			tc.mutate(&bad)
+			if err := store.PutCoverageDetail(ctx, bad); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("uncausal status/reason accepted: %v", err)
+			}
+			if _, err := store.GetCoverageProject(ctx, index.ReportID); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("invalid index persisted: %v", err)
+			}
+		})
 	}
 }
 
@@ -423,6 +514,11 @@ func TestCoverageDetailIncompleteDeltaAndForeignKeyCleanup(t *testing.T) {
 	index.Project.Reasons = []string{"attribution_ambiguous"}
 	index.Files[1].Status = coveragedetail.StatusIncomplete
 	index.Files[1].Reasons = []string{"attribution_ambiguous"}
+	missingID, err := coveragedetail.StableFunctionID(index.Files[1].ID, "linkage:_Z3barv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index.Files[1].Functions = []coveragedetail.Function{{ID: missingID, Name: "bar", Status: coveragedetail.StatusIncomplete, Reasons: []string{"attribution_ambiguous"}}}
 	index.Gaps = nil
 	index.Project.Delta.Lines = coveragedetail.DeltaMetric{Covered: -1, Total: 2}
 	index.Files[0].Delta.Functions = coveragedetail.DeltaMetric{Covered: 1, Total: 0}

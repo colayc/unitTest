@@ -329,37 +329,78 @@ func reasonsInclude(parent, child []string) bool {
 }
 
 func validDetailReportSemantics(index coveragedetail.Index, report coveragedomain.Report) bool {
-	if index.Project.Summary != report.Summary {
-		if index.Project.Status != coveragedetail.StatusIncomplete || !reasonsInclude(index.Project.Reasons, []string{"detail_aggregate_mismatch"}) {
-			return false
-		}
-		for _, file := range index.Files {
-			if file.Status != coveragedetail.StatusIncomplete || !reasonsInclude(file.Reasons, []string{"detail_aggregate_mismatch"}) {
-				return false
-			}
+	mismatch := index.Project.Summary != report.Summary
+	reportReasons := map[string]bool{}
+	if report.Completeness.Outcome == coveragedomain.OutcomePartial {
+		for _, reason := range report.Completeness.Reasons {
+			reportReasons[string(reason)] = true
 		}
 	}
-	if report.Completeness.Outcome == coveragedomain.OutcomePartial {
-		if index.Project.Status != coveragedetail.StatusIncomplete {
-			return false
+	projectReasons := cloneDetailReasonSet(reportReasons)
+	if mismatch {
+		projectReasons["detail_aggregate_mismatch"] = true
+	}
+	for _, file := range index.Files {
+		fileReasons := cloneDetailReasonSet(reportReasons)
+		if mismatch {
+			fileReasons["detail_aggregate_mismatch"] = true
 		}
-		reasons := make([]string, 0, len(report.Completeness.Reasons))
-		for _, reason := range report.Completeness.Reasons {
-			reasons = append(reasons, string(reason))
-		}
-		if !reasonsInclude(index.Project.Reasons, reasons) {
-			return false
-		}
-		for _, file := range index.Files {
-			if file.Status != coveragedetail.StatusIncomplete || !reasonsInclude(file.Reasons, reasons) {
-				return false
-			}
-			for _, fn := range file.Functions {
-				if fn.Status != coveragedetail.StatusIncomplete || !reasonsInclude(fn.Reasons, reasons) {
-					return false
+		for _, fn := range file.Functions {
+			functionReasons := cloneDetailReasonSet(reportReasons)
+			observationIncomplete := false
+			for _, reason := range fn.Reasons {
+				switch reason {
+				case string(coveragedomain.ObservationIncompleteAttributionAmbiguous), string(coveragedomain.ObservationIncompleteLimit):
+					functionReasons[reason] = true
+					observationIncomplete = true
+				default:
+					if !reportReasons[reason] {
+						return false
+					}
 				}
 			}
+			if observationIncomplete && (fn.Summary != (coveragedomain.Summary{}) || len(fn.Lines) != 0 || len(fn.Branches) != 0) {
+				return false
+			}
+			if fn.Status != detailStatusForReasons(functionReasons) || !sameDetailReasons(fn.Reasons, functionReasons) {
+				return false
+			}
+			for reason := range functionReasons {
+				fileReasons[reason] = true
+			}
 		}
+		if file.Status != detailStatusForReasons(fileReasons) || !sameDetailReasons(file.Reasons, fileReasons) {
+			return false
+		}
+		for reason := range fileReasons {
+			projectReasons[reason] = true
+		}
+	}
+	return index.Project.Status == detailStatusForReasons(projectReasons) && sameDetailReasons(index.Project.Reasons, projectReasons)
+}
+func cloneDetailReasonSet(values map[string]bool) map[string]bool {
+	copy := make(map[string]bool, len(values)+2)
+	for reason := range values {
+		copy[reason] = true
+	}
+	return copy
+}
+func detailStatusForReasons(reasons map[string]bool) coveragedetail.Status {
+	if len(reasons) == 0 {
+		return coveragedetail.StatusCurrent
+	}
+	return coveragedetail.StatusIncomplete
+}
+func sameDetailReasons(actual []string, expected map[string]bool) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, reason := range actual {
+		if !expected[reason] || seen[reason] {
+			return false
+		}
+		seen[reason] = true
 	}
 	return true
 }
