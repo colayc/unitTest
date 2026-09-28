@@ -9,7 +9,7 @@ import (
 const maxDocumentBytes = 8 * 1024 * 1024
 const maxDocumentBlocks = 4096
 
-const markerToken = "unit-test-ide:managed"
+const markerToken = "unit-test-ide"
 const beginPrefix = "// unit-test-ide:managed-begin case="
 const endPrefix = "// unit-test-ide:managed-end case="
 const functionPrefix = " function="
@@ -33,6 +33,7 @@ func ParseDocument(input []byte, maxBytes int64, maxBlocks int) (Document, error
 	var active *Block
 	activeBodyStart := 0
 	newlineKind := byte(0)
+	var context lexicalContext
 	for offset := 0; offset < len(owned); {
 		next := bytes.IndexByte(owned[offset:], '\n')
 		lineEnd := len(owned)
@@ -58,7 +59,10 @@ func ParseDocument(input []byte, maxBytes int64, maxBlocks int) (Document, error
 		if kind != 0 {
 			newlineKind = kind
 		}
-		if bytes.Contains(line, []byte(markerToken)) {
+		if containsMarkerNamespace(line) {
+			if context.mode != lexicalNormal {
+				return Document{}, ErrInvalidManagedTest
+			}
 			if kind == 0 {
 				return Document{}, ErrInvalidManagedTest
 			}
@@ -85,12 +89,147 @@ func ParseDocument(input []byte, maxBytes int64, maxBlocks int) (Document, error
 				return Document{}, ErrInvalidManagedTest
 			}
 		}
+		if err := context.scanLine(line, kind != 0); err != nil {
+			return Document{}, err
+		}
 		offset = lineAfter
 	}
-	if active != nil {
+	if active != nil || context.mode != lexicalNormal {
 		return Document{}, ErrInvalidManagedTest
 	}
 	return doc, nil
+}
+
+func containsMarkerNamespace(line []byte) bool {
+	for i := 0; i+len(markerToken) <= len(line); i++ {
+		if line[i] != 'u' && line[i] != 'U' {
+			continue
+		}
+		if bytes.EqualFold(line[i:i+len(markerToken)], []byte(markerToken)) {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	lexicalNormal byte = iota
+	lexicalBlockComment
+	lexicalDoubleQuote
+	lexicalSingleQuote
+	lexicalRawString
+	lexicalContinuedLineComment
+)
+
+// lexicalContext tracks only the spans that could make a column-zero marker
+// line ambiguous. It is deliberately not a C/C++ parser or an AST lexer.
+type lexicalContext struct {
+	mode   byte
+	rawEnd []byte
+}
+
+func (c *lexicalContext) scanLine(line []byte, hasNewline bool) error {
+	if c.mode == lexicalContinuedLineComment {
+		if len(line) > 0 && line[len(line)-1] == '\\' && hasNewline {
+			return nil
+		}
+		c.mode = lexicalNormal
+		return nil
+	}
+	continuedQuote := false
+	for i := 0; i < len(line); {
+		switch c.mode {
+		case lexicalNormal:
+			if i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
+				if line[len(line)-1] == '\\' && hasNewline {
+					c.mode = lexicalContinuedLineComment
+				}
+				return nil
+			}
+			if i+1 < len(line) && line[i] == '/' && line[i+1] == '*' {
+				c.mode = lexicalBlockComment
+				i += 2
+				continue
+			}
+			if i+1 < len(line) && line[i] == 'R' && line[i+1] == '"' {
+				end, ok := rawStringTerminator(line[i+2:])
+				if !ok {
+					return ErrInvalidManagedTest
+				}
+				c.mode, c.rawEnd = lexicalRawString, end
+				i += 2 + len(end) - 1 // opening R"<delimiter>(
+				continue
+			}
+			if line[i] == '"' {
+				c.mode = lexicalDoubleQuote
+			} else if line[i] == '\'' && !digitSeparator(line, i) {
+				c.mode = lexicalSingleQuote
+			}
+			i++
+		case lexicalBlockComment:
+			close := bytes.Index(line[i:], []byte("*/"))
+			if close < 0 {
+				return nil
+			}
+			c.mode = lexicalNormal
+			i += close + 2
+		case lexicalRawString:
+			close := bytes.Index(line[i:], c.rawEnd)
+			if close < 0 {
+				return nil
+			}
+			endLength := len(c.rawEnd)
+			c.mode, c.rawEnd = lexicalNormal, nil
+			i += close + endLength
+		case lexicalDoubleQuote, lexicalSingleQuote:
+			if line[i] == '\\' {
+				if i+1 == len(line) {
+					continuedQuote = hasNewline
+					i++
+					continue
+				}
+				i += 2
+				continue
+			}
+			if c.mode == lexicalDoubleQuote && line[i] == '"' || c.mode == lexicalSingleQuote && line[i] == '\'' {
+				c.mode = lexicalNormal
+			}
+			i++
+		}
+	}
+	if c.mode == lexicalDoubleQuote || c.mode == lexicalSingleQuote {
+		if !continuedQuote {
+			return ErrInvalidManagedTest
+		}
+	}
+	return nil
+}
+
+func digitSeparator(line []byte, index int) bool {
+	if index == 0 || index+1 >= len(line) {
+		return false
+	}
+	return hexDigit(line[index-1]) && hexDigit(line[index+1])
+}
+
+func hexDigit(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func rawStringTerminator(afterQuote []byte) ([]byte, bool) {
+	for i, b := range afterQuote {
+		if b == '(' {
+			end := make([]byte, 0, i+2)
+			end = append(end, ')')
+			end = append(end, afterQuote[:i]...)
+			end = append(end, '"')
+			return end, true
+		}
+		if i >= 16 || b < '!' || b > '~' || b == ')' || b == '\\' || b == '"' {
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 func parseBegin(line []byte) (string, string, string, bool) {

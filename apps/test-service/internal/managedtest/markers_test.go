@@ -106,6 +106,58 @@ func TestParseDocumentLeavesOpaqueUnmanagedBytesExact(t *testing.T) {
 	}
 }
 
+func TestParseDocumentRejectsMarkersInsideMultilineLexicalContext(t *testing.T) {
+	block := string(mustRender(t, caseA, "\n"))
+	tests := map[string]string{
+		"block comment":             "/* user comment\n" + block + "*/\n",
+		"raw string":                "const char *s = R\"tag(raw text\n" + block + ")tag\";\n",
+		"continued ordinary string": "const char *s = \"prefix\\\n" + block + "\";\n",
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseDocument([]byte(input), 4096, 1); err == nil {
+				t.Fatal("accepted marker inside multiline lexical context")
+			}
+		})
+	}
+}
+
+func TestParseDocumentRejectsUnterminatedMultilineContext(t *testing.T) {
+	for name, input := range map[string]string{
+		"block comment":    "/* unfinished\n",
+		"raw string":       "const char *s = R\"tag(unfinished\n",
+		"ordinary string":  "const char *s = \"unfinished\n",
+		"continued string": "const char *s = \"unfinished\\\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseDocument([]byte(input), 4096, 1); err == nil {
+				t.Fatal("accepted unterminated lexical context")
+			}
+		})
+	}
+}
+
+func TestParseDocumentPreservesUnmanagedMultilineContexts(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n"} {
+		t.Run(strings.ReplaceAll(newline, "\n", "LF"), func(t *testing.T) {
+			prefix := []byte("/* harmless" + newline + "comment */" + newline +
+				"const char *raw = R\"tag(first" + newline + "second)tag\";" + newline +
+				"const int count = 1'000;" + newline +
+				"const char *quoted = \"ordinary string\";" + newline +
+				"const char *continued = \"first\\" + newline + "second\";" + newline)
+			block := mustRender(t, caseA, newline)
+			input := append(bytes.Clone(prefix), block...)
+			doc, err := ParseDocument(input, 4096, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(doc.Blocks) != 1 || doc.Blocks[0].StartByte != len(prefix) || !bytes.Equal(doc.Bytes[:len(prefix)], prefix) || !bytes.Equal(doc.Bytes, input) {
+				t.Fatal("valid unmanaged lexical context changed")
+			}
+		})
+	}
+}
+
 func TestParseDocumentRejectsMalformedMarkers(t *testing.T) {
 	base := string(mustRender(t, caseA, "\n"))
 	start := strings.Split(base, "\n")[0] + "\n"
@@ -122,6 +174,10 @@ func TestParseDocumentRejectsMalformedMarkers(t *testing.T) {
 		"indented marker":          "  " + base,
 		"string literal":           "const char *s = \"" + strings.TrimSpace(start) + "\";\n",
 		"truncated marker token":   "// unit-test-ide:managed\n",
+		"spaced namespace":         "// unit-test-ide: managed-begin case=" + caseA + "\n",
+		"case-shifted namespace":   "// Unit-Test-Ide:managed-begin case=" + caseA + "\n",
+		"spaced delimiter":         "// unit-test-ide :managed-begin case=" + caseA + "\n",
+		"missing delimiter":        "// unit-test-ide managed-begin case=" + caseA + "\n",
 		"trailing marker data":     strings.Replace(base, end, strings.TrimSpace(end)+" garbage\n", 1),
 		"NUL":                      base + "\x00",
 		"mixed newlines":           strings.Replace(base, "TEST(Example, Empty) {}\n", "TEST(Example, Empty) {}\r\n", 1),
