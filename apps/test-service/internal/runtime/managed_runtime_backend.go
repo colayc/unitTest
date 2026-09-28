@@ -45,6 +45,7 @@ type managedPublisher interface {
 	PlanManaged(context.Context, testgenpublish.CandidateSet, testgenpublish.ManagedDecision) (testgenpublish.Plan, error)
 	PublishManaged(context.Context, testgenpublish.Plan) (testgenpublish.Receipt, error)
 	ManagedReceipt(context.Context, testgenpublish.ManagedDecision) (testgenpublish.Receipt, bool, error)
+	ManagedRunReceipt(context.Context, string) (testgenpublish.Receipt, bool, error)
 }
 
 type managedBaselineProvider interface {
@@ -72,12 +73,43 @@ type ManagedRuntimeConfig struct {
 // to report ManagedTestsReady=false and production does not construct this.
 type ManagedRuntimeProvider struct {
 	*generationService
-	config  ManagedRuntimeConfig
-	applyMu sync.Mutex
+	config            ManagedRuntimeConfig
+	applyMu           sync.Mutex
+	checkpointManaged func(context.Context, int64, testgendomain.Run) (testgendomain.Run, error)
 }
 
 func newManagedRuntimeProvider(config ManagedRuntimeConfig) *ManagedRuntimeProvider {
-	return &ManagedRuntimeProvider{generationService: config.Base, config: config}
+	p := &ManagedRuntimeProvider{generationService: config.Base, config: config}
+	if config.Base != nil {
+		config.Base.acceptMu.Lock()
+		config.Base.managedCancelGuard = p.reconcileManagedCancel
+		config.Base.acceptMu.Unlock()
+	}
+	return p
+}
+
+// reconcileManagedCancel runs with generationService.acceptMu held. The
+// publisher journal is authoritative if its commit succeeded but the run CAS
+// failed; uncertainty keeps the run non-terminal for a later replay.
+func (p *ManagedRuntimeProvider) reconcileManagedCancel(ctx context.Context, owner string, run testgendomain.Run) (testgendomain.Run, error) {
+	if !p.ManagedTestsReady() {
+		return testgendomain.Run{}, ErrManagedOutcomeUncertain
+	}
+	if err := p.config.Publisher.Recover(ctx); err != nil {
+		return testgendomain.Run{}, errors.Join(ErrManagedOutcomeUncertain, err)
+	}
+	receipt, found, err := p.config.Publisher.ManagedRunReceipt(ctx, run.ID)
+	if err != nil {
+		return testgendomain.Run{}, errors.Join(ErrManagedOutcomeUncertain, err)
+	}
+	if !found {
+		return run, nil
+	}
+	recovered, err := p.confirmManagedReceipt(ctx, managedtest.ApplyRequest{Owner: owner, ReviewID: receipt.ManagedReviewID, ReviewDigest: receipt.ManagedReviewDigest}, receipt)
+	if err != nil {
+		return testgendomain.Run{}, errors.Join(ErrManagedOutcomeUncertain, err)
+	}
+	return recovered, nil
 }
 
 func (p *ManagedRuntimeProvider) ManagedTestsReady() bool {
@@ -428,6 +460,9 @@ func (p *ManagedRuntimeProvider) confirmManagedReceipt(ctx context.Context, requ
 	if err != nil {
 		return testgendomain.Run{}, err
 	}
+	if receipt.SnapshotDigest != run.Record.SnapshotDigest {
+		return testgendomain.Run{}, task.ErrConflict
+	}
 	if run.State == testgendomain.StateAccepted {
 		return run, nil
 	}
@@ -439,7 +474,13 @@ func (p *ManagedRuntimeProvider) confirmManagedReceipt(ctx context.Context, requ
 	next.Revision++
 	now := time.Now().UTC()
 	next.FinishedAt = &now
-	committed, err := p.config.Base.store.CheckpointGeneration(ctx, run.Revision, next, nil, nil)
+	checkpoint := p.checkpointManaged
+	if checkpoint == nil {
+		checkpoint = func(ctx context.Context, expected int64, next testgendomain.Run) (testgendomain.Run, error) {
+			return p.config.Base.store.CheckpointGeneration(ctx, expected, next, nil, nil)
+		}
+	}
+	committed, err := checkpoint(ctx, run.Revision, next)
 	if err != nil {
 		return testgendomain.Run{}, errors.Join(ErrManagedOutcomeUncertain, err)
 	}

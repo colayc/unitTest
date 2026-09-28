@@ -1039,6 +1039,10 @@ func TestManagedPublishCommitsReceiptAndRegistryAndIdempotentRetry(t *testing.T)
 	if receipt.ManagedReviewDigest != plan.ManagedReviewDigest {
 		t.Fatalf("unbound receipt: %+v", receipt)
 	}
+	byRun, found, err := f.p.ManagedRunReceipt(context.Background(), plan.RunID)
+	if err != nil || !found || byRun.ConfirmationDigest != receipt.ConfirmationDigest {
+		t.Fatalf("cancel recovery could not find committed run receipt: %+v found=%t err=%v", byRun, found, err)
+	}
 	got, err := f.registry.Get(context.Background(), f.record.CaseID)
 	if err != nil || got.AcceptedBlockDigest != f.record.AcceptedBlockDigest {
 		t.Fatalf("registry not committed: %+v %v", got, err)

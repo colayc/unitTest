@@ -64,12 +64,14 @@ type managedPublisherFixture struct {
 	receipt                 testgenpublish.Receipt
 	published               bool
 	publishErr              error
+	recoverErr              error
+	runReceiptErr           error
 	onPlan                  func()
 	onPublish               func()
 }
 
 func (p *managedPublisherFixture) ManagedPublicationReady() bool { return p.ready }
-func (p *managedPublisherFixture) Recover(context.Context) error { return nil }
+func (p *managedPublisherFixture) Recover(context.Context) error { return p.recoverErr }
 func (p *managedPublisherFixture) ReadManagedPreimage(_ context.Context, path string) ([]byte, error) {
 	return bytes.Clone(p.preimages[path]), nil
 }
@@ -97,6 +99,15 @@ func (p *managedPublisherFixture) PublishManaged(_ context.Context, plan testgen
 }
 func (p *managedPublisherFixture) ManagedReceipt(_ context.Context, decision testgenpublish.ManagedDecision) (testgenpublish.Receipt, bool, error) {
 	if p.published && p.decision.ReviewID == decision.ReviewID && p.decision.ReviewDigest == decision.ReviewDigest {
+		return p.receipt, true, nil
+	}
+	return testgenpublish.Receipt{}, false, nil
+}
+func (p *managedPublisherFixture) ManagedRunReceipt(_ context.Context, runID string) (testgenpublish.Receipt, bool, error) {
+	if p.runReceiptErr != nil {
+		return testgenpublish.Receipt{}, false, p.runReceiptErr
+	}
+	if p.published && p.receipt.RunID == runID {
 		return p.receipt, true, nil
 	}
 	return testgenpublish.Receipt{}, false, nil
@@ -461,6 +472,78 @@ func TestManagedRuntimeApplyNeverPublishesPreviouslyCancelledRun(t *testing.T) {
 	}
 	if pub.planCalls != 0 || pub.publishCalls != 0 || pub.published {
 		t.Fatalf("cancelled run reached publication: plans=%d publishes=%d published=%t", pub.planCalls, pub.publishCalls, pub.published)
+	}
+}
+
+func TestManagedRuntimeCancelReplaysCommittedReceiptBeforeTerminalizing(t *testing.T) {
+	provider, reads, _, pub, _, request := managedApplyFixture(t)
+	run, err := provider.owned(context.Background(), request.Owner, reads.binding.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub.decision = testgenpublish.ManagedDecision{ReviewID: request.ReviewID, ReviewDigest: request.ReviewDigest, Resolutions: request.Resolutions}
+	pub.receipt = testgenpublish.Receipt{RunID: run.ID, SnapshotDigest: run.Record.SnapshotDigest, ManagedReviewID: request.ReviewID,
+		ManagedReviewDigest: request.ReviewDigest, ConfirmationDigest: strings.Repeat("f", 64)}
+	pub.published = true // Journal/registry committed, but run checkpoint did not.
+	result, err := provider.CancelTestGeneration(context.Background(), request.Owner, run.ID)
+	if err != nil || string(result.State) != string(testgendomain.StateAccepted) {
+		t.Fatalf("cancel failed to recover committed publication: %+v %v", result, err)
+	}
+	replayed, err := provider.ApplyManagedReview(context.Background(), request)
+	if err != nil || replayed.State != testgendomain.StateAccepted || pub.publishCalls != 0 {
+		t.Fatalf("receipt replay=%+v err=%v publishes=%d", replayed, err, pub.publishCalls)
+	}
+}
+
+func TestManagedRuntimeCancelRecoversAfterApplyCheckpointFailure(t *testing.T) {
+	provider, reads, _, pub, _, request := managedApplyFixture(t)
+	failOnce := true
+	provider.checkpointManaged = func(ctx context.Context, expected int64, next testgendomain.Run) (testgendomain.Run, error) {
+		if failOnce {
+			failOnce = false
+			return testgendomain.Run{}, task.ErrConflict
+		}
+		return provider.store.CheckpointGeneration(ctx, expected, next, nil, nil)
+	}
+	if _, err := provider.ApplyManagedReview(context.Background(), request); !errors.Is(err, ErrManagedOutcomeUncertain) || !pub.published {
+		t.Fatalf("published without successful run checkpoint: published=%t err=%v", pub.published, err)
+	}
+	pending, err := provider.owned(context.Background(), request.Owner, reads.binding.RunID)
+	if err != nil || pending.State != testgendomain.StateAwaitingConfirmation {
+		t.Fatalf("checkpoint failure changed run state: %+v %v", pending, err)
+	}
+	pub.runReceiptErr = testgenpublish.ErrConflict
+	if _, err := provider.CancelTestGeneration(context.Background(), request.Owner, pending.ID); !errors.Is(err, ErrManagedOutcomeUncertain) {
+		t.Fatalf("unresolved committed receipt did not fail closed: %v", err)
+	}
+	stillPending, err := provider.owned(context.Background(), request.Owner, pending.ID)
+	if err != nil || stillPending.State != testgendomain.StateAwaitingConfirmation {
+		t.Fatalf("unresolved committed receipt was terminalized: %+v %v", stillPending, err)
+	}
+	pub.runReceiptErr = nil
+	result, err := provider.CancelTestGeneration(context.Background(), request.Owner, pending.ID)
+	if err != nil || string(result.State) != string(testgendomain.StateAccepted) {
+		t.Fatalf("cancel did not replay durable managed receipt: %+v %v", result, err)
+	}
+	if pub.publishCalls != 1 {
+		t.Fatalf("recovery republished files: %d", pub.publishCalls)
+	}
+}
+
+func TestManagedRuntimeCancelLeavesRunPendingWhenReceiptCannotBeResolved(t *testing.T) {
+	provider, reads, _, pub, _, request := managedApplyFixture(t)
+	pub.runReceiptErr = testgenpublish.ErrConflict
+	if _, err := provider.CancelTestGeneration(context.Background(), request.Owner, reads.binding.RunID); !errors.Is(err, ErrManagedOutcomeUncertain) {
+		t.Fatalf("unresolved receipt did not fail closed: %v", err)
+	}
+	pending, err := provider.owned(context.Background(), request.Owner, reads.binding.RunID)
+	if err != nil || pending.State != testgendomain.StateAwaitingConfirmation || pub.publishCalls != 0 {
+		t.Fatalf("unresolved receipt terminalized or published run: %+v err=%v publishes=%d", pending, err, pub.publishCalls)
+	}
+	pub.runReceiptErr = nil
+	accepted, err := provider.ApplyManagedReview(context.Background(), request)
+	if err != nil || accepted.State != testgendomain.StateAccepted {
+		t.Fatalf("run could not be safely retried after uncertainty: %+v %v", accepted, err)
 	}
 }
 

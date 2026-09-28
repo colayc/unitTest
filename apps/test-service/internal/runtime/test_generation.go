@@ -93,20 +93,21 @@ type GenerationServiceConfig struct {
 }
 
 type generationService struct {
-	store            *taskstore.Store
-	coord            *testgencoord.Coordinator
-	driver           GenerationDriver
-	publisher        generationPublisher
-	verifyProcess    testgencoord.ProcessOwnerVerifier
-	publishEvent     func(task.Event)
-	currentIndex     managedCurrentIndexReader
-	managedReviews   managedReviewReader
-	managedValidator managedValidationProvider
-	mu               sync.Mutex
-	acceptMu         sync.Mutex
-	running          map[string]*generationExecution
-	cancelPending    map[string]bool
-	wg               sync.WaitGroup
+	store              *taskstore.Store
+	coord              *testgencoord.Coordinator
+	driver             GenerationDriver
+	publisher          generationPublisher
+	verifyProcess      testgencoord.ProcessOwnerVerifier
+	publishEvent       func(task.Event)
+	currentIndex       managedCurrentIndexReader
+	managedReviews     managedReviewReader
+	managedValidator   managedValidationProvider
+	mu                 sync.Mutex
+	acceptMu           sync.Mutex
+	managedCancelGuard func(context.Context, string, testgendomain.Run) (testgendomain.Run, error)
+	running            map[string]*generationExecution
+	cancelPending      map[string]bool
+	wg                 sync.WaitGroup
 }
 
 type generationExecution struct {
@@ -290,6 +291,13 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 		}
 		return generationRunV15(run), nil
 	}
+	run, err = s.reconcileManagedBeforeCancel(ctx, owner, run)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if testgendomain.IsTerminal(run.State) {
+		return generationRunV15(run), nil
+	}
 	s.mu.Lock()
 	s.cancelPending[run.ID] = true
 	execution := s.running[run.ID]
@@ -311,7 +319,17 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 	if err != nil {
 		return generationv15.TestGenerationRunV15{}, err
 	}
+	run, err = s.reconcileManagedBeforeCancel(ctx, owner, run)
+	if err != nil {
+		s.mu.Lock()
+		delete(s.cancelPending, runID)
+		s.mu.Unlock()
+		return generationv15.TestGenerationRunV15{}, err
+	}
 	if testgendomain.IsTerminal(run.State) {
+		s.mu.Lock()
+		delete(s.cancelPending, runID)
+		s.mu.Unlock()
 		return generationRunV15(run), nil
 	}
 	cancelled, err := s.coord.Cancel(ctx, run.TaskID)
@@ -323,6 +341,25 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 	s.mu.Unlock()
 	s.publishNewEvents(ctx, run, cancelled)
 	return generationRunV15(cancelled), nil
+}
+
+func (s *generationService) reconcileManagedBeforeCancel(ctx context.Context, owner string, run testgendomain.Run) (testgendomain.Run, error) {
+	if run.Request.ManagedGapID == "" || testgendomain.IsTerminal(run.State) {
+		return run, nil
+	}
+	// A managed receipt can outlive the run's accepted checkpoint. Without a
+	// healthy recovery hook, cancellation must not make that split permanent.
+	if s.managedCancelGuard == nil {
+		return testgendomain.Run{}, task.ErrConflict
+	}
+	recovered, err := s.managedCancelGuard(ctx, owner, run)
+	if err != nil {
+		return testgendomain.Run{}, err
+	}
+	if recovered.ID != run.ID || recovered.Request.SessionOwnerDigest != owner || recovered.Revision < run.Revision {
+		return testgendomain.Run{}, task.ErrConflict
+	}
+	return recovered, nil
 }
 
 func (s *generationService) attestProcessGone(ctx context.Context, taskID, ownerDigest string) error {

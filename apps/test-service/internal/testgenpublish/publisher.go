@@ -490,6 +490,25 @@ func (p *Publisher) ManagedReceipt(ctx context.Context, decision ManagedDecision
 	if !p.ManagedPublicationReady() || ctx == nil || !validHex(decision.ReviewID, 32) || !validHex(decision.ReviewDigest, 64) {
 		return Receipt{}, false, ErrInvalidPlan
 	}
+	wantDecision := digestManagedDecision(decision)
+	return p.managedReceiptWhere(ctx, func(receipt Receipt) bool {
+		return receipt.ManagedReviewID == decision.ReviewID && receipt.ManagedReviewDigest == decision.ReviewDigest && receipt.ManagedDecisionDigest == wantDecision
+	})
+}
+
+// ManagedRunReceipt is the cancellation recovery probe. It does not depend on
+// the client's conflict choices, which Cancel does not possess. An ambiguous
+// or non-current receipt fails closed rather than permitting terminal cancel.
+func (p *Publisher) ManagedRunReceipt(ctx context.Context, runID string) (Receipt, bool, error) {
+	if !p.ManagedPublicationReady() || ctx == nil || !validHex(runID, 32) {
+		return Receipt{}, false, ErrInvalidPlan
+	}
+	return p.managedReceiptWhere(ctx, func(receipt Receipt) bool {
+		return receipt.RunID == runID
+	})
+}
+
+func (p *Publisher) managedReceiptWhere(ctx context.Context, match func(Receipt) bool) (Receipt, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	root, err := p.journal.Open(".")
@@ -497,7 +516,6 @@ func (p *Publisher) ManagedReceipt(ctx context.Context, decision ManagedDecision
 		return Receipt{}, false, ErrConflict
 	}
 	defer root.Close()
-	wantDecision := digestManagedDecision(decision)
 	var found Receipt
 	for {
 		if err := ctx.Err(); err != nil {
@@ -520,7 +538,7 @@ func (p *Publisher) ManagedReceipt(ctx context.Context, decision ManagedDecision
 			if err != nil || !ok {
 				return Receipt{}, false, ErrConflict
 			}
-			if receipt.ManagedReviewID != decision.ReviewID || receipt.ManagedReviewDigest != decision.ReviewDigest || receipt.ManagedDecisionDigest != wantDecision {
+			if !match(receipt) {
 				continue
 			}
 			if found.ConfirmationDigest != "" || !validManagedSelectedReceipt(receipt) || p.verifyReceiptCurrent(receipt) != nil {
