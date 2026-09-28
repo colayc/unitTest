@@ -368,6 +368,7 @@ export type {
   ManagedReviewApplyRequestV16, ManagedReviewApplyResultV16
 } from "./generated/test-generation-v1-6.js";
 export { ManagedTestStatusV16, ManagedConflictChoiceV16 } from "./generated/test-generation-v1-6.js";
+export { TestGenerationFrameworkV16, TestGenerationScopeV16, TestGenerationStateV16 } from "./generated/test-generation-v1-6.js";
 export type { TaskSnapshotV16 } from "./generated/task-v1-6.js";
 export type { TaskEventV16 } from "./generated/event-v1-6.js";
 export type { ArtifactMetadataV16 } from "./generated/artifact-v1-6.js";

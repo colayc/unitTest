@@ -43,7 +43,9 @@ import type {
   TestGenerationEventPageV15,
   TestGenerationEventReplayInput,
   TestGenerationRunV15,
+  TestGenerationRunV16,
   TestGenerationStartInput,
+  TestGenerationStartInputV16,
   TestGenerationTargetListInput,
   TestGenerationTargetListV15
 } from "@unit-test-ide/test-client";
@@ -54,6 +56,7 @@ export interface ExtensionGenerationProtocolClient {
   getCapabilities(): Promise<ExtensionCapabilities>;
   listTestGenerationTargets(input: TestGenerationTargetListInput): Promise<TestGenerationTargetListV15>;
   startTestGeneration(input: TestGenerationStartInput): Promise<TestGenerationRunV15>;
+  startTestGeneration(input: TestGenerationStartInputV16): Promise<TestGenerationRunV16>;
   getTestGenerationRun(runId: string): Promise<TestGenerationRunV15>;
   cancelTestGeneration(runId: string): Promise<TestGenerationRunV15>;
   replayTestGenerationEvents(input: TestGenerationEventReplayInput): Promise<TestGenerationEventPageV15>;

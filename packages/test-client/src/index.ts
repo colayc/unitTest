@@ -27,6 +27,7 @@ export type {
   TestRunInput,
   TestRunListInput,
   TestGenerationStartInput,
+  TestGenerationStartInputV16,
   TestGenerationTargetListInput,
   TestGenerationCandidateListInput,
   TestGenerationAcceptInput,
@@ -44,7 +45,10 @@ export {
   TestGenerationCandidateKindV15,
   TestGenerationFrameworkV15,
   TestGenerationScopeV15,
-  TestGenerationStateV15
+  TestGenerationStateV15,
+  TestGenerationFrameworkV16,
+  TestGenerationScopeV16,
+  TestGenerationStateV16
 } from "@unit-test-ide/protocol-models";
 export type {
   ArtifactMetadata,
@@ -88,6 +92,8 @@ export type {
   TaskSnapshotV14,
   TaskSnapshotV15,
   TestGenerationStartRequestV15,
+  TestGenerationStartRequestV16,
+  TestGenerationRunV16,
   TestGenerationTargetListRequestV15,
   TestGenerationTargetListV15,
   TestGenerationRunV15,

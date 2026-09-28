@@ -51,6 +51,8 @@ import type {
   TestGenerationEventReplayRequestV15,
   TestGenerationRunV15,
   TestGenerationStartRequestV15,
+  TestGenerationRunV16,
+  TestGenerationStartRequestV16,
   TestGenerationTargetListRequestV15,
   TestGenerationTargetListV15,
   WorkspaceSnapshot
@@ -148,6 +150,7 @@ export interface TestRunListInput {
 }
 export type CoverageRunInput = CoverageRunStartRequest;
 export type TestGenerationStartInput = TestGenerationStartRequestV15;
+export type TestGenerationStartInputV16 = TestGenerationStartRequestV16;
 export type TestGenerationTargetListInput = TestGenerationTargetListRequestV15;
 export type TestGenerationCandidateListInput = TestGenerationCandidateListRequestV15;
 export type TestGenerationAcceptInput = TestGenerationAcceptRequestV15;
@@ -366,8 +369,10 @@ const generationSchema = "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs
 const validateGenerationTargetsRequest = payloadAjv.getSchema(`${generationSchema}targetListRequest`) as ValidateFunction;
 const validateGenerationTargets = payloadAjv.getSchema(`${generationSchema}targetList`) as ValidateFunction;
 const validateGenerationStart = payloadAjv.getSchema(`${generationSchema}startRequest`) as ValidateFunction;
+const validateGenerationStartV16 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.6:test-generation#/$defs/startRequest") as ValidateFunction;
 const validateGenerationRunId = payloadAjv.getSchema(`${generationSchema}runIdRequest`) as ValidateFunction;
 const validateGenerationRun = payloadAjv.getSchema(`${generationSchema}run`) as ValidateFunction;
+const validateGenerationRunV16 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.6:test-generation#/$defs/run") as ValidateFunction;
 const validateGenerationCandidateListRequest = payloadAjv.getSchema(`${generationSchema}candidateListRequest`) as ValidateFunction;
 const validateGenerationCandidates = payloadAjv.getSchema(`${generationSchema}candidatePage`) as ValidateFunction;
 const validateGenerationAccept = payloadAjv.getSchema(`${generationSchema}acceptRequest`) as ValidateFunction;
@@ -873,14 +878,17 @@ export class ProtocolClient {
     });
   }
 
-  async startTestGeneration(input: TestGenerationStartInput): Promise<TestGenerationRunV15> {
+  async startTestGeneration(input: TestGenerationStartInputV16): Promise<TestGenerationRunV16>;
+  async startTestGeneration(input: TestGenerationStartInput): Promise<TestGenerationRunV15>;
+  async startTestGeneration(input: TestGenerationStartInput | TestGenerationStartInputV16): Promise<TestGenerationRunV15 | TestGenerationRunV16> {
     const version = this.#requireV15();
     const request = snapshotRequestPayload("testGeneration/start", input);
-    validateRequestPayload("testGeneration/start", validateGenerationStart, request);
+    validateRequestPayload("testGeneration/start", version === "1.6" ? validateGenerationStartV16 : validateGenerationStart, request);
     const payload = await this.#connection.request(version, "testGeneration/start", request as Record<string, unknown>);
     return this.#decodeV14InboundResponse(version, () => {
-      validatePayload("testGeneration/start", validateGenerationRun, payload);
-      return decodeTestGenerationRun(payload);
+      validatePayload("testGeneration/start", version === "1.6" ? validateGenerationRunV16 : validateGenerationRun, payload);
+      const run = decodeTestGenerationRun(payload);
+      return version === "1.6" ? run as unknown as TestGenerationRunV16 : run;
     });
   }
 

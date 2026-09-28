@@ -9,6 +9,7 @@ import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeT
 import { ProtocolError } from "./envelopes.js";
 import { ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
+import type { TestGenerationStartRequestV16 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
@@ -469,6 +470,51 @@ test("protocol 1.6 keeps pre-existing coverage and generation queries callable",
   await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
   assert.equal((await fixture.client.getCoverageReport(REPORT_ID)).reportId, REPORT_ID);
   assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).runId, RUN_ID);
+  fixture.client.close();
+});
+
+test("protocol 1.6 generation start sends stable function, file and coverage-gap IDs", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+    : response(request, { runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
+      projectId: "core", state: "queued", createdAt: SENT_AT, lastSequence: 0 }, "1.6"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  const base = {
+    idempotencyKey: "b".repeat(32), workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
+    framework: "cpputest", goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  for (const coordinates of [
+    { scope: "symbol", functionId: FUNCTION_ID },
+    { scope: "file", fileId: FILE_ID },
+    { scope: "coverage-gap", coverageGapId: FUNCTION_ID, coverageReportId: REPORT_ID }
+  ]) {
+    const input = { ...base, ...coordinates } as unknown as TestGenerationStartRequestV16;
+    assert.equal((await fixture.client.startTestGeneration(input)).runId, RUN_ID);
+    assert.deepEqual(fixture.requests.at(-1)?.payload, input);
+  }
+  fixture.client.close();
+});
+
+test("protocol 1.6 generation start rejects legacy symbol, path and unbound gap coordinates locally", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+    : response(request, {}, "1.6"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+  const base = {
+    idempotencyKey: "b".repeat(32), workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
+    framework: "cpputest", goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  for (const coordinates of [
+    { scope: "symbol", symbolId: "target:foo" },
+    { scope: "file", file: "src/a.cpp" },
+    { scope: "coverage-gap", coverageReportId: REPORT_ID }
+  ]) {
+    await assert.rejects(() => fixture.client.startTestGeneration(
+      { ...base, ...coordinates } as unknown as TestGenerationStartRequestV16), /invalid protocol request/i);
+  }
+  assert.equal(fixture.requests.length, 1);
   fixture.client.close();
 });
 
