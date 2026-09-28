@@ -12,7 +12,7 @@ import (
 func TestManagedRoutesRemainUnavailableWithoutManagedBackend(t *testing.T) {
 	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{},
 		&detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}},
-		&generationBackend{ready: true}, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+		&managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
 	negotiated := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{
 		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0",
 		"supportedProtocolVersions": []string{protocol.Version16},
@@ -31,7 +31,7 @@ func TestManagedRoutesRemainUnavailableWithoutManagedBackend(t *testing.T) {
 func TestV16StartRejectsCallerSymbolPathAndGapCoordinates(t *testing.T) {
 	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{},
 		&detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}},
-		&generationBackend{ready: true}, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
+		&managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}, &detailRouteBackend{ready: true}, &managedProvider{ready: true})
 	s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{
 		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16},
 	}))

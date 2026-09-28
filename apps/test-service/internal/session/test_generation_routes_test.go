@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/protocol"
 	capabilitiesv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/capabilities"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenpublish"
 )
 
@@ -77,6 +79,22 @@ type managedProvider struct{ ready bool }
 
 func (p *managedProvider) ManagedTestsReady() bool { return p.ready }
 
+type managedGenerationBackend struct {
+	*generationBackend
+	ready bool
+}
+
+func (b *managedGenerationBackend) ManagedTestsReady() bool { return b.ready }
+func (b *managedGenerationBackend) ListManagedTests(context.Context, managedtest.Query) (managedtest.Page, error) {
+	return managedtest.Page{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) GetManagedReview(context.Context, string, string) (managedtest.Review, error) {
+	return managedtest.Review{}, task.ErrStorageUnavailable
+}
+func (b *managedGenerationBackend) ApplyManagedReview(context.Context, managedtest.ApplyRequest) (testgendomain.Run, error) {
+	return testgendomain.Run{}, task.ErrStorageUnavailable
+}
+
 func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t *testing.T) {
 	coverage := &coverageBackend{fakeBackend: &fakeBackend{}}
 	generation := &generationBackend{ready: true}
@@ -121,8 +139,18 @@ func TestV16NegotiationRequiresBothDurableProvidersAndPreservesLegacyCeilings(t 
 	}
 	active := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, generation, &detailProvider{true}, &managedProvider{true})
 	result = active.Handle(context.Background(), request)
+	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
+		t.Fatalf("v1.5-only generation backend falsely negotiated v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
+	}
+	active = session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, &managedGenerationBackend{generationBackend: generation, ready: false}, &detailProvider{true}, &managedProvider{true})
+	result = active.Handle(context.Background(), request)
+	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
+		t.Fatalf("unready managed generation backend falsely negotiated v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
+	}
+	active = session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, coverage, &managedGenerationBackend{generationBackend: generation, ready: true}, &detailProvider{true}, &managedProvider{true})
+	result = active.Handle(context.Background(), request)
 	if result.Response.Error != nil || active.NegotiatedVersion() != protocol.Version16 {
-		t.Fatalf("healthy providers negotiated %#v, %q", result.Response, active.NegotiatedVersion())
+		t.Fatalf("managed generation backend did not negotiate v1.6: %#v, %q", result.Response, active.NegotiatedVersion())
 	}
 	capability := active.Handle(context.Background(), requestVersion(t, protocol.Version16, "capabilities/get", map[string]any{}))
 	var value map[string]any

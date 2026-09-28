@@ -293,7 +293,8 @@ func NewWithManagedDetails(token, platform, transport string, backend Backend, c
 }
 
 func (s *Session) detailsReady() bool {
-	return s.coverageBackend != nil && s.generationBackend != nil && s.generationBackend.TestGenerationReady() &&
+	managedGeneration, ok := s.generationBackend.(ManagedGenerationBackend)
+	return s.coverageBackend != nil && ok && managedGeneration.TestGenerationReady() && managedGeneration.ManagedTestsReady() &&
 		s.coverageDetails != nil && s.coverageDetails.CoverageDetailsReady() &&
 		s.managedTests != nil && s.managedTests.ManagedTestsReady()
 }

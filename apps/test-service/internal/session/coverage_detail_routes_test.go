@@ -172,7 +172,7 @@ func (b *detailRouteBackend) ListCoverageLines(context.Context, coveragedetail.L
 
 func readyDetailSession(t *testing.T, b *detailRouteBackend) *session.Session {
 	t.Helper()
-	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, &generationBackend{ready: true}, b, &managedProvider{true})
+	s := session.NewWithManagedDetails("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &detailCoverageBackend{&coverageBackend{fakeBackend: &fakeBackend{}}}, &managedGenerationBackend{generationBackend: &generationBackend{ready: true}, ready: true}, b, &managedProvider{true})
 	got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "handshake", map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "1.0.0", "supportedProtocolVersions": []string{protocol.Version16}}))
 	if got.Response.Error != nil || s.NegotiatedVersion() != protocol.Version16 {
 		t.Fatalf("handshake: %#v", got.Response)
