@@ -26,12 +26,12 @@ import (
 type managedBackendDriverFixture struct {
 	ready  bool
 	starts int
-	start  func(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (testgendomain.Run, error)
+	start  func(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (testgendomain.Request, error)
 	set    func(context.Context, testgendomain.Run, managedtest.ReviewDraft) (testgenpublish.CandidateSet, error)
 }
 
 func (d *managedBackendDriverFixture) ManagedDriverReady() bool { return d.ready }
-func (d *managedBackendDriverFixture) StartManaged(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Run, error) {
+func (d *managedBackendDriverFixture) PrepareManaged(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
 	d.starts++
 	return d.start(ctx, owner, input, target)
 }
@@ -64,6 +64,7 @@ type managedPublisherFixture struct {
 	receipt                 testgenpublish.Receipt
 	published               bool
 	publishErr              error
+	onPlan                  func()
 	onPublish               func()
 }
 
@@ -75,6 +76,9 @@ func (p *managedPublisherFixture) ReadManagedPreimage(_ context.Context, path st
 func (p *managedPublisherFixture) PlanManaged(_ context.Context, set testgenpublish.CandidateSet, decision testgenpublish.ManagedDecision) (testgenpublish.Plan, error) {
 	p.planCalls++
 	p.decision = decision
+	if p.onPlan != nil {
+		p.onPlan()
+	}
 	return testgenpublish.Plan{RunID: set.RunID, SnapshotDigest: set.SnapshotDigest, ManagedReviewID: decision.ReviewID, ManagedReviewDigest: decision.ReviewDigest,
 		CandidateSetDigest: strings.Repeat("d", 64), DiffDigest: strings.Repeat("e", 64), ConfirmationDigest: strings.Repeat("f", 64)}, nil
 }
@@ -213,7 +217,7 @@ func TestManagedRuntimeStartRequiresExactReportBoundGapAndDurableRun(t *testing.
 	input := generationv16.TestGenerationStartRequestV16{IdempotencyKey: strings.Repeat("1", 32), ProjectID: "core", WorkspaceGeneration: reads.index.WorkspaceGeneration,
 		Scope: generationv16.TestGenerationScopeV16CoverageGap, CoverageGapID: &gap, CoverageReportID: &report, Framework: generationv16.Auto,
 		Budgets: generationv16.TestGenerationBudgetsV16{WallTimeMS: 60000, CandidateCount: 2, MemoryMiB: 64, Concurrency: 1}}
-	driver.start = func(ctx context.Context, gotOwner string, got generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Run, error) {
+	driver.start = func(ctx context.Context, gotOwner string, got generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
 		if gotOwner != owner || target.GapID != gap || target.SourceDigest != reads.index.Files[0].SourceSHA256 {
 			t.Fatal("driver did not receive attested target")
 		}
@@ -221,9 +225,9 @@ func TestManagedRuntimeStartRequiresExactReportBoundGapAndDurableRun(t *testing.
 		r := testgendomain.Request{SessionOwnerDigest: gotOwner, IdempotencyKey: got.IdempotencyKey, WorkspaceGeneration: got.WorkspaceGeneration, ProjectID: got.ProjectID,
 			Scope: testgendomain.ScopeCoverageGap, CoverageReportID: report, ManagedGapID: gap, Framework: testgendomain.FrameworkAuto,
 			Budgets:               testgendomain.Budgets{WallTimeMS: got.Budgets.WallTimeMS, CandidateCount: got.Budgets.CandidateCount, MemoryMiB: got.Budgets.MemoryMiB, Concurrency: got.Budgets.Concurrency},
-			CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: hash, CMakeTargetDigest: hash, FrameworkBundleDigest: hash,
+			CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: target.SourceDigest, CMakeTargetDigest: hash, FrameworkBundleDigest: hash,
 			AnalyzerBundleDigest: hash, BaselineReportDigest: hash, ProcessOwnerDigest: hash}
-		return provider.coord.Start(ctx, r)
+		return r, nil
 	}
 	if _, err := provider.StartManaged(context.Background(), owner, input); err != nil {
 		t.Fatal(err)
@@ -243,10 +247,36 @@ func TestManagedRuntimeStartRequiresExactReportBoundGapAndDurableRun(t *testing.
 	}
 }
 
+func TestManagedRuntimeStartRejectsDifferentSourceWithoutReservingIdempotency(t *testing.T) {
+	provider, reads, driver := managedBackendFixture(t)
+	owner := strings.Repeat("6", 64)
+	gap, report := reads.index.Gaps[0].ID, reads.index.ReportID
+	input := generationv16.TestGenerationStartRequestV16{IdempotencyKey: strings.Repeat("2", 32), ProjectID: "core", WorkspaceGeneration: reads.index.WorkspaceGeneration,
+		Scope: generationv16.TestGenerationScopeV16CoverageGap, CoverageGapID: &gap, CoverageReportID: &report, Framework: generationv16.Auto,
+		Budgets: generationv16.TestGenerationBudgetsV16{WallTimeMS: 60000, CandidateCount: 2, MemoryMiB: 64, Concurrency: 1}}
+	source := strings.Repeat("d", 64) // Attested src/a.c is c..., not d....
+	driver.start = func(ctx context.Context, gotOwner string, got generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
+		hash := strings.Repeat("d", 64)
+		request := testgendomain.Request{SessionOwnerDigest: gotOwner, IdempotencyKey: got.IdempotencyKey, WorkspaceGeneration: got.WorkspaceGeneration, ProjectID: got.ProjectID,
+			Scope: testgendomain.ScopeCoverageGap, CoverageReportID: report, ManagedGapID: gap, Framework: testgendomain.FrameworkAuto,
+			Budgets:               testgendomain.Budgets{WallTimeMS: got.Budgets.WallTimeMS, CandidateCount: got.Budgets.CandidateCount, MemoryMiB: got.Budgets.MemoryMiB, Concurrency: got.Budgets.Concurrency},
+			CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: source, CMakeTargetDigest: hash, FrameworkBundleDigest: hash,
+			AnalyzerBundleDigest: hash, BaselineReportDigest: hash, ProcessOwnerDigest: hash}
+		return request, nil
+	}
+	if _, err := provider.StartManaged(context.Background(), owner, input); !errors.Is(err, testgendomain.ErrStaleSnapshot) {
+		t.Fatalf("mismatched source start=%v", err)
+	}
+	source = reads.index.Files[0].SourceSHA256
+	if _, err := provider.StartManaged(context.Background(), owner, input); err != nil {
+		t.Fatalf("rejected source reserved the idempotency key or left a managed run: %v", err)
+	}
+}
+
 func managedTestHash(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
 
 func awaitingManagedRun(t *testing.T, provider *ManagedRuntimeProvider, reads *managedReadFixture, owner string) testgendomain.Run {
-	return awaitingManagedRunWithSource(t, provider, reads, owner, strings.Repeat("d", 64))
+	return awaitingManagedRunWithSource(t, provider, reads, owner, reads.index.Files[0].SourceSHA256)
 }
 
 func awaitingManagedRunWithSource(t *testing.T, provider *ManagedRuntimeProvider, reads *managedReadFixture, owner, sourceDigest string) testgendomain.Run {
@@ -328,6 +358,14 @@ func TestManagedRuntimeApplyChecksDurableBindingAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeApplyRejectsRunSourceDifferentFromAttestedGap(t *testing.T) {
+	provider, reads, _, pub, _, request := managedApplyFixture(t)
+	reads.index.Files[0].SourceSHA256 = strings.Repeat("d", 64)
+	if _, err := provider.ApplyManagedReview(context.Background(), request); !errors.Is(err, testgendomain.ErrStaleSnapshot) || pub.publishCalls != 0 {
+		t.Fatalf("mismatched run source was published: err=%v publishes=%d", err, pub.publishCalls)
+	}
+}
+
 func TestManagedRuntimeApplyRejectsStaleBytesAndIncompleteChoicesBeforePlanning(t *testing.T) {
 	provider, reads, _, pub, draft, request := managedApplyFixture(t)
 	pub.preimages[draft.Candidates[0].TestRelativePath] = []byte("edited after review\n")
@@ -361,6 +399,68 @@ func TestManagedRuntimeApplyCancellationAndUncertainPublication(t *testing.T) {
 	accepted, err := provider.ApplyManagedReview(post, request)
 	if err != nil || accepted.State != testgendomain.StateAccepted || pub.publishCalls != 2 {
 		t.Fatalf("post-dispatch cancellation=%+v err=%v publishes=%d", accepted, err, pub.publishCalls)
+	}
+}
+
+func TestManagedRuntimeApplyKeepsCancelFromTerminalizingBeforePublish(t *testing.T) {
+	provider, _, _, pub, _, request := managedApplyFixture(t)
+	enteredPlan, releasePlan := make(chan struct{}), make(chan struct{})
+	pub.onPlan = func() { close(enteredPlan); <-releasePlan }
+	type outcome struct {
+		run testgendomain.Run
+		err error
+	}
+	applyDone := make(chan outcome, 1)
+	go func() {
+		run, err := provider.ApplyManagedReview(context.Background(), request)
+		applyDone <- outcome{run, err}
+	}()
+	<-enteredPlan
+	cancelEntered := make(chan struct{})
+	cancelDone := make(chan error, 1)
+	go func() {
+		close(cancelEntered)
+		_, err := provider.CancelTestGeneration(context.Background(), request.Owner, provider.config.Reviews.(*managedReadFixture).binding.RunID)
+		cancelDone <- err
+	}()
+	<-cancelEntered
+	select {
+	case err := <-cancelDone:
+		close(releasePlan)
+		<-applyDone
+		t.Fatalf("cancel terminalized while managed publication was pending: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(releasePlan)
+	applied := <-applyDone
+	if applied.err != nil || applied.run.State != testgendomain.StateAccepted || pub.publishCalls != 1 {
+		t.Fatalf("managed apply lost the publication/cancel race: run=%+v err=%v publishes=%d", applied.run, applied.err, pub.publishCalls)
+	}
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Fatalf("cancel replay after accepted publication: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel did not resolve after managed publication")
+	}
+	current, err := provider.owned(context.Background(), request.Owner, applied.run.ID)
+	if err != nil || current.State != testgendomain.StateAccepted {
+		t.Fatalf("cancel replaced accepted run: %+v %v", current, err)
+	}
+}
+
+func TestManagedRuntimeApplyNeverPublishesPreviouslyCancelledRun(t *testing.T) {
+	provider, reads, _, pub, _, request := managedApplyFixture(t)
+	cancelled, err := provider.CancelTestGeneration(context.Background(), request.Owner, reads.binding.RunID)
+	if err != nil || string(cancelled.State) != string(testgendomain.StateCancelled) {
+		t.Fatalf("cancel before apply: %+v %v", cancelled, err)
+	}
+	if _, err := provider.ApplyManagedReview(context.Background(), request); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("apply after durable cancellation=%v", err)
+	}
+	if pub.planCalls != 0 || pub.publishCalls != 0 || pub.published {
+		t.Fatalf("cancelled run reached publication: plans=%d publishes=%d published=%t", pub.planCalls, pub.publishCalls, pub.published)
 	}
 }
 

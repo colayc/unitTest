@@ -24,11 +24,12 @@ import (
 var ErrManagedOutcomeUncertain = errors.New("managed publication outcome uncertain; re-query review")
 
 // ManagedRuntimeDriver is a product-owned, trusted adapter. It cannot be
-// supplied by IPC. Start must persist the generation run and own its eventual
-// durable review; CandidateSet reconstructs publication inputs from that review.
+// supplied by IPC. PrepareManaged cannot persist a run: this backend validates
+// the attested source before calling the coordinator's durable Start.
+// CandidateSet reconstructs publication inputs from the durable review.
 type ManagedRuntimeDriver interface {
 	ManagedDriverReady() bool
-	StartManaged(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (testgendomain.Run, error)
+	PrepareManaged(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (testgendomain.Request, error)
 	ManagedCandidateSet(context.Context, testgendomain.Run, managedtest.ReviewDraft) (testgenpublish.CandidateSet, error)
 }
 
@@ -122,22 +123,40 @@ func (p *ManagedRuntimeProvider) StartManaged(ctx context.Context, owner string,
 	if err := ctx.Err(); err != nil {
 		return generationv16.TestGenerationRunV16{}, err
 	}
-	started, err := p.config.Driver.StartManaged(ctx, owner, input, target)
+	request, err := p.config.Driver.PrepareManaged(ctx, owner, input, target)
 	if err != nil {
 		return generationv16.TestGenerationRunV16{}, err
 	}
-	current, err := p.generationService.owned(ctx, owner, started.ID)
-	if err != nil {
-		return generationv16.TestGenerationRunV16{}, err
+	if request.SourceDigest != target.SourceDigest {
+		return generationv16.TestGenerationRunV16{}, testgendomain.ErrStaleSnapshot
 	}
-	if !reflect.DeepEqual(current, started) || current.Request.Scope != testgendomain.ScopeCoverageGap ||
-		current.Request.CoverageReportID != *input.CoverageReportID || current.Request.ManagedGapID != target.GapID ||
-		current.Request.IdempotencyKey != input.IdempotencyKey || current.Request.ProjectID != input.ProjectID ||
-		current.Request.WorkspaceGeneration != input.WorkspaceGeneration || current.Request.Framework != testgendomain.Framework(input.Framework) ||
-		current.Request.Budgets != (testgendomain.Budgets{WallTimeMS: input.Budgets.WallTimeMS, CandidateCount: input.Budgets.CandidateCount, MemoryMiB: input.Budgets.MemoryMiB, Concurrency: input.Budgets.Concurrency}) ||
-		current.Request.Goals != (testgendomain.Goals{FunctionPercent: input.Goals.FunctionPercent, LinePercent: input.Goals.LinePercent, BranchPercent: input.Goals.BranchPercent}) ||
-		testgendomain.IsTerminal(current.State) {
+	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner || request.Scope != testgendomain.ScopeCoverageGap ||
+		request.CoverageReportID != *input.CoverageReportID || request.ManagedGapID != target.GapID ||
+		request.IdempotencyKey != input.IdempotencyKey || request.ProjectID != input.ProjectID ||
+		request.WorkspaceGeneration != input.WorkspaceGeneration || request.Framework != testgendomain.Framework(input.Framework) ||
+		request.Budgets != (testgendomain.Budgets{WallTimeMS: input.Budgets.WallTimeMS, CandidateCount: input.Budgets.CandidateCount, MemoryMiB: input.Budgets.MemoryMiB, Concurrency: input.Budgets.Concurrency}) ||
+		request.Goals != (testgendomain.Goals{FunctionPercent: input.Goals.FunctionPercent, LinePercent: input.Goals.LinePercent, BranchPercent: input.Goals.BranchPercent}) {
 		return generationv16.TestGenerationRunV16{}, task.ErrConflict
+	}
+	// Re-attest immediately before persistence; the driver may have spent time
+	// preparing, during which the selected source/report could have changed.
+	latest, err := p.config.CurrentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: input.ProjectID, ReportID: *input.CoverageReportID, WorkspaceGeneration: input.WorkspaceGeneration})
+	if err != nil {
+		return generationv16.TestGenerationRunV16{}, err
+	}
+	currentTarget, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: target.GapID}, latest)
+	if err != nil {
+		return generationv16.TestGenerationRunV16{}, err
+	}
+	if !reflect.DeepEqual(currentTarget, target) || request.SourceDigest != currentTarget.SourceDigest {
+		return generationv16.TestGenerationRunV16{}, testgendomain.ErrStaleSnapshot
+	}
+	if err := ctx.Err(); err != nil {
+		return generationv16.TestGenerationRunV16{}, err
+	}
+	current, err := p.generationService.coord.Start(ctx, request)
+	if err != nil {
+		return generationv16.TestGenerationRunV16{}, err
 	}
 	count := int64(current.CandidateCount)
 	result := generationv16.TestGenerationRunV16{RunID: current.ID, TaskID: current.TaskID, ProjectID: current.Request.ProjectID,
@@ -267,6 +286,11 @@ func (p *ManagedRuntimeProvider) ApplyManagedReview(ctx context.Context, request
 	}
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
+	// Share the terminal-state gate with v1.5 Accept and Cancel. Keep it
+	// through publication and the accepted checkpoint: cancellation must not
+	// commit between the final run reread and the publisher journal dispatch.
+	p.generationService.acceptMu.Lock()
+	defer p.generationService.acceptMu.Unlock()
 	decision := testgenpublish.ManagedDecision{ReviewID: request.ReviewID, ReviewDigest: request.ReviewDigest, Resolutions: request.Resolutions}
 	if err := p.config.Publisher.Recover(ctx); err != nil {
 		return testgendomain.Run{}, err
@@ -307,6 +331,9 @@ func (p *ManagedRuntimeProvider) ApplyManagedReview(ctx context.Context, request
 	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: binding.ProjectID, WorkspaceGeneration: binding.WorkspaceGeneration, CoverageReportID: binding.ReportID, Scope: testgendomain.ScopeCoverageGap, ID: run.Request.ManagedGapID}, index)
 	if err != nil {
 		return testgendomain.Run{}, err
+	}
+	if run.Request.SourceDigest != target.SourceDigest {
+		return testgendomain.Run{}, testgendomain.ErrStaleSnapshot
 	}
 	if err := p.config.Baseline.ValidateManagedBaseline(ctx, index, target); err != nil {
 		return testgendomain.Run{}, err
