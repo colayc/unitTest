@@ -353,6 +353,9 @@ func canonicalObservation(value coveragedomain.FunctionObservation) (coveragedom
 	}
 	value.QualifiedName = strings.Join(strings.Fields(value.QualifiedName), " ")
 	value.LinkageName = strings.Join(strings.Fields(value.LinkageName), " ")
+	if value.QualifiedName == "" && value.LinkageName == "" {
+		return coveragedomain.FunctionObservation{}, ErrInvalidDetail
+	}
 	return value, nil
 }
 

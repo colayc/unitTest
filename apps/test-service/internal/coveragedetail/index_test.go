@@ -189,6 +189,43 @@ func TestBuildRejectsUnsafeObservationMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsIdentityLessObservationsBeforeIndexing(t *testing.T) {
+	for name, names := range map[string][2]string{
+		"empty names":      {"", ""},
+		"whitespace names": {" \t ", "\n  "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := detailInput()
+			input.Functions[0].QualifiedName = names[0]
+			input.Functions[0].LinkageName = names[1]
+			if _, err := Build(input); err == nil {
+				t.Fatal("indexed observation without a stable function identity")
+			}
+		})
+	}
+	input := detailInput()
+	for i := 0; i < 2; i++ {
+		input.Functions[i].QualifiedName = ""
+		input.Functions[i].LinkageName = ""
+	}
+	if _, err := Build(input); err == nil {
+		t.Fatal("collapsed multiple unidentified observations into a fabricated function")
+	}
+}
+
+func TestBuildKeepsQualifiedOnlyIdentity(t *testing.T) {
+	input := detailInput()
+	input.Functions[0].LinkageName = ""
+	input.Functions[1].LinkageName = ""
+	got, err := Build(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files[0].Functions) != 1 || got.Files[0].Functions[0].ID == "" || got.Files[0].Functions[0].Name != "ns::foo" {
+		t.Fatalf("qualified-only identity = %#v", got.Files[0].Functions)
+	}
+}
+
 func TestBuildDedupesFunctionsAndLocationsAndAggregatesUniqueFiles(t *testing.T) {
 	input := detailInput()
 	got, err := Build(input)
