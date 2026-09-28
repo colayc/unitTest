@@ -9,7 +9,7 @@ import { redactServiceError } from "./service-resources.js";
 import type { GenerationPreviewBinding, GenerationSelection, ManagedGenerationSelection, TestGenerationControllerState } from "./test-generation-controller.js";
 import { createGenerationDiffReview, createManagedCaseReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
 import { buildGenerationResults, renderGenerationResults, renderManagedRecords } from "./test-generation-results.js";
-import type { ManagedChoice, ManagedReviewState, ManagedStatusFilter } from "./managed-test-review.js";
+import type { ManagedApplyOutcome, ManagedChoice, ManagedReviewState, ManagedStatusFilter } from "./managed-test-review.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
 import { isAbsolute, relative, resolve } from "node:path";
 
@@ -87,7 +87,7 @@ export interface ManagedReviewCommandController {
   getState(): ManagedReviewState;
   choose(caseId: string, choice: ManagedChoice): ManagedReviewState;
   markDisplayed(reviewDigest: string): ManagedReviewState;
-  apply(digest: string): Promise<unknown>;
+  apply(digest: string): Promise<ManagedApplyOutcome>;
   reject(): void;
 }
 
@@ -613,7 +613,12 @@ export function registerManagedTestCommands(
     const state = review.getState();
     if (!state.canApply || !state.review) { await host.showErrorMessage("Unit Test: Resolve and review every managed-test change before Apply."); return; }
     if (!host.confirmGeneration || !await host.confirmGeneration("Apply this exact managed-test review?")) return;
-    try { await review.apply(state.review.reviewDigest); await host.showInformationMessage?.("Unit Test: Managed-test review applied."); }
+    try {
+      const outcome = await review.apply(state.review.reviewDigest);
+      if (outcome.state === "confirmed") await host.showInformationMessage?.("Unit Test: Managed-test review applied and confirmed by the service.");
+      else if (outcome.state === "uncertain") await host.showInformationMessage?.("Unit Test: Apply outcome is uncertain. Reconnect and reconcile the managed-test record before retrying; the service may have committed it.");
+      else await host.showInformationMessage?.("Unit Test: Managed-test Apply cancelled before dispatch; no Apply request was sent.");
+    }
     catch (error) { await host.showErrorMessage(redactServiceError(error, []).message); }
   };
   const reject = async (): Promise<void> => {

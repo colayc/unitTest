@@ -141,7 +141,7 @@ test("reject during an in-flight apply cannot falsely claim that no write happen
   assert.equal(f.applied.length, 1);
 });
 
-test("session invalidation clears a pending review without claiming an in-flight publish was cancelled", async () => {
+test("session invalidation after dispatch preserves a confirmed service response", async () => {
   const f = fixture();
   await f.controller.load(reviewId);
   f.controller.markDisplayed(reviewDigest);
@@ -153,8 +153,38 @@ test("session invalidation clears a pending review without claiming an in-flight
   f.controller.invalidate();
   assert.equal(f.controller.getState().review, undefined);
   release!();
-  await assert.rejects(pending, /stale|cancelled/i);
+  const outcome = await pending;
+  assert.equal(outcome.state, "confirmed");
   assert.equal(f.applied.length, 1);
+});
+
+test("post-dispatch transport loss is uncertain, while pre-dispatch invalidation is cancelled", async () => {
+  const f = fixture();
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  let release: (() => void) | undefined;
+  f.client.applyManagedReview = async (input: unknown) => { f.applied.push(input); await new Promise<void>((resolve) => { release = resolve; }); throw new Error("connection closed"); };
+  const pending = f.controller.apply(reviewDigest);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  f.controller.invalidate();
+  release!();
+  const outcome = await pending;
+  assert.deepEqual(outcome, { state: "uncertain", reviewId, reviewDigest });
+  assert.equal(f.applied.length, 1);
+
+  const other = fixture();
+  await other.controller.load(reviewId);
+  other.controller.markDisplayed(reviewDigest);
+  other.controller.choose(caseId, "use-generated");
+  let releaseFetch: (() => void) | undefined;
+  other.client.getManagedReview = async () => { await new Promise<void>((resolve) => { releaseFetch = resolve; }); return review; };
+  const preDispatch = other.controller.apply(reviewDigest);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  other.controller.invalidate();
+  releaseFetch!();
+  assert.equal((await preDispatch).state, "cancelled");
+  assert.equal(other.applied.length, 0);
 });
 
 test("Apply availability remains disabled until all choices are resolved and while applying", async () => {
@@ -175,4 +205,25 @@ test("Apply availability remains disabled until all choices are resolved and whi
   release!();
   await pending;
   assert.equal(ready.at(-1), false);
+});
+
+test("an invalidated in-flight Apply cannot block or clear a later workspace review", async () => {
+  const f = fixture();
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  let release: (() => void) | undefined;
+  f.client.applyManagedReview = async () => { await new Promise<void>((resolve) => { release = resolve; }); return { reviewId, reviewDigest, applied: true }; };
+  const oldApply = f.controller.apply(reviewDigest);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  f.controller.invalidate();
+  const newGeneration = "9".repeat(64);
+  f.setGeneration(newGeneration);
+  f.setReview({ ...review, workspaceGeneration: newGeneration });
+  await f.controller.load(reviewId);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "keep-current");
+  release!();
+  assert.equal((await oldApply).state, "confirmed");
+  assert.equal(f.controller.getState().canApply, true);
 });

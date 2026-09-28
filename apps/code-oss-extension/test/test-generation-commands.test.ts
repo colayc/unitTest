@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { registerManagedTestCommands, registerTestGenerationCommands, type CommandContext, type DisposableLike, type OutputChannelLike, type TestGenerationCommandHost, type TestGenerationCommandController, type CommandStatus } from "../src/commands.js";
+import { ManagedTestReviewController } from "../src/managed-test-review.js";
 
 function setup(trust: "trusted" | "blocked-untrusted" = "trusted") {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -132,7 +133,7 @@ test("managed review displays case diff and records choices but never applies wi
     load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false }; return state; },
     choose: (_id: string, choice: string) => { calls.push(choice); state = { ...state, canApply: true }; },
     markDisplayed: () => state,
-    apply: async (digest: string) => { calls.push(["apply", digest]); }, reject: () => { calls.push("reject"); }
+    apply: async (digest: string) => { calls.push(["apply", digest]); return { state: "confirmed", result: { reviewId, reviewDigest: digest, applied: true } }; }, reject: () => { calls.push("reject"); }
   };
   const host: any = { ...fixture.host, pickManagedConflictChoice: async () => "convert-to-manual", openManagedCaseDiff: async (_title: string, diff: string) => { calls.push(["diff", diff]); } };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
@@ -181,4 +182,35 @@ test("review command reports an in-flight Apply without throwing from local Reje
   registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
   await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId: "c".repeat(32) });
   assert.match(fixture.errors.at(-1)!, /already applying/i);
+});
+
+test("command reports post-dispatch workspace invalidation as confirmed or reconcile-required, never cancelled", async () => {
+  for (const response of ["confirmed", "lost"] as const) {
+    const fixture = setup();
+    const reviewId = "c".repeat(32);
+    const reviewDigest = "d".repeat(64);
+    const caseId = `utc_${"e".repeat(32)}`;
+    const generation = "a".repeat(64);
+    let release: (() => void) | undefined;
+    const client: any = {
+      getCapabilities: async () => ({ managedTests: true }),
+      getManagedReview: async () => ({ reviewId, reviewDigest, workspaceGeneration: generation, coverageReportId: "b".repeat(32), cases: [{ caseId, status: "conflicted", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64), diff: "+TEST(foo)\n" }] }),
+      listManagedTests: async () => ({ workspaceGeneration: generation, coverageReportId: "b".repeat(32), items: [] }),
+      applyManagedReview: async () => { await new Promise<void>((resolve) => { release = resolve; }); if (response === "lost") throw new Error("connection lost"); return { reviewId, reviewDigest, applied: true }; }
+    };
+    const review = new ManagedTestReviewController({ readContext: () => ({ trust: "trusted", client, projectId: "core", workspaceGeneration: generation, coverageReportId: "b".repeat(32) }) });
+    await review.load(reviewId);
+    review.markDisplayed(reviewDigest);
+    review.choose(caseId, "use-generated");
+    const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
+    registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, fixture.host, { appendLine() {}, dispose() {} });
+    const pending = fixture.handlers.get("unitTestIde.applyManagedReview")!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    review.invalidate();
+    release!();
+    await pending;
+    assert.equal(fixture.errors.length, 0);
+    if (response === "confirmed") assert.match(fixture.info.at(-1)!, /applied/i);
+    else assert.match(fixture.info.at(-1)!, /uncertain|reconcile|verify/i);
+  }
 });

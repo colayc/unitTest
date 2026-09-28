@@ -29,6 +29,11 @@ export interface ManagedReviewState {
   readonly applying: boolean;
 }
 
+export type ManagedApplyOutcome =
+  | { readonly state: "confirmed"; readonly result: ManagedReviewApplyResultV16 }
+  | { readonly state: "uncertain"; readonly reviewId: string; readonly reviewDigest: string }
+  | { readonly state: "cancelled"; readonly reviewId: string; readonly reviewDigest: string };
+
 export type ManagedChoice = "keep-current" | "use-generated" | "convert-to-manual";
 export type ManagedStatusFilter = "current" | "stale" | "conflicted" | "orphaned" | "invalid";
 type ManagedClient = ExtensionProtocolClient & ExtensionManagedProtocolClient & { getCapabilities: NonNullable<ExtensionProtocolClient["getCapabilities"]> };
@@ -59,6 +64,7 @@ export class ManagedTestReviewController {
   #review: ManagedReviewV16 | undefined;
   #choices = new Map<string, ManagedChoice>();
   #applying = false;
+  #applyToken = 0;
   #displayed = false;
 
   constructor(private readonly options: ManagedReviewControllerOptions) {}
@@ -149,9 +155,14 @@ export class ManagedTestReviewController {
   }
 
   /** Revoke a workspace/session-bound view even when an RPC is already in flight. */
-  invalidate(): void { this.#epoch++; this.#clear(); }
+  invalidate(): void {
+    this.#epoch++;
+    this.#applyToken++;
+    this.#applying = false;
+    this.#clear();
+  }
 
-  async apply(displayedReviewDigest: string): Promise<ManagedReviewApplyResultV16> {
+  async apply(displayedReviewDigest: string): Promise<ManagedApplyOutcome> {
     if (this.#applying) throw new Error("A managed review is already applying.");
     const review = this.#review;
     const binding = this.#binding;
@@ -160,21 +171,36 @@ export class ManagedTestReviewController {
     if (!this.#displayed) throw new Error("The managed review preview has not been displayed.");
     if (!review.cases.every((item) => item.status !== "conflicted" || this.#choices.has(item.caseId))) throw new Error("The managed review has unresolved conflicts.");
     const epoch = this.#epoch;
+    const applyToken = ++this.#applyToken;
     this.#applying = true;
     this.#notify();
+    let dispatched = false;
     try {
       const fresh = await binding.client.getManagedReview({ reviewId: review.reviewId, limit: 100 });
       this.#assertEpoch(epoch);
       this.#assertSame(binding);
       if (fresh.reviewDigest !== review.reviewDigest || fresh.workspaceGeneration !== review.workspaceGeneration || fresh.coverageReportId !== review.coverageReportId) throw new Error("The managed review digest is stale.");
       const resolutions = [...this.#choices].sort(([left], [right]) => left.localeCompare(right)).map(([caseId, choice]) => ({ caseId, choice }));
+      // From this point on, a transport failure or workspace invalidation
+      // cannot establish that the service did not commit the decision.
+      dispatched = true;
       const result = await binding.client.applyManagedReview({ reviewId: review.reviewId, reviewDigest: review.reviewDigest, resolutions: resolutions as { caseId: string; choice: ManagedConflictChoiceV16 }[] });
-      this.#assertEpoch(epoch);
-      this.#assertSame(binding);
-      if (result.reviewId !== review.reviewId || result.reviewDigest !== review.reviewDigest || !result.applied) throw new Error("The service did not confirm the managed review decision.");
-      this.#clear();
-      return result;
-    } finally { this.#applying = false; this.#notify(); }
+      if (result.reviewId !== review.reviewId || result.reviewDigest !== review.reviewDigest || !result.applied) {
+        if (applyToken === this.#applyToken) this.#clear();
+        return { state: "uncertain", reviewId: review.reviewId, reviewDigest: review.reviewDigest };
+      }
+      if (applyToken === this.#applyToken) this.#clear();
+      return { state: "confirmed", result };
+    } catch (error) {
+      if (!dispatched) {
+        if (epoch !== this.#epoch || !this.#sameContext(binding)) return { state: "cancelled", reviewId: review.reviewId, reviewDigest: review.reviewDigest };
+        throw error;
+      }
+      if (applyToken === this.#applyToken) this.#clear();
+      return { state: "uncertain", reviewId: review.reviewId, reviewDigest: review.reviewDigest };
+    } finally {
+      if (applyToken === this.#applyToken) { this.#applying = false; this.#notify(); }
+    }
   }
 
   async #authorize(): Promise<BoundContext> {
