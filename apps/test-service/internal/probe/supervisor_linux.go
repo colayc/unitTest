@@ -4,7 +4,6 @@ package probe
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -27,20 +26,11 @@ type linuxSupervisedTarget struct {
 
 func RunSupervisor(control io.Reader, status, stdout, stderr io.Writer) int {
 	pid := os.Getpid()
-	if os.Getenv("UTIDE_DEBUG_PROBE_SUPERVISOR") == "1" {
-		_, _ = fmt.Fprintf(stderr, "probe-supervisor entry pid=%d pgrp=%d status-fd=%v\n", pid, unix.Getpgrp(), os.NewFile(supervisorStatusFD, "probe-supervisor-status") != nil)
-	}
 	if pid <= 1 || unix.Getpgrp() != pid {
-		if os.Getenv("UTIDE_DEBUG_PROBE_SUPERVISOR") == "1" {
-			_, _ = fmt.Fprintf(stderr, "probe-supervisor rejected process group pid=%d pgrp=%d\n", pid, unix.Getpgrp())
-		}
 		return 2
 	}
 	unix.CloseOnExec(supervisorStatusFD)
 	code := runSupervisorProtocol(control, status, stdout, stderr, startLinuxSupervisedTarget)
-	if os.Getenv("UTIDE_DEBUG_PROBE_SUPERVISOR") == "1" {
-		_, _ = fmt.Fprintf(stderr, "probe-supervisor protocol exit=%d\n", code)
-	}
 	if code == 2 {
 		return code
 	}

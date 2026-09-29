@@ -32,30 +32,6 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sample.c"), source, 0600); err != nil {
 		t.Fatal(err)
 	}
-	preflightContext, preflightCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	preflight := exec.CommandContext(preflightContext, executable, "child", root)
-	preflight.Dir = root
-	preflight.Env = []string{}
-	preflightError := preflight.Run()
-	preflightTimedOut := preflightContext.Err() != nil
-	preflightCancel()
-	if preflightError != nil && !preflightTimedOut {
-		t.Fatalf("fixture executable preflight failed: %v", preflightError)
-	}
-	probePreflightContext, probePreflightCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	probePreflight, probePreflightError := probe.NewRunner().Run(probePreflightContext, probe.Spec{
-		Executable: executable,
-		Args:       []string{"child", root},
-		Dir:        root,
-		Env:        []string{"UTIDE_DEBUG_PROBE_SUPERVISOR=1"},
-		Timeout:    400 * time.Millisecond,
-		MaxOutput:  4 << 10,
-	})
-	probePreflightCancel()
-	t.Logf("fixture probe preflight: exit=%d err=%v stderr=%q", probePreflight.ExitCode, probePreflightError, probePreflight.Stderr)
-	for _, marker := range []string{"heartbeat", "child-entered", "child-error", "process-entered", "getwd-error"} {
-		_ = os.Remove(filepath.Join(root, marker))
-	}
 	sum := sha256.Sum256(source)
 	verified := 0
 	a := Analyzer{bundle: fixtureBundle{path: executable, resource: filepath.Join(root, "unused-resource"), manifest: strings.Repeat("b", 64), verified: &verified}, runner: probe.NewRunner()}
@@ -71,12 +47,6 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			if detail, readErr := os.ReadFile(filepath.Join(root, "parent-started")); readErr == nil {
-				t.Logf("fixture parent started: %s", detail)
-			}
-			if detail, readErr := os.ReadFile(filepath.Join(root, "child-entered")); readErr == nil {
-				t.Logf("fixture child entered: %s", detail)
-			}
 			if detail, readErr := os.ReadFile(filepath.Join(root, "start-error")); readErr == nil {
 				t.Fatalf("fixture child never started: %s", detail)
 			}
