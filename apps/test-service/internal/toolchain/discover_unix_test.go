@@ -102,6 +102,29 @@ func TestUnixCandidateDiscoveryIgnoresUnsafePATHEntriesAndNonExecutables(t *test
 	}
 }
 
+func TestUnixToolDirectoriesRetainsOnlyNativeBuildHelperRoots(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	build := filepath.Join(root, "build")
+	compiler := filepath.Join(root, "compiler")
+	noise := filepath.Join(root, "noise")
+	for _, directory := range []string{build, compiler, noise} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatalf("Mkdir(%q): %v", directory, err)
+		}
+	}
+	writeExecutable(t, filepath.Join(build, "ninja"))
+	writeExecutable(t, filepath.Join(compiler, "as"))
+	writeExecutable(t, filepath.Join(noise, "gcc"))
+
+	got := unixToolDirectories([]string{noise, build, compiler}, "ninja", "as")
+	want := []string{build, compiler}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unixToolDirectories() = %v, want %v", got, want)
+	}
+}
+
 func TestUnixCandidateDiscoveryBoundsInputsAndAcceptsOnlyLinuxManualFamilies(t *testing.T) {
 	t.Parallel()
 
