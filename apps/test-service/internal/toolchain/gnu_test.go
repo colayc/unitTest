@@ -91,7 +91,7 @@ func TestUnixToolchainPATHRetainsDiscoveryAndCompilerDirectories(t *testing.T) {
 	binDir := filepath.Join(root, "trusted", "bin")
 	compilerDir := filepath.Join(root, "manual", "compiler")
 	got := unixToolchainPATH(
-		Candidate{PathDirectories: []string{buildDir, binDir, buildDir}},
+		Candidate{Manual: true, PathDirectories: []string{buildDir, binDir, buildDir}},
 		filepath.Join(compilerDir, "gcc"),
 		filepath.Join(compilerDir, "g++"),
 		filepath.Join(buildDir, "ninja"),
@@ -103,6 +103,16 @@ func TestUnixToolchainPATHRetainsDiscoveryAndCompilerDirectories(t *testing.T) {
 	}, string(os.PathListSeparator))
 	if got != want {
 		t.Fatalf("unixToolchainPATH() = %q, want %q", got, want)
+	}
+	automatic := unixToolchainPATH(
+		Candidate{PathDirectories: []string{buildDir, binDir, buildDir}},
+		filepath.Join(compilerDir, "gcc"),
+		filepath.Join(compilerDir, "g++"),
+		filepath.Join(buildDir, "ninja"),
+	)
+	automaticWant := strings.Join([]string{buildDir, binDir}, string(os.PathListSeparator))
+	if automatic != automaticWant {
+		t.Fatalf("automatic unixToolchainPATH() = %q, want %q", automatic, automaticWant)
 	}
 }
 

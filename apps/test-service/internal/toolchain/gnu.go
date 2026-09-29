@@ -400,9 +400,15 @@ func unixToolchainPATH(candidate Candidate, compilers ...string) string {
 	for _, directory := range candidate.PathDirectories {
 		appendPath(directory)
 	}
-	for _, executable := range compilers {
-		if executable != "" {
-			appendPath(filepath.Dir(executable))
+	// Automatically discovered compilers already come from the accepted host
+	// PATH. Keep their production environment limited to the helper roots above;
+	// compiler directories are needed only for explicit/manual candidates whose
+	// executables may live outside that accepted PATH.
+	if candidate.Manual || len(candidate.PathDirectories) == 0 {
+		for _, executable := range compilers {
+			if executable != "" {
+				appendPath(filepath.Dir(executable))
+			}
 		}
 	}
 	return strings.Join(paths, string(os.PathListSeparator))
