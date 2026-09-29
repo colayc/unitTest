@@ -17,7 +17,7 @@ const (
 	maxTestOutputTotalBytes = 16 * 1024 * 1024
 )
 
-var nativePathInOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?[a-z]:[\\/][^\s"'<>]+`)
+var nativePathInOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?(?:[a-z]:[\\/][^\s"'<>]+|/[^\s/"'<>][^\s"'<>]*)`)
 
 func newDomainEvent(
 	eventType task.EventType,
