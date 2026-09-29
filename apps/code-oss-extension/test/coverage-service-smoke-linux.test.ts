@@ -410,7 +410,8 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           }
           assert.equal(wireOverflow, false, "bounded coverage wire capture exceeded");
           const publicWire = Buffer.concat(wire);
-          for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
+          const leakedIndex = sensitive.findIndex((value) => publicWire.includes(Buffer.from(value)));
+          assert.equal(leakedIndex, -1, `coverage Protocol exchange leaked private slot ${leakedIndex} (length=${leakedIndex < 0 ? 0 : sensitive[leakedIndex]!.length})`);
           if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
