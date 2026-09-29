@@ -179,7 +179,8 @@ func TestCompletionCommitsClosedReportSetBeforeReportBearingGraph(t *testing.T) 
 	if len(completion.Events) != 3 ||
 		completion.Events[1].Type != task.EventCoverageReportAvailable ||
 		completion.Events[2].Type != task.EventCoverageRunFinished ||
-		!strings.Contains(string(completion.Events[1].Payload), `"completeness":{"outcome":"available","reasons":[]}`) {
+		!strings.Contains(string(completion.Events[1].Payload), `"completeness":{"outcome":"available","reasons":[]}`) ||
+		!strings.Contains(string(completion.Events[2].Payload), `"reportId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`) {
 		t.Fatalf("report terminal events = %#v", completion.Events)
 	}
 
