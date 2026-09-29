@@ -47,7 +47,7 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 		Executable: executable,
 		Args:       []string{"child", root},
 		Dir:        root,
-		Env:        []string{},
+		Env:        []string{"UTIDE_DEBUG_PROBE_SUPERVISOR=1"},
 		Timeout:    400 * time.Millisecond,
 		MaxOutput:  4 << 10,
 	})
