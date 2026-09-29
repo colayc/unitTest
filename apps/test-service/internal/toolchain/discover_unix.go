@@ -96,8 +96,8 @@ func discoverUnixCandidates(
 	}
 
 	for _, directory := range directories {
-		appendDiscoveredPair(result, FamilyGCC, directory, "gcc", "g++", ninja, makeExecutable)
-		appendDiscoveredPair(result, FamilyClang, directory, "clang", "clang++", ninja, makeExecutable)
+		appendDiscoveredPair(result, FamilyGCC, directory, "gcc", "g++", ninja, makeExecutable, directories)
+		appendDiscoveredPair(result, FamilyClang, directory, "clang", "clang++", ninja, makeExecutable, directories)
 	}
 	for _, family := range []Family{FamilyGCC, FamilyClang} {
 		if len(result[family]) > maxUnixFamilyCandidates {
@@ -159,6 +159,7 @@ func appendDiscoveredPair(
 	cxxName string,
 	ninja string,
 	makeExecutable string,
+	pathDirectories []string,
 ) {
 	cCompiler := discoveredExecutable(directory, cName)
 	cxxCompiler := discoveredExecutable(directory, cxxName)
@@ -171,7 +172,7 @@ func appendDiscoveredPair(
 		CXXCompiler:     cxxCompiler,
 		Ninja:           ninja,
 		Make:            makeExecutable,
-		PathDirectories: append([]string(nil), directories...),
+		PathDirectories: append([]string(nil), pathDirectories...),
 	})
 }
 
