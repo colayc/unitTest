@@ -47,6 +47,6 @@ test("root scripts gate Coverage generation drift and regressions", async () => 
   );
   assert.equal(
     root.scripts.verify,
-    "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm check:phase9-gates && pnpm check:framework-bundle && pnpm check:testgen-bundle && pnpm build && pnpm test && pnpm test:phase10:test-generation && pnpm test:go:race && pnpm test:e2e"
+    "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm check:phase9-gates && pnpm check:framework-bundle && pnpm check:testgen-bundle && pnpm build && pnpm test && pnpm run test:phase10:test-generation && pnpm test:go:race && pnpm test:e2e"
   );
 });
