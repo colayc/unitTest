@@ -11,12 +11,24 @@ import (
 )
 
 func main() {
+	markerRoot := ""
+	for _, argument := range os.Args[1:] {
+		if filepath.IsAbs(argument) {
+			markerRoot = filepath.Dir(argument)
+		}
+	}
+	if markerRoot != "" {
+		_ = os.WriteFile(filepath.Join(markerRoot, "process-entered"), []byte(fmt.Sprintf("pid=%d\nargs=%s\n", os.Getpid(), strings.Join(os.Args, "\x00"))), 0600)
+	}
 	root, err := os.Getwd()
 	if err != nil {
+		if markerRoot != "" {
+			_ = os.WriteFile(filepath.Join(markerRoot, "getwd-error"), []byte(err.Error()), 0600)
+		}
 		os.Exit(2)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "child" {
-		markerRoot := root
+		markerRoot = root
 		if len(os.Args) > 2 && os.Args[2] != "" {
 			markerRoot = os.Args[2]
 		}
