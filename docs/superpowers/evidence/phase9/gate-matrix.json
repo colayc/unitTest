@@ -4,10 +4,10 @@
   "counts": {
     "deferred": 3,
     "failed": 0,
-    "missing": 18,
-    "pass": 41
+    "missing": 19,
+    "pass": 40
   },
-  "currentCommit": "4dd38f6f9d28816462cbf3b7266bdf58b9c16499",
+  "currentCommit": "565fd6dee57901a342970e2bda7bef640bea9964",
   "evaluationMode": "historical",
   "gates": [
     {
@@ -136,10 +136,10 @@
       "status": "MISSING"
     },
     {
-      "artifactAvailability": "available",
+      "artifactAvailability": "missing",
       "id": "P5-LINUX-GCC-COVERAGE",
       "receiptId": "github-actions-35971050102-1-foundation",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P5-PROTOCOL-V14-COMPAT",
@@ -325,7 +325,7 @@
       "status": "PASS"
     }
   ],
-  "recordedByCommit": "4dd38f6f9d28816462cbf3b7266bdf58b9c16499",
+  "recordedByCommit": "565fd6dee57901a342970e2bda7bef640bea9964",
   "releaseReady": false,
   "schemaVersion": 1
 }

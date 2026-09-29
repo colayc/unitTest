@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `fe4e128478fc883c5280cedff1df5409c0498e91`
-- Recorded by commit: `4dd38f6f9d28816462cbf3b7266bdf58b9c16499`
+- Recorded by commit: `565fd6dee57901a342970e2bda7bef640bea9964`
 - Evaluation mode: `historical`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -10,8 +10,8 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 41 |
-| MISSING | 18 |
+| PASS | 40 |
+| MISSING | 19 |
 | FAILED | 0 |
 | DEFERRED | 3 |
 
@@ -43,7 +43,7 @@
 | P5-COVERAGE-FAULT-MAPPING | 5 | coverage | MISSING |  | missing |  |
 | P5-COVERAGE-REPORTS | 5 | reports | MISSING |  | missing |  |
 | P5-LINUX-CLANG-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
-| P5-LINUX-GCC-COVERAGE | 5 | toolchain | PASS | github-actions-35971050102-1-foundation | available |  |
+| P5-LINUX-GCC-COVERAGE | 5 | toolchain | MISSING | github-actions-35971050102-1-foundation | missing |  |
 | P5-PROTOCOL-V14-COMPAT | 5 | compatibility | PASS | github-actions-35971050102-1-foundation |  |  |
 | P5-WINDOWS-LLVM-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
 | P6-BRANDING-AND-BUILTIN-REGISTRATION | 6 | product-shell | MISSING |  | missing |  |
