@@ -132,7 +132,12 @@ test("required Windows native run binds both real framework executables and publ
         })),
       } as never;
     },
-    executeScenarios: async ({ family }) => {
+    executeScenarios: async ({ family, taskTimeoutMs }) => {
+      assert.equal(
+        taskTimeoutMs,
+        120_000,
+        "framework native builds use the bounded 120s task timeout",
+      );
       events.push(`core:${family}`);
       return { "default-build": "passed" };
     },
