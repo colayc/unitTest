@@ -32,6 +32,19 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sample.c"), source, 0600); err != nil {
 		t.Fatal(err)
 	}
+	preflightContext, preflightCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	preflight := exec.CommandContext(preflightContext, executable, "child", root)
+	preflight.Dir = root
+	preflight.Env = []string{}
+	preflightError := preflight.Run()
+	preflightTimedOut := preflightContext.Err() != nil
+	preflightCancel()
+	if preflightError != nil && !preflightTimedOut {
+		t.Fatalf("fixture executable preflight failed: %v", preflightError)
+	}
+	for _, marker := range []string{"heartbeat", "child-entered", "child-error", "process-entered", "getwd-error"} {
+		_ = os.Remove(filepath.Join(root, marker))
+	}
 	sum := sha256.Sum256(source)
 	verified := 0
 	a := Analyzer{bundle: fixtureBundle{path: executable, resource: filepath.Join(root, "unused-resource"), manifest: strings.Repeat("b", 64), verified: &verified}, runner: probe.NewRunner()}
