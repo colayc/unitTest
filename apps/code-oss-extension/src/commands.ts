@@ -11,7 +11,7 @@ import { createGenerationDiffReview, createManagedCaseReview, redactGenerationDi
 import { buildGenerationResults, renderGenerationResults, renderManagedRecords } from "./test-generation-results.js";
 import type { ManagedApplyOutcome, ManagedChoice, ManagedReviewState, ManagedStatusFilter } from "./managed-test-review.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
-import { isAbsolute, relative, resolve } from "node:path";
+import { posix as posixPath, win32 as win32Path } from "node:path";
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -363,10 +363,12 @@ export function registerCoverageCommands(
 }
 
 function safeRelativePath(value: string, workspaceRoot: string | undefined): string | undefined {
+  const windowsSyntax = /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith("\\\\") || (workspaceRoot !== undefined && /^[A-Za-z]:[\\/]/u.test(workspaceRoot));
+  const pathApi = windowsSyntax ? win32Path : posixPath;
   const normalized = value.replaceAll("\\", "/");
-  if (!workspaceRoot && isAbsolute(value)) return undefined;
-  const candidate = workspaceRoot && isAbsolute(value)
-    ? relative(resolve(workspaceRoot), resolve(value))
+  if (!workspaceRoot && pathApi.isAbsolute(value)) return undefined;
+  const candidate = workspaceRoot && pathApi.isAbsolute(value)
+    ? pathApi.relative(pathApi.resolve(workspaceRoot), pathApi.resolve(value))
     : normalized;
   const relativePath = candidate.replaceAll("\\", "/");
   if (!relativePath || relativePath === "." || relativePath.startsWith("../") || relativePath === ".." || relativePath.startsWith("/") || /^[A-Za-z]:\//.test(relativePath)) return undefined;
