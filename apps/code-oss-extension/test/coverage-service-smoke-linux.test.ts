@@ -279,7 +279,12 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           return ProtocolClient.attach(socket);
         }
       } });
-      const session = await manager.start();
+      let session: Awaited<ReturnType<ServiceManager["start"]>>;
+      try {
+        session = await manager.start();
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; service-exit=${serviceExit}; service-stderr=${serviceStderr}`);
+      }
       sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory);
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
