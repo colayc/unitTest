@@ -205,6 +205,10 @@ func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error
 	if target == nil || !linked || !frameworkLinked {
 		return "", ErrInvalidRender
 	}
+	lineEnding := "\n"
+	if strings.Contains(t.ExistingCMake, "\r\n") {
+		lineEnding = "\r\n"
+	}
 	if lang == LanguageC {
 		generated := t.TestTarget + "_generated_" + symbolID[:12]
 		foundExe := false
@@ -234,13 +238,13 @@ func patchCMake(t TargetMetadata, lang Language, symbolID string) (string, error
 			}
 			return "", ErrInvalidRender
 		}
-		insertion := fmt.Sprintf("\nadd_executable(%s \"%s\")\ntarget_link_libraries(%s PRIVATE %s %s)\nadd_test(NAME %s COMMAND %s)", generated, sourceRef, generated, t.ProductionTarget, t.FrameworkTarget, generated, generated)
+		insertion := fmt.Sprintf("%sadd_executable(%s \"%s\")%starget_link_libraries(%s PRIVATE %s %s)%sadd_test(NAME %s COMMAND %s)", lineEnding, generated, sourceRef, lineEnding, generated, t.ProductionTarget, t.FrameworkTarget, lineEnding, generated, generated)
 		return t.ExistingCMake[:target.end] + insertion + t.ExistingCMake[target.end:], nil
 	}
 	if already {
 		return t.ExistingCMake, nil
 	}
-	insertion := fmt.Sprintf("\ntarget_sources(%s PRIVATE \"%s\")", t.TestTarget, sourceRef)
+	insertion := fmt.Sprintf("%starget_sources(%s PRIVATE \"%s\")", lineEnding, t.TestTarget, sourceRef)
 	return t.ExistingCMake[:target.end] + insertion + t.ExistingCMake[target.end:], nil
 }
 func contains(values []string, want string) bool {

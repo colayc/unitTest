@@ -77,6 +77,22 @@ func TestGoldenCppUTestAndUnity(t *testing.T) {
 	}
 }
 
+func TestRenderPreservesExistingCMakeLineEndings(t *testing.T) {
+	r := request(LanguageCPP)
+	r.Target.ExistingCMake = strings.ReplaceAll(r.Target.ExistingCMake, "\n", "\r\n")
+	got, err := Render(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmake := string(got.Files[1].Content)
+	if !strings.Contains(cmake, "\r\n") {
+		t.Fatalf("expected CRLF output, got %q", cmake)
+	}
+	if strings.Contains(strings.ReplaceAll(cmake, "\r\n", ""), "\n") {
+		t.Fatalf("mixed line endings: %q", cmake)
+	}
+}
+
 func TestRenderRejectsDuplicateIDsAndUnsafePaths(t *testing.T) {
 	r := request(LanguageC)
 	r.Cases = append(r.Cases, r.Cases[0])
