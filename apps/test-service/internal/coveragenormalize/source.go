@@ -37,18 +37,19 @@ func openSourceSnapshot(workspaceRoot, nativePath string, limits Limits) (*sourc
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
-	binding, err := BindSourcePath(workspaceRoot, nativePath)
+	canonicalPath := canonicalNativePath(nativePath)
+	binding, err := BindSourcePath(workspaceRoot, canonicalPath)
 	if err != nil {
 		return nil, err
 	}
-	if hasSymlinkComponent(workspaceRoot, nativePath) {
+	if hasSymlinkComponent(workspaceRoot, canonicalPath) {
 		return nil, ErrSourceIdentity
 	}
-	before, err := os.Lstat(nativePath)
+	before, err := os.Lstat(canonicalPath)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
 		return nil, ErrSourceIdentity
 	}
-	file, err := os.Open(nativePath)
+	file, err := os.Open(canonicalPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open: %v", ErrSourceIdentity, err)
 	}
