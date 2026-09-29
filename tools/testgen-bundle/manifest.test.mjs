@@ -75,3 +75,17 @@ test("foundation packaging prepares, checks, and stages the matching offline Cla
       `${platform} must open each staged bundle with the product consumer`);
   }
 });
+
+test("foundation verification prepares and checks the offline Clang bundle before pnpm verify", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  for (const platform of ["windows", "linux"]) {
+    const nextJob = platform === "windows" ? "verify-framework-windows" : "coverage-linux-gcc";
+    const section = workflow.split(`  verify-${platform}:\n`)[1]?.split(`  ${nextJob}:\n`)[0];
+    assert.ok(section, `${platform} verification job is missing`);
+    const verify = section.indexOf("pnpm verify");
+    const prepare = section.indexOf("pnpm prepare:testgen-bundle");
+    const check = section.indexOf("pnpm check:testgen-bundle");
+    assert.ok(prepare >= 0 && check > prepare && verify > check,
+      `${platform} verification must prepare and check Clang before pnpm verify`);
+  }
+});
