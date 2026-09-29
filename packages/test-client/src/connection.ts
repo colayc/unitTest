@@ -219,6 +219,11 @@ export class Connection {
       const eventName = isSafeProtocolToken((value as { event?: unknown }).event)
         ? (value as { event: string }).event
         : "unknown";
+      if (process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1" && eventName === "coverage.run.finished") {
+        const payload = (value as { payload?: unknown }).payload;
+        const payloadRecord = payload && typeof payload === "object" ? payload as Record<string, unknown> : undefined;
+        process.stderr.write(`protocol invalid coverage event keys[${payloadRecord ? Object.keys(payloadRecord).sort().join(",") : "none"}] outcome[${String(payloadRecord?.outcome ?? "missing")}]\n`);
+      }
       const keywords = [...new Set((validator.errors ?? [])
         .map((error) => error.keyword)
         .map((keyword) => keyword.toLowerCase())
