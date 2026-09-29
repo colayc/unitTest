@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -146,6 +148,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		result := active.Handle(connectionContext, request)
 		responseWritten, err := enqueueOutbound(connectionContext, outbound, writerDone, result.Response)
 		if err != nil {
+			debugConnection("enqueue method=%s error=%v", request.Method, err)
 			if result.Subscription != nil {
 				result.Subscription.Close()
 			}
@@ -178,6 +181,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
+			debugConnection("wait method=%s error=%v", request.Method, err)
 			return
 		}
 		select {
@@ -187,6 +191,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
+		debugConnection("scan error=%v", scanErr)
 		var networkError net.Error
 		if errors.As(scanErr, &networkError) && networkError.Timeout() {
 			return
@@ -194,6 +199,13 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		request := protocol.Request{MessageID: "00000000000000000000000000000000"}
 		_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 2 MiB limit", false))
 	}
+}
+
+func debugConnection(format string, args ...any) {
+	if os.Getenv("UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION") != "1" {
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "service-connection-debug: "+format+"\n", args...)
 }
 
 func connectionWriter(connection net.Conn, timeout time.Duration, outbound <-chan outboundMessage, done chan<- struct{}, closeConnection func()) {

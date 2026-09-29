@@ -258,7 +258,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       };
       manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
         spawnService(binary, args) {
-          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret } });
+          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: "1" } });
           child.stderr?.on("data", (value: Uint8Array | string) => {
             const text = Buffer.from(value).toString("utf8");
             serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
