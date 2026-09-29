@@ -170,6 +170,7 @@ async function artifacts(client: ProtocolClient, run: CoverageRun, framework: Fr
 }
 
 test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault mappings", { skip: process.platform !== "linux" ? "Linux-native smoke requires Linux" : false, timeout: 30 * 60_000 }, async () => {
+  process.env.UT_DEBUG_PROCESS_HOST_FAILURES = "1";
   await rm(evidencePath, { force: true });
   await rm(backendEvidencePath, { force: true });
   const startedAt = new Date().toISOString();

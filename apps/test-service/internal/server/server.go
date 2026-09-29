@@ -131,7 +131,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, invalid, "INVALID_MESSAGE", "message is invalid", false))
 			return
 		}
-		debugConnection("request method=%s version=%s authenticated=%t bytes=%d", request.Method, request.ProtocolVersion, active.Authenticated(), len(scanner.Bytes()))
+		debugConnection("request[%s] version[%s] auth[%t] bytes[%d]", request.Method, request.ProtocolVersion, active.Authenticated(), len(scanner.Bytes()))
 		responseVersion := request.ProtocolVersion
 		limitVersion := request.ProtocolVersion
 		if active.Authenticated() {
@@ -148,10 +148,10 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			retireActiveSubscription()
 		}
 		result := active.Handle(connectionContext, request)
-		debugConnection("handled method=%s response=%T subscription=%t", request.Method, result.Response, result.Subscription != nil)
+		debugConnection("handled[%s] response[%T] subscription[%t]", request.Method, result.Response, result.Subscription != nil)
 		responseWritten, err := enqueueOutbound(connectionContext, outbound, writerDone, result.Response)
 		if err != nil {
-			debugConnection("enqueue method=%s error=%v", request.Method, err)
+			debugConnection("enqueue[%s] error[%v]", request.Method, err)
 			if result.Subscription != nil {
 				result.Subscription.Close()
 			}
@@ -184,7 +184,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
-			debugConnection("wait method=%s error=%v", request.Method, err)
+			debugConnection("wait[%s] error[%v]", request.Method, err)
 			return
 		}
 		select {
