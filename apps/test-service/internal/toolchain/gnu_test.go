@@ -53,8 +53,13 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 		TargetArchitecture: "x64",
 		CompilerSHA256:     hex.EncodeToString(compilerDigest[:]),
 		Sysroot:            fixture.sysroot,
-		Environment:        []string{},
-		Generators:         []string{"Ninja"},
+		Environment: func() []string {
+			if runtime.GOOS == "windows" {
+				return []string{}
+			}
+			return []string{"PATH=" + filepath.Dir(fixture.ninja)}
+		}(),
+		Generators: []string{"Ninja"},
 	}
 	if runtime.GOOS == "linux" {
 		want.Coverage.GCov = fixture.gcov

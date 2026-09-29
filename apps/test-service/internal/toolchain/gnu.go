@@ -328,6 +328,16 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			coverage = coverageSnapshot.capability
 		}
 	}
+	environment := []string{}
+	if runtime.GOOS != "windows" {
+		buildTool := candidate.Ninja
+		if len(generators) == 1 && generators[0] == "Unix Makefiles" {
+			buildTool = candidate.Make
+		}
+		if buildTool != "" {
+			environment = []string{"PATH=" + filepath.Dir(buildTool)}
+		}
+	}
 	instance := Instance{
 		Family:             adapter.family,
 		CCompiler:          cCompiler.path,
@@ -338,7 +348,7 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		TargetArchitecture: targetArchitecture,
 		CompilerSHA256:     cCompiler.digest,
 		Sysroot:            cDescriptor.sdk,
-		Environment:        []string{},
+		Environment:        environment,
 		Generators:         generators,
 		Coverage:           coverage,
 	}
