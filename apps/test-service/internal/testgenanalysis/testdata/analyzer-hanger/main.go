@@ -15,7 +15,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "child" {
 		for {
-			_ = os.WriteFile(filepath.Join(root, "heartbeat"), []byte(strconv.FormatInt(time.Now().UnixNano(), 10)), 0600)
+			if err := os.WriteFile(filepath.Join(root, "heartbeat"), []byte(strconv.FormatInt(time.Now().UnixNano(), 10)), 0600); err != nil {
+				_ = os.WriteFile(filepath.Join(root, "child-error"), []byte(err.Error()), 0600)
+				os.Exit(5)
+			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
