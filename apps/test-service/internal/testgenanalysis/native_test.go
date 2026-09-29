@@ -42,6 +42,17 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 	if preflightError != nil && !preflightTimedOut {
 		t.Fatalf("fixture executable preflight failed: %v", preflightError)
 	}
+	probePreflightContext, probePreflightCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	probePreflight, probePreflightError := probe.NewRunner().Run(probePreflightContext, probe.Spec{
+		Executable: executable,
+		Args:       []string{"child", root},
+		Dir:        root,
+		Env:        []string{},
+		Timeout:    400 * time.Millisecond,
+		MaxOutput:  4 << 10,
+	})
+	probePreflightCancel()
+	t.Logf("fixture probe preflight: exit=%d err=%v stderr=%q", probePreflight.ExitCode, probePreflightError, probePreflight.Stderr)
 	for _, marker := range []string{"heartbeat", "child-entered", "child-error", "process-entered", "getwd-error"} {
 		_ = os.Remove(filepath.Join(root, marker))
 	}
