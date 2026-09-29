@@ -223,6 +223,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
       const workspace = join(scratch, scenario);
       let serviceStderr = "";
+      let serviceExit = "running";
       await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
       if (framework === "cpputest") {
         await cp(join(workspace, "CMakeLists.linux.txt"), join(workspace, "CMakeLists.txt"), { force: true });
@@ -263,6 +264,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             const text = Buffer.from(value).toString("utf8");
             serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
           });
+          child.once("exit", (code, signal) => { serviceExit = `code=${String(code)} signal=${String(signal)}`; });
           return child;
         },
         async connect(endpoint) {
@@ -282,8 +284,13 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
       const caps = await client.getCapabilities();
-      assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
-      let selected = await selectGccEventually(client);
+      assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps);
+      let selected: Selected;
+      try {
+        selected = await selectGccEventually(client);
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; service-exit=${serviceExit}; service-stderr=${serviceStderr}`);
+      }
       await config(workspace, framework, selected.profile.buildProfileId);
       for (let attempt = 0; ; attempt++) {
         selected = await selectGccEventually(client);
