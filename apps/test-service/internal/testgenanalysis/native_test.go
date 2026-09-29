@@ -47,6 +47,9 @@ func TestAnalyzeCancelsLiveProcessTree(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			if detail, readErr := os.ReadFile(filepath.Join(root, "start-error")); readErr == nil {
+				t.Fatalf("fixture child never started: %s", detail)
+			}
 			t.Fatal("fixture child never started")
 		}
 		time.Sleep(10 * time.Millisecond)
