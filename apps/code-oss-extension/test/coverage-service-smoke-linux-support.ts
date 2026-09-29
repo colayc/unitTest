@@ -27,7 +27,10 @@ export function createGccFaultOverlay(source: string, fault: "missing-data" | "m
     source = source.replace(needle, replacement);
   };
   if (fault === "malformed-pinned-json") {
-    const needle = "raw, err := input.PinnedOutput.ReadAll(); if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }";
+    const needle = `raw, err := input.PinnedOutput.ReadAll()
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, err
+	}`;
     replaceOnce(needle, `${needle}\n\traw = []byte("{") // test-only: the real bounded parser must reject this`);
   } else {
     replaceOnce("import (", 'import (\n "os"\n "strings"');
