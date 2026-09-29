@@ -37,12 +37,13 @@ func openSourceSnapshot(workspaceRoot, nativePath string, limits Limits) (*sourc
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
+	canonicalRoot := canonicalNativePath(workspaceRoot)
 	canonicalPath := canonicalNativePath(nativePath)
-	binding, err := BindSourcePath(workspaceRoot, canonicalPath)
+	binding, err := BindSourcePath(canonicalRoot, canonicalPath)
 	if err != nil {
 		return nil, err
 	}
-	if hasSymlinkComponent(workspaceRoot, canonicalPath) {
+	if hasSymlinkComponent(canonicalRoot, canonicalPath) {
 		return nil, ErrSourceIdentity
 	}
 	before, err := os.Lstat(canonicalPath)

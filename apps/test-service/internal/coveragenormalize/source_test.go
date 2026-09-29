@@ -26,7 +26,7 @@ func TestDigestSourceBindsIdentityAndComputesSHA256(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := sha256.Sum256(contents)
-	if binding.SHA256 != hex.EncodeToString(expected[:]) || binding.NativePath != path {
+	if binding.SHA256 != hex.EncodeToString(expected[:]) || binding.NativePath != canonicalNativePath(path) {
 		t.Fatalf("binding = %#v", binding)
 	}
 }
