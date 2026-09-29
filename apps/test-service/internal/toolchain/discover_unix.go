@@ -84,13 +84,14 @@ func discoverUnixCandidates(
 			return nil, fmt.Errorf("%w: manual %s toolchain is invalid", ErrInvalidToolchain, family)
 		}
 		result[family] = append(result[family], Candidate{
-			ID:          config.ID,
-			Family:      family,
-			CCompiler:   filepath.Clean(config.CCompiler),
-			CXXCompiler: filepath.Clean(config.CPPCompiler),
-			Manual:      true,
-			Ninja:       ninja,
-			Make:        makeExecutable,
+			ID:              config.ID,
+			Family:          family,
+			CCompiler:       filepath.Clean(config.CCompiler),
+			CXXCompiler:     filepath.Clean(config.CPPCompiler),
+			Manual:          true,
+			Ninja:           ninja,
+			Make:            makeExecutable,
+			PathDirectories: append([]string(nil), directories...),
 		})
 	}
 
@@ -165,11 +166,12 @@ func appendDiscoveredPair(
 		return
 	}
 	result[family] = append(result[family], Candidate{
-		Family:      family,
-		CCompiler:   cCompiler,
-		CXXCompiler: cxxCompiler,
-		Ninja:       ninja,
-		Make:        makeExecutable,
+		Family:          family,
+		CCompiler:       cCompiler,
+		CXXCompiler:     cxxCompiler,
+		Ninja:           ninja,
+		Make:            makeExecutable,
+		PathDirectories: append([]string(nil), directories...),
 	})
 }
 

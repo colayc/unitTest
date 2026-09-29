@@ -334,8 +334,8 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		if len(generators) == 1 && generators[0] == "Unix Makefiles" {
 			buildTool = candidate.Make
 		}
-		if buildTool != "" {
-			environment = []string{"PATH=" + filepath.Dir(buildTool)}
+		if pathValue := unixToolchainPATH(candidate, cCompiler.path, cxxCompiler.path, buildTool); pathValue != "" {
+			environment = []string{"PATH=" + pathValue}
 		}
 	}
 	instance := Instance{
@@ -375,6 +375,37 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		}
 	}
 	return instance, nil
+}
+
+// unixToolchainPATH builds the exact PATH used for native build processes.
+// Discovery supplies canonical host PATH directories, while the executable
+// directories are included as a defensive fallback for manually configured
+// toolchains. Keeping this list explicit avoids inheriting unrelated process
+// environment entries but still lets compiler drivers resolve helpers such as
+// GNU as and the linker.
+func unixToolchainPATH(candidate Candidate, compilers ...string) string {
+	paths := make([]string, 0, len(candidate.PathDirectories)+len(compilers))
+	appendPath := func(path string) {
+		if path == "" || strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) {
+			return
+		}
+		directory := filepath.Clean(path)
+		for _, existing := range paths {
+			if identityPath(existing) == identityPath(directory) {
+				return
+			}
+		}
+		paths = append(paths, directory)
+	}
+	for _, directory := range candidate.PathDirectories {
+		appendPath(directory)
+	}
+	for _, executable := range compilers {
+		if executable != "" {
+			appendPath(filepath.Dir(executable))
+		}
+	}
+	return strings.Join(paths, string(os.PathListSeparator))
 }
 
 // probeLLVMCoverage is best-effort: an ordinary Clang remains discoverable

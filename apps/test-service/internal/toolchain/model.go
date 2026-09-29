@@ -198,6 +198,11 @@ type Candidate struct {
 	Manual      bool
 	Ninja       string
 	Make        string
+	// PathDirectories contains the canonical directories accepted from the
+	// host PATH during Unix discovery.  The adapter carries these forward so
+	// compiler helper programs (for example GNU as) remain resolvable when a
+	// production build is launched with the exact toolchain environment.
+	PathDirectories []string
 }
 
 type Issue struct {

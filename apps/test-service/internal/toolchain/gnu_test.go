@@ -83,6 +83,29 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	runner.assertCalls(calls...)
 }
 
+func TestUnixToolchainPATHRetainsDiscoveryAndCompilerDirectories(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "trusted", "build")
+	binDir := filepath.Join(root, "trusted", "bin")
+	compilerDir := filepath.Join(root, "manual", "compiler")
+	got := unixToolchainPATH(
+		Candidate{PathDirectories: []string{buildDir, binDir, buildDir}},
+		filepath.Join(compilerDir, "gcc"),
+		filepath.Join(compilerDir, "g++"),
+		filepath.Join(buildDir, "ninja"),
+	)
+	want := strings.Join([]string{
+		buildDir,
+		binDir,
+		compilerDir,
+	}, string(os.PathListSeparator))
+	if got != want {
+		t.Fatalf("unixToolchainPATH() = %q, want %q", got, want)
+	}
+}
+
 func TestGNUProbePublishesVerifiedCompilerSHA256(t *testing.T) {
 	t.Parallel()
 
