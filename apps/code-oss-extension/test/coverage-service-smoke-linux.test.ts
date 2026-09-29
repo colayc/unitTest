@@ -283,10 +283,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory);
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
-      const caps = await client.getCapabilities();
-      assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps);
       let selected: Selected;
       try {
+        const caps = await client.getCapabilities();
+        assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps);
         selected = await selectGccEventually(client);
       } catch (error) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}; service-exit=${serviceExit}; service-stderr=${serviceStderr}`);
