@@ -38,6 +38,9 @@ test("Linux fault overlay fails closed when its production seam changes", async 
   for (const fault of ["missing-data", "malformed-pinned-json"] as const) {
     const changed = createGccFaultOverlay(source, fault);
     assert.notEqual(changed, source);
+    if (fault === "malformed-pinned-json") {
+      assert.equal(changed.split('raw = []byte("{")').length - 1, 2);
+    }
     assert.throws(() => createGccFaultOverlay("package runtime", fault), /test-only overlay seam/u);
     assert.throws(() => createGccFaultOverlay(source + source, fault), /test-only overlay seam/u);
   }
