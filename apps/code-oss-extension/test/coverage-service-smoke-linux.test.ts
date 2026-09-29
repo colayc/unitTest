@@ -289,7 +289,24 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         selected = await selectGccEventually(client);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
-          await taskFinished(client, build.taskId, `${scenario} build`);
+          const buildEvents = await client.subscribeEvents(0);
+          const buildOutput: string[] = [];
+          const collectBuildOutput = (async () => {
+            for await (const event of buildEvents) {
+              if (event.taskId === build.taskId && event.event === "task.output") buildOutput.push(event.payload.text);
+            }
+          })();
+          try {
+            await taskFinished(client, build.taskId, `${scenario} build`);
+          } catch (error) {
+            buildEvents.close();
+            await collectBuildOutput;
+            const output = buildOutput.join("").slice(-16_384);
+            throw new Error(`${error instanceof Error ? error.message : String(error)}${output ? `; build-output=${output}` : ""}`);
+          } finally {
+            buildEvents.close();
+            await collectBuildOutput;
+          }
           break;
         } catch (error) {
           if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error;
