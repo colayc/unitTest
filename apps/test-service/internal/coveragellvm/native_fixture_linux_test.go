@@ -150,6 +150,9 @@ func nativeRun(t *testing.T, executable interface {
 	if err := executable.Verify(); err != nil {
 		t.Fatal(err)
 	}
+	if env == nil {
+		env = []string{"PATH=" + filepath.Dir(executable.Path())}
+	}
 	result, err := probe.NewRunner().Run(context.Background(), probe.Spec{Executable: executable.Path(), Args: args, Env: env, Timeout: 30 * time.Second, MaxOutput: 16 << 20})
 	if err != nil || result.ExitCode != 0 {
 		t.Fatalf("pinned native process failed: exit=%d err=%v stderr=%q", result.ExitCode, err, result.Stderr)
