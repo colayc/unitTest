@@ -151,7 +151,7 @@ func nativeRun(t *testing.T, executable interface {
 		t.Fatal(err)
 	}
 	if env == nil {
-		env = []string{"PATH=" + filepath.Dir(executable.Path())}
+		env = []string{"PATH=" + filepath.Dir(executable.Path()) + ":/usr/bin:/bin"}
 	}
 	result, err := probe.NewRunner().Run(context.Background(), probe.Spec{Executable: executable.Path(), Args: args, Env: env, Timeout: 30 * time.Second, MaxOutput: 16 << 20})
 	if err != nil || result.ExitCode != 0 {
