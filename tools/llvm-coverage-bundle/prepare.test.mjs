@@ -25,7 +25,7 @@ async function fixture() {
   return { manifest, manifestBytes, archiveBytes, licenseBytes };
 }
 
-async function fakeExtract({ manifest, destination, licenseBytes, versioned = true, omit = [] }) {
+async function fakeExtract({ manifest, destination, versioned = true, omit = [] }) {
   const root = join(destination, manifest.archiveRoot);
   await mkdir(join(root, "bin"), { recursive: true });
   await mkdir(join(root, "lib"), { recursive: true });
@@ -33,8 +33,11 @@ async function fakeExtract({ manifest, destination, licenseBytes, versioned = tr
     ? ["clang-22", "clang++-22", "llvm-profdata-22", "llvm-cov-22"]
     : ["clang", "clang++", "llvm-profdata", "llvm-cov"];
   for (const name of names) if (!omit.includes(name)) await writeFile(join(root, "bin", name), `${name}\n`);
-  await writeFile(join(root, "LICENSE.TXT"), licenseBytes);
   return root;
+}
+
+function fakeDownload({ manifest, archiveBytes, licenseBytes }) {
+  return async (url, destination) => writeFile(destination, url === manifest.archive.url ? archiveBytes : licenseBytes);
 }
 
 test("prepareBundle publishes canonical regular tool entry points and READY", async (t) => {
@@ -45,8 +48,8 @@ test("prepareBundle publishes canonical regular tool entry points and READY", as
     manifest,
     manifestBytes,
     outputRoot: finalRoot,
-    downloadArchive: async (_url, destination) => writeFile(destination, archiveBytes),
-    extractArchive: (archivePath, destination) => fakeExtract({ archivePath, destination, manifest, licenseBytes }),
+    downloadArchive: fakeDownload({ manifest, archiveBytes, licenseBytes }),
+    extractArchive: (archivePath, destination) => fakeExtract({ archivePath, destination, manifest }),
   });
   assert.equal(result.root, finalRoot);
   for (const path of Object.values(manifest.tools)) {
@@ -86,8 +89,8 @@ test("prepareBundle rejects a missing required tool without publishing final out
       manifest,
       manifestBytes,
       outputRoot: finalRoot,
-      downloadArchive: async (_url, destination) => writeFile(destination, archiveBytes),
-      extractArchive: (_archivePath, destination) => fakeExtract({ manifest, destination, licenseBytes, omit: ["llvm-cov-22"] }),
+      downloadArchive: fakeDownload({ manifest, archiveBytes, licenseBytes }),
+      extractArchive: (_archivePath, destination) => fakeExtract({ manifest, destination, omit: ["llvm-cov-22"] }),
     }),
     /required LLVM tool/u,
   );

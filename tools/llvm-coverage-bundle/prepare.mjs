@@ -17,6 +17,7 @@ const manifestPath = join(toolDir, "manifest.json");
 const schemaPath = join(toolDir, "manifest.schema.json");
 const defaultRoot = join(repositoryRoot, ".superpowers", "cache", "llvm-coverage-bundle", "22.1.8", "linux-x64");
 const maximumArchiveBytes = 2_200_000_000;
+const maximumLicenseBytes = 2 * 1024 * 1024;
 const maximumToolBytes = 512 * 1024 * 1024;
 const toolNames = ["clang", "clangxx", "llvmProfdata", "llvmCov"];
 
@@ -201,10 +202,9 @@ export async function prepareBundle({ manifest, manifestBytes: sourceBytes, outp
     }
     const sourceRoot = await extract(archivePath, extractionRoot, resolvedManifest);
     await cp(sourceRoot, candidateRoot, { recursive: true, dereference: false, force: false });
-    const licenseSource = join(sourceRoot, "LICENSE.TXT");
     const licenseDestination = join(candidateRoot, resolvedManifest.license.path);
     await mkdir(dirname(licenseDestination), { recursive: true });
-    await copyFile(licenseSource, licenseDestination);
+    await downloadArchive(resolvedManifest.license.url, licenseDestination, maximumLicenseBytes);
     for (const name of toolNames) await canonicalizeTool(candidateRoot, sourceRoot, resolvedManifest.tools[name]);
     await writeFile(join(candidateRoot, "manifest.json"), manifestSourceBytes, { flag: "wx" });
     const provisional = {};
