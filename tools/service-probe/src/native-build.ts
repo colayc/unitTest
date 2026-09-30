@@ -58,6 +58,10 @@ const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const nativeTimeoutMs = 120_000;
 const nativeBuildTaskTimeoutMs = 60_000;
+// Framework builds compile the locked third-party sources as part of every
+// matrix row. Keep this separate from the 120s service/liveness budget while
+// still bounding a stalled native build.
+const frameworkNativeBuildTaskTimeoutMs = 300_000;
 const nativeEventHeartbeatMs = 5_000;
 const nativeLivenessReconnectTimeoutMs = 30_000;
 const nativeLivenessReconnectAttempts = 3;
@@ -293,7 +297,7 @@ async function runNativeMatrixWithDependencies(
         bundle,
         taskTimeoutMs: options.frameworkPlatform === undefined
           ? nativeBuildTaskTimeoutMs
-          : nativeTimeoutMs,
+          : frameworkNativeBuildTaskTimeoutMs,
       });
       results.push({
         platform: options.platform,

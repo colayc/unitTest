@@ -138,7 +138,6 @@ func TestProcesshostRegistrationCapabilityAcknowledgesExactExecutable(t *testing
 	if err != nil {
 		t.Fatalf("newExecutableRegistrationServer() error = %v", err)
 	}
-	defer server.Close() //nolint:errcheck
 	t.Setenv(registrationPipeEnvironment, registrationPipeName(pipeID))
 	t.Setenv(registrationNonceEnvironment, fmt.Sprintf("%x", nonce))
 	want := `C:\fixture\clang-cl.exe`
@@ -158,6 +157,16 @@ func TestProcesshostRegistrationCapabilityAcknowledgesExactExecutable(t *testing
 		}
 	case <-time.After(time.Second):
 		t.Fatal("registration request was not delivered")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- server.Close() }()
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil && !errors.Is(closeErr, context.DeadlineExceeded) {
+			t.Fatalf("registration server close = %v", closeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registration server close did not complete")
 	}
 }
 

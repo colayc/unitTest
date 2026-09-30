@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	registrationPipeEnvironment  = "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE"
-	registrationNonceEnvironment = "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE"
-	registrationTimeout          = 5 * time.Second
-	maxRegisteredPathBytes       = 32 * 1024
+	registrationPipeEnvironment      = "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE"
+	registrationNonceEnvironment     = "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE"
+	registrationTimeout              = 5 * time.Second
+	registrationListenerCloseTimeout = 500 * time.Millisecond
+	maxRegisteredPathBytes           = 32 * 1024
 )
 
 type executableRegistrationRequest struct {
@@ -76,6 +77,14 @@ func (server *executableRegistrationServer) serve() {
 		server.mu.Unlock()
 		_ = conn.SetDeadline(time.Now().Add(registrationTimeout))
 		path, requestErr := readRegistrationRequest(conn, server.nonce)
+		// Once the request has been fully read, shutdown no longer needs to
+		// interrupt a pipe read. Clear the active slot before waiting for the
+		// guardian decision so Close cannot race the acknowledgement write.
+		server.mu.Lock()
+		if server.active == conn {
+			server.active = nil
+		}
+		server.mu.Unlock()
 		if requestErr == nil {
 			request := executableRegistrationRequest{path: path, result: make(chan error, 1)}
 			select {
@@ -95,28 +104,51 @@ func (server *executableRegistrationServer) serve() {
 		}
 		_, _ = conn.Write([]byte{ack})
 		_ = conn.Close()
-		server.mu.Lock()
-		if server.active == conn {
-			server.active = nil
-		}
-		server.mu.Unlock()
 	}
 }
 
 func (server *executableRegistrationServer) Close() error {
 	server.close.Do(func() {
+		server.wakeListener()
 		close(server.done)
-		result := server.listener.Close()
+		var result error
 		server.mu.Lock()
 		if server.active != nil {
 			result = errors.Join(result, server.active.Close())
 		}
 		server.closeErr = result
 		server.mu.Unlock()
+		// go-winio v0.6.2 can wait indefinitely for an outstanding overlapped
+		// ConnectNamedPipe during listener shutdown. Bound that external wait so
+		// guardian teardown cannot deadlock; the process-owned listener goroutine
+		// is still allowed to finish asynchronously after this boundary returns.
+		listenerClosed := make(chan error, 1)
+		go func() { listenerClosed <- server.listener.Close() }()
+		select {
+		case listenerErr := <-listenerClosed:
+			result = errors.Join(result, listenerErr)
+		case <-time.After(registrationListenerCloseTimeout):
+			result = errors.Join(result, context.DeadlineExceeded)
+		}
+		server.mu.Lock()
+		server.closeErr = result
+		server.mu.Unlock()
 	})
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.closeErr
+}
+
+// wakeListener completes a pending ConnectNamedPipe before Close asks
+// go-winio to tear down the listener. go-winio v0.6.2 can otherwise wait
+// indefinitely for an overlapped connect completion during listener shutdown.
+func (server *executableRegistrationServer) wakeListener() {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	conn, err := winio.DialPipeContext(ctx, server.listener.Addr().String())
+	if err == nil {
+		_ = conn.Close()
+	}
 }
 
 // RegisterExecutableForActiveBoundary is the processhost launch gate. When a
