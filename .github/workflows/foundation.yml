@@ -722,7 +722,6 @@ jobs:
     env:
       UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       UTIDE_COVERAGE_RUNNER_IMAGE: ubuntu-24.04
-      UTIDE_NATIVE_LLVM_BUNDLE: ${{ vars.UTIDE_NATIVE_LLVM_BUNDLE }}
       GOENV: 'off'
       GOTOOLCHAIN: local
       GOPROXY: 'off'
@@ -751,6 +750,18 @@ jobs:
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
         run: go mod download
+      - name: Prepare approved offline LLVM bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="$GITHUB_WORKSPACE/.superpowers/cache/llvm-coverage-bundle/22.1.8/linux-x64"
+          node tools/llvm-coverage-bundle/prepare.mjs --platform linux-x64 --output-root "$bundle_root"
+          echo "UTIDE_NATIVE_LLVM_BUNDLE=$bundle_root" >> "$GITHUB_ENV"
+      - name: Check approved offline LLVM bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/llvm-coverage-bundle/check.mjs --platform linux-x64 --root "$UTIDE_NATIVE_LLVM_BUNDLE"
       - name: Verify approved offline LLVM bundle input
         shell: bash
         run: |

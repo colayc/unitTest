@@ -58,3 +58,19 @@ test("Linux LLVM manifest rejects mutable sources, unsafe paths, or incomplete t
   delete incomplete.tools.llvmCov;
   assert.equal(validate(incomplete), false);
 });
+
+test("coverage-linux-clang prepares and checks the bundle before the offline boundary", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  const start = workflow.indexOf("  coverage-linux-clang:");
+  const end = workflow.indexOf("  coverage-windows-clang-cl:", start);
+  const section = start >= 0 && end > start ? workflow.slice(start, end) : undefined;
+  assert.ok(section, "coverage-linux-clang job is missing");
+  assert.doesNotMatch(section, /UTIDE_NATIVE_LLVM_BUNDLE:\s*\$\{\{\s*vars\.UTIDE_NATIVE_LLVM_BUNDLE\s*\}\}/u);
+  const prepare = section.indexOf("tools/llvm-coverage-bundle/prepare.mjs");
+  const check = section.indexOf("tools/llvm-coverage-bundle/check.mjs");
+  const exportRoot = section.indexOf("GITHUB_ENV");
+  const verify = section.indexOf("Verify approved offline LLVM bundle input");
+  const offline = section.indexOf("tools/linux-offline/run.mjs");
+  assert.ok(prepare >= 0 && exportRoot > prepare && check > exportRoot && verify > check && offline > verify,
+    "LLVM preparation, environment export, check, and fail-closed verification must precede offline execution");
+});

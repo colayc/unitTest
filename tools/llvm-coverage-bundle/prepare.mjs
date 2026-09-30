@@ -234,16 +234,26 @@ export async function prepareBundle({ manifest, manifestBytes: sourceBytes, outp
 
 function argumentValue(args, flag) {
   const index = args.indexOf(flag);
-  return index >= 0 ? args[index + 1] : undefined;
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+  return value;
+}
+
+function requestedPlatform(args) {
+  const platform = argumentValue(args, "--platform");
+  if (platform && platform !== "linux-x64") throw new Error(`unsupported LLVM coverage platform: ${platform}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const args = process.argv.slice(2);
   if (args.includes("--check")) {
+    requestedPlatform(args);
     checkBundle({ root: argumentValue(args, "--root") })
       .then((result) => process.stdout.write(`${result.root}\n`))
       .catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
   } else {
+    requestedPlatform(args);
     prepareBundle({ outputRoot: argumentValue(args, "--output-root") })
       .then((result) => process.stdout.write(`${result.root}\n`))
       .catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

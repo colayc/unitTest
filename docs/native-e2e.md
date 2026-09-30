@@ -152,6 +152,14 @@ export UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1
 pnpm test:e2e:native -- --platform linux
 ```
 
+Hosted `coverage-linux-clang` 使用同一条 fail-closed 边界：它先从
+`tools/llvm-coverage-bundle/manifest.json` 下载并校验固定的 LLVM 22.1.8 Linux x64
+归档，原子准备 `.superpowers/cache/llvm-coverage-bundle/22.1.8/linux-x64`，再以只读
+`check.mjs` 验证 `READY`、manifest、license 和四个常规文件工具入口，最后通过
+`GITHUB_ENV` 导出 `UTIDE_NATIVE_LLVM_BUNDLE`。只有这些步骤全部成功后，才进入
+`tools/linux-offline/run.mjs`；offline boundary 内不联网、不读取 GitHub repository
+variable、不回退到 PATH 或系统包管理器。准备失败不会发布 READY bundle。
+
 两平台 required matrix 都必须设置上述 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS` 和
 `UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1`。本地 producer/matrix 成功不是 hosted
 四工具链证据，不创建 P4 receipt、不改变 gate 状态，`releaseReady=false` 保持不变。
