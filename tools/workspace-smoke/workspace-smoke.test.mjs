@@ -1056,12 +1056,12 @@ test("guardian executable registration constrains network-capable selectors to l
   );
   assert.deepEqual(
     [...source.matchAll(/\bwinio\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
-    ["ListenPipe", "PipeConfig", "DialPipeContext"],
+    ["ListenPipe", "PipeConfig", "DialPipeContext", "DialPipeContext"],
     "registration_windows.go must use go-winio only for local Named Pipe setup/dial"
   );
   assert.deepEqual(
     calledSelectors(source, "winio"),
-    ["ListenPipe", "DialPipeContext"],
+    ["ListenPipe", "DialPipeContext", "DialPipeContext"],
     "executable registration must only listen and dial on local Named Pipes"
   );
 });
