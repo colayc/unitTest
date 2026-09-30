@@ -66,6 +66,10 @@ const nativeEventHeartbeatMs = 5_000;
 const nativeLivenessReconnectTimeoutMs = 30_000;
 const nativeLivenessReconnectAttempts = 3;
 const nativeLivenessReconnectBackoffMs = 250;
+// A task and its event stream can reach their terminal boundary at the same
+// time. Keep a small, separate client-side grace window so a lost stream can
+// reconnect and replay the terminal event after the service task budget ends.
+const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
@@ -1341,9 +1345,10 @@ async function waitForTask(
   expectedOutcome = "succeeded",
   initialEvents: ProtocolTaskEvent[] = [],
   timeoutMs = nativeTimeoutMs,
+  heartbeatMs = nativeEventHeartbeatMs,
 ): Promise<ProtocolTaskEvent[]> {
   const events = [...initialEvents];
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + timeoutMs + nativeTaskCompletionGraceMs;
   let pending = subscription.next();
   let lastSnapshot: ProtocolTaskSnapshot | undefined;
   let terminalReplayRequested = false;
@@ -1358,7 +1363,7 @@ async function waitForTask(
     }
     const result = await waitForNativeEvent(
       pending,
-      Math.min(nativeEventHeartbeatMs, remaining),
+      Math.min(heartbeatMs, remaining),
     );
     if (result.kind === "heartbeat") {
       try {
@@ -1476,7 +1481,7 @@ async function recoverNativeLiveness(
   }
   throw new Error(
     `native task ${taskId} liveness recovery failed after sequence ${lastSequence}: ` +
-    `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    `${lastError instanceof Error ? lastError.message : String(lastError ?? "deadline exhausted before reconnect")}`,
     { cause: lastError },
   );
 }
@@ -1919,6 +1924,7 @@ export const __testing = Object.freeze({
   startNamedTargetBuildAtCheckpoint,
   recoverAfterCancellation,
   recoverNativeLiveness,
+  waitForTask,
   startFailureBuildWithStaleRetry,
   frameworkExecutableDigest,
 });

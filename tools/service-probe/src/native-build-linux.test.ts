@@ -775,6 +775,44 @@ test("native liveness recovery retries a transient reconnect failure", async () 
   assert.equal(reconnects, 2);
 });
 
+test("native task completion allows a bounded reconnect grace window", async () => {
+  let reconnects = 0;
+  let lookups = 0;
+  const taskFinished = {
+    taskId: "native-task",
+    event: "task.finished",
+    payload: { outcome: "succeeded" },
+  };
+  const client = {
+    getTask: async () => {
+      lookups++;
+      if (lookups === 1) throw new Error("connection dropped");
+      return { status: "running" };
+    },
+    reconnect: async () => {
+      reconnects++;
+    },
+  } as unknown as ProtocolClient;
+  const subscription = {
+    lastSequence: 0,
+    next: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { done: false, value: taskFinished };
+    },
+  } as unknown as EventSubscription;
+
+  await __testing.waitForTask(
+    client,
+    subscription,
+    "native-task",
+    "succeeded",
+    [],
+    1,
+    1,
+  );
+  assert.equal(reconnects, 1);
+});
+
 test("diagnostic fixture refreshes one stale generation before Task creation", async () => {
   const requests: Array<{ idempotencyKey: string; workspaceGeneration: string }> = [];
   let inspections = 0;
