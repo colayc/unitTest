@@ -59,11 +59,11 @@ export function validateManifest(manifest, sourceBytes = manifestBytes(manifest)
   return manifest;
 }
 
-async function downloadVerifiedSource(url, destination) {
+async function downloadVerifiedSource(url, destination, maximumBytes, allowedInitialHosts) {
   let current = url;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     const parsed = new URL(current);
-    const allowed = redirects === 0 ? parsed.hostname === "github.com" : ["release-assets.githubusercontent.com", "objects.githubusercontent.com"].includes(parsed.hostname);
+    const allowed = redirects === 0 ? allowedInitialHosts.includes(parsed.hostname) : ["release-assets.githubusercontent.com", "objects.githubusercontent.com"].includes(parsed.hostname);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password || !allowed || (redirects === 0 && (parsed.search || parsed.hash))) {
       throw new Error(`LLVM source URL is outside the reviewed HTTPS boundary: ${current}`);
     }
@@ -79,7 +79,7 @@ async function downloadVerifiedSource(url, destination) {
     const counter = new Transform({
       transform(chunk, _encoding, callback) {
         total += chunk.length;
-        callback(total > maximumArchiveBytes ? new Error("LLVM archive exceeds byte budget") : null, chunk);
+        callback(total > maximumBytes ? new Error("LLVM source exceeds byte budget") : null, chunk);
       },
     });
     await pipeline(Readable.fromWeb(response.body), counter, createWriteStream(destination, { flags: "wx" }));
@@ -195,7 +195,7 @@ export async function prepareBundle({ manifest, manifestBytes: sourceBytes, outp
   const candidateRoot = join(temporaryRoot, "bundle");
   try {
     await mkdir(extractionRoot);
-    await downloadArchive(resolvedManifest.archive.url, archivePath, maximumArchiveBytes);
+    await downloadArchive(resolvedManifest.archive.url, archivePath, maximumArchiveBytes, ["github.com"]);
     const archiveInfo = await lstat(archivePath);
     if (!archiveInfo.isFile() || archiveInfo.isSymbolicLink() || archiveInfo.size > maximumArchiveBytes || await digestFile(archivePath) !== resolvedManifest.archive.sha256) {
       throw new Error("LLVM archive SHA-256 digest mismatch");
@@ -204,7 +204,7 @@ export async function prepareBundle({ manifest, manifestBytes: sourceBytes, outp
     await cp(sourceRoot, candidateRoot, { recursive: true, dereference: false, force: false });
     const licenseDestination = join(candidateRoot, resolvedManifest.license.path);
     await mkdir(dirname(licenseDestination), { recursive: true });
-    await downloadArchive(resolvedManifest.license.url, licenseDestination, maximumLicenseBytes);
+    await downloadArchive(resolvedManifest.license.url, licenseDestination, maximumLicenseBytes, ["raw.githubusercontent.com"]);
     for (const name of toolNames) await canonicalizeTool(candidateRoot, sourceRoot, resolvedManifest.tools[name]);
     await writeFile(join(candidateRoot, "manifest.json"), manifestSourceBytes, { flag: "wx" });
     const provisional = {};
