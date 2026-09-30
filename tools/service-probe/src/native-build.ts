@@ -61,7 +61,7 @@ const nativeBuildTaskTimeoutMs = 60_000;
 // Framework builds compile the locked third-party sources as part of every
 // matrix row. Keep this separate from the 120s service/liveness budget while
 // still bounding a stalled native build.
-const frameworkNativeBuildTaskTimeoutMs = 300_000;
+const frameworkNativeBuildTaskTimeoutMs = 600_000;
 const nativeEventHeartbeatMs = 5_000;
 const nativeLivenessReconnectTimeoutMs = 30_000;
 const nativeLivenessReconnectAttempts = 3;
