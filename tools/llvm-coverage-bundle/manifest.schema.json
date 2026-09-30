@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/tools/llvm-coverage-bundle/manifest.schema.json",
+  "title": "Pinned offline Linux LLVM coverage bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "llvmVersion", "sourceCommit", "platform", "archive", "archiveRoot", "tools", "license"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "llvmVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "platform": { "const": "linux-x64" },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "url", "sha256"],
+      "properties": {
+        "filename": { "type": "string", "pattern": "^LLVM-[0-9]+\\.[0-9]+\\.[0-9]+-Linux-X64\\.tar\\.xz$" },
+        "url": { "type": "string", "pattern": "^https://github\\.com/llvm/llvm-project/releases/download/llvmorg-[0-9]+\\.[0-9]+\\.[0-9]+/LLVM-[0-9]+\\.[0-9]+\\.[0-9]+-Linux-X64\\.tar\\.xz$" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "archiveRoot": { "$ref": "#/$defs/path" },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clang", "clangxx", "llvmProfdata", "llvmCov"],
+      "properties": {
+        "clang": { "$ref": "#/$defs/path" },
+        "clangxx": { "$ref": "#/$defs/path" },
+        "llvmProfdata": { "$ref": "#/$defs/path" },
+        "llvmCov": { "$ref": "#/$defs/path" }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "url", "sha256", "size"],
+      "properties": {
+        "path": { "const": "licenses/llvm/LICENSE.TXT" },
+        "url": { "type": "string", "pattern": "^https://raw\\.githubusercontent\\.com/llvm/llvm-project/[0-9a-f]{40}/LICENSE\\.TXT$" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+/-]*$",
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    }
+  }
+}
