@@ -155,7 +155,16 @@ async function verifyLicense(bundleRoot, manifest) {
 
 export async function checkBundle({ root, manifest, manifestBytes: expectedBytes } = {}) {
   const resolvedRoot = resolve(root ?? defaultRoot);
-  const [sourceManifest, sourceBytes] = manifest ? [manifest, expectedBytes ?? manifestBytes(manifest)] : await loadSourceManifest();
+  let sourceManifest;
+  let sourceBytes;
+  if (manifest) {
+    sourceManifest = manifest;
+    sourceBytes = expectedBytes ?? manifestBytes(manifest);
+  } else {
+    const loaded = await loadSourceManifest();
+    sourceManifest = loaded.manifest;
+    sourceBytes = loaded.manifestBytes;
+  }
   validateManifest(sourceManifest, sourceBytes);
   const rootInfo = await lstat(resolvedRoot);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("LLVM bundle root is not a regular directory");
