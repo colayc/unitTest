@@ -65,7 +65,7 @@ func TestNativeLinuxLLVMFixtureCancellationUsesProductionOwners(t *testing.T) {
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := probe.NewRunner().Run(context.Background(), probe.Spec{Executable: clang, Args: []string{"-fprofile-instr-generate", "-fcoverage-mapping", source, "-o", binary}, Env: []string{"PATH=" + filepath.Join(bundle, "bin")}, Timeout: 30 * time.Second, MaxOutput: 1 << 20})
+	result, err := probe.NewRunner().Run(context.Background(), probe.Spec{Executable: clang, Args: []string{"-fprofile-instr-generate", "-fcoverage-mapping", source, "-o", binary}, Env: []string{"PATH=" + filepath.Join(bundle, "bin") + ":/usr/bin:/bin"}, Timeout: 30 * time.Second, MaxOutput: 1 << 20})
 	if err != nil || result.ExitCode != 0 {
 		t.Fatalf("approved clang failed to compile native cancellation fixture: exit=%d err=%v", result.ExitCode, err)
 	}
