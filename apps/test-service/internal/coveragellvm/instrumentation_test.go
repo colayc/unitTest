@@ -17,6 +17,16 @@ const goldenInstrumentation = "cmake_minimum_required(VERSION 3.25)\n" +
 	"add_compile_options(\"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>\" \"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>\")\n" +
 	"add_link_options(\"-fprofile-instr-generate\")\n"
 
+const goldenLinuxInstrumentation = "cmake_minimum_required(VERSION 3.25)\n" +
+	"if(NOT CMAKE_C_COMPILER MATCHES \"(^|[/\\\\])clang$\")\n" +
+	"  message(FATAL_ERROR \"unit-test-ide coverage requires clang\")\n" +
+	"endif()\n" +
+	"if(NOT CMAKE_CXX_COMPILER MATCHES \"(^|[/\\\\])clang\\\\+\\\\+$\")\n" +
+	"  message(FATAL_ERROR \"unit-test-ide coverage requires clang++\")\n" +
+	"endif()\n" +
+	"add_compile_options(\"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>\" \"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>\")\n" +
+	"add_link_options(\"-fprofile-instr-generate\")\n"
+
 func TestWriteInstrumentationPublishesGoldenReadOnlyInclude(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "task")
 	makeOwnerOnlyInstrumentationRoot(t, root)
@@ -28,10 +38,14 @@ func TestWriteInstrumentationPublishesGoldenReadOnlyInclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(contents) != goldenInstrumentation {
+	want := goldenInstrumentation
+	if runtime.GOOS == "linux" {
+		want = goldenLinuxInstrumentation
+	}
+	if string(contents) != want {
 		t.Fatalf("instrumentation contents = %q, want byte-identical LF golden", contents)
 	}
-	sum := sha256.Sum256([]byte(goldenInstrumentation))
+	sum := sha256.Sum256([]byte(want))
 	wantDigest := hex.EncodeToString(sum[:])
 	if got.SHA256 != wantDigest {
 		t.Fatalf("SHA256 = %q, want %q", got.SHA256, wantDigest)
@@ -62,15 +76,32 @@ func TestWriteInstrumentationPublishesGoldenReadOnlyInclude(t *testing.T) {
 }
 
 func TestInstrumentationContractPreservesGoldenBytesAndIdentity(t *testing.T) {
-	sum := sha256.Sum256([]byte(goldenInstrumentation))
+	want := goldenInstrumentation
+	version := instrumentationVersion
+	if runtime.GOOS == "linux" {
+		want = goldenLinuxInstrumentation
+		version = "clang-linux-instrumentation-v1"
+	}
+	sum := sha256.Sum256([]byte(want))
 	wantSHA256 := hex.EncodeToString(sum[:])
 	if InstrumentationSHA256() != wantSHA256 {
 		t.Fatalf("InstrumentationSHA256() = %q, want %q", InstrumentationSHA256(), wantSHA256)
 	}
-	fingerprint := sha256.Sum256([]byte(instrumentationVersion + "\x00" + wantSHA256))
+	fingerprint := sha256.Sum256([]byte(version + "\x00" + wantSHA256))
 	wantFingerprint := hex.EncodeToString(fingerprint[:])
 	if InstrumentationFingerprint() != wantFingerprint {
 		t.Fatalf("InstrumentationFingerprint() = %q, want %q", InstrumentationFingerprint(), wantFingerprint)
+	}
+}
+
+func TestLinuxAndWindowsInstrumentationFingerprintsCannotAlias(t *testing.T) {
+	linux := InstrumentationFingerprintForPlatform("linux")
+	windows := InstrumentationFingerprintForPlatform("windows")
+	if len(linux) != 64 || len(windows) != 64 || linux == windows {
+		t.Fatalf("platform fingerprints alias: linux %q, windows %q", linux, windows)
+	}
+	if InstrumentationFingerprintForPlatform("unsupported") != "" {
+		t.Fatal("unsupported platform received an instrumentation fingerprint")
 	}
 }
 

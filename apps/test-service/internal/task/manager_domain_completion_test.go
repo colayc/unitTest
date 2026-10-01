@@ -19,6 +19,12 @@ func TestManagerCommitsDomainCompletionBeforePublishingRunFinished(
 	interpreter := &domainCompletionInterpreter{
 		runID: strings.Repeat("1", 32),
 	}
+	interpreter.afterCommit = func(completion task.DomainCompletion) error {
+		if completion.TestRun == nil || f.store.testRun(interpreter.runID).Status != testdomain.RunCompleted {
+			t.Error("post-commit hook ran before the durable domain mutation")
+		}
+		return task.ErrStorageUnavailable // optional projection must not fail v1 completion
+	}
 	request := oneStepBuildRequest(testID(231))
 	request.Kind = task.KindTestRun
 	request.TestRun = &testdomain.TestRun{
@@ -50,6 +56,9 @@ func TestManagerCommitsDomainCompletionBeforePublishingRunFinished(
 	finished := f.awaitTask(t, started.ID, task.StatusFinished)
 	if finished.Outcome != task.OutcomeSucceeded {
 		t.Fatalf("finished Task = %#v", finished)
+	}
+	if !interpreter.commitCalled {
+		t.Fatal("post-commit hook was not invoked")
 	}
 	mutation := f.store.lastMutation()
 	if mutation.FinishRun == nil ||
@@ -87,7 +96,17 @@ func TestManagerCommitsDomainCompletionBeforePublishingRunFinished(
 }
 
 type domainCompletionInterpreter struct {
-	runID string
+	runID        string
+	afterCommit  func(task.DomainCompletion) error
+	commitCalled bool
+}
+
+func (interpreter *domainCompletionInterpreter) CompletionCommitted(_ context.Context, completion task.DomainCompletion) error {
+	interpreter.commitCalled = true
+	if interpreter.afterCommit != nil {
+		return interpreter.afterCommit(completion)
+	}
+	return nil
 }
 
 func (*domainCompletionInterpreter) Interpret(

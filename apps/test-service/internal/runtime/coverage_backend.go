@@ -2,9 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	goruntime "runtime"
 	"strings"
@@ -292,22 +289,26 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"}
 		result.InstrumentationFingerprint = coveragegcc.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyClang:
+		paths := []string{instance.CCompiler, instance.CXXCompiler, instance.Coverage.LLVMProfdata, instance.Coverage.LLVMCov}
+		evidence := []toolchain.ExecutableEvidence{instance.Coverage.CompilerEvidence, instance.Coverage.CXXCompilerEvidence, instance.Coverage.ProfdataEvidence, instance.Coverage.CovEvidence}
+		roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+		tools := make([]toolchain.LLVMToolEvidence, len(paths))
+		for index := range tools {
+			tools[index] = toolchain.LLVMToolEvidence{Role: roles[index], Path: paths[index], Evidence: evidence[index]}
+		}
+		identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+		if err != nil || identity != instance.Coverage.ToolsetIdentity {
+			return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
+		}
 		result.Compiler.Family = coveragedomain.CompilerFamilyClang
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: instance.Version}
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: instance.Version}
+		result.InstrumentationFingerprint = coveragellvm.InstrumentationFingerprintForPlatform("linux")
 	default:
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
 	}
 	if result.Architecture == "" {
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
-	}
-	if result.InstrumentationFingerprint == "" {
-		identity, _ := json.Marshal(struct {
-			Family   toolchain.Family
-			Contract string
-		}{instance.Family, result.NormalizerVersion})
-		sum := sha256.Sum256(identity)
-		result.InstrumentationFingerprint = hex.EncodeToString(sum[:])
 	}
 	return result, nil
 }

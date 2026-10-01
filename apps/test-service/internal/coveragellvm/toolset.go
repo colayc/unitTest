@@ -23,11 +23,13 @@ type pinnedTool struct {
 }
 
 type Toolset struct {
-	compiler pinnedTool
-	profdata pinnedTool
-	cov      pinnedTool
-	version  string
-	identity string
+	compiler  pinnedTool
+	cxx       pinnedTool
+	profdata  pinnedTool
+	cov       pinnedTool
+	version   string
+	identity  string
+	fourTools bool
 
 	installationPath   string
 	installationFile   *os.File
@@ -50,6 +52,7 @@ type toolRole uint8
 
 const (
 	compilerRole toolRole = iota
+	cxxRole
 	profdataRole
 	covRole
 )
@@ -86,10 +89,16 @@ func (t *Toolset) CCompiler() coveragerun.TrustedPath {
 }
 
 func (t *Toolset) CXXCompiler() coveragerun.TrustedPath {
+	if t != nil && t.fourTools {
+		return trustedTool{owner: t, role: cxxRole}
+	}
 	return t.Compiler()
 }
 
 func (t *Toolset) Tools() []coveragerun.TrustedPath {
+	if t != nil && t.fourTools {
+		return []coveragerun.TrustedPath{t.Compiler(), t.CXXCompiler(), t.Profdata(), t.Cov()}
+	}
 	return []coveragerun.TrustedPath{t.Compiler(), t.Profdata(), t.Cov()}
 }
 
@@ -125,7 +134,7 @@ func (t *Toolset) ClaimOwnership() (coverageplatform.OwnershipClaim, error) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.claimed || t.installationFile == nil || t.compiler.file == nil || t.profdata.file == nil || t.cov.file == nil {
+	if t.claimed || t.installationFile == nil || t.compiler.file == nil || t.fourTools && t.cxx.file == nil || t.profdata.file == nil || t.cov.file == nil {
 		return nil, ErrInvalidToolset
 	}
 	t.claimed = true
@@ -164,7 +173,7 @@ func (t *Toolset) Verify() error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.installationFile == nil || t.compiler.file == nil || t.profdata.file == nil || t.cov.file == nil {
+	if t.installationFile == nil || t.compiler.file == nil || t.fourTools && t.cxx.file == nil || t.profdata.file == nil || t.cov.file == nil {
 		return ErrInvalidToolset
 	}
 	if err := verifyPinnedDirectory(
@@ -172,7 +181,11 @@ func (t *Toolset) Verify() error {
 	); err != nil {
 		return errors.Join(ErrInvalidToolset, err)
 	}
-	for _, role := range []toolRole{compilerRole, profdataRole, covRole} {
+	roles := []toolRole{compilerRole, profdataRole, covRole}
+	if t.fourTools {
+		roles = []toolRole{compilerRole, cxxRole, profdataRole, covRole}
+	}
+	for _, role := range roles {
 		if err := t.verifyToolLocked(role); err != nil {
 			return err
 		}
@@ -195,6 +208,8 @@ func (t *Toolset) tool(role toolRole) *pinnedTool {
 	switch role {
 	case compilerRole:
 		return &t.compiler
+	case cxxRole:
+		return &t.cxx
 	case profdataRole:
 		return &t.profdata
 	default:
@@ -210,7 +225,7 @@ func (t *Toolset) Close() error {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		var result error
-		for _, tool := range []*pinnedTool{&t.cov, &t.profdata, &t.compiler} {
+		for _, tool := range []*pinnedTool{&t.cov, &t.profdata, &t.cxx, &t.compiler} {
 			if tool.file != nil {
 				result = errors.Join(result, tool.file.Close())
 				tool.file = nil

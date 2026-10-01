@@ -57,10 +57,19 @@ import type {
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const nativeTimeoutMs = 120_000;
+const nativeBuildTaskTimeoutMs = 60_000;
+// Framework builds compile the locked third-party sources as part of every
+// matrix row. Keep this separate from the 120s service/liveness budget while
+// still bounding a stalled native build.
+const frameworkNativeBuildTaskTimeoutMs = 300_000;
 const nativeEventHeartbeatMs = 5_000;
 const nativeLivenessReconnectTimeoutMs = 30_000;
 const nativeLivenessReconnectAttempts = 3;
 const nativeLivenessReconnectBackoffMs = 250;
+// A task and its event stream can reach their terminal boundary at the same
+// time. Keep a small, separate client-side grace window so a lost stream can
+// reconnect and replay the terminal event after the service task budget ends.
+const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
@@ -123,6 +132,8 @@ interface FamilyExecutionContext extends SelectedProfile {
   workspaceRoot: string;
   serviceBinary: string;
   bundle: PreparedCMakeBundle;
+  /** Framework workspaces are heavier, but remain bounded by nativeTimeoutMs. */
+  taskTimeoutMs: number;
 }
 
 interface NativeMatrixDependencies {
@@ -288,6 +299,9 @@ async function runNativeMatrixWithDependencies(
         workspaceRoot: workspace.workspaceRoot,
         serviceBinary,
         bundle,
+        taskTimeoutMs: options.frameworkPlatform === undefined
+          ? nativeBuildTaskTimeoutMs
+          : frameworkNativeBuildTaskTimeoutMs,
       });
       results.push({
         platform: options.platform,
@@ -492,9 +506,16 @@ async function executeCoreScenarios(
     context.family,
     "default-build",
     [],
-    60_000,
+    context.taskTimeoutMs,
   );
-  const firstEvents = await waitForTask(client, subscription, first.taskId);
+  const firstEvents = await waitForTask(
+    client,
+    subscription,
+    first.taskId,
+    "succeeded",
+    [],
+    context.taskTimeoutMs,
+  );
   assertStepOrder(firstEvents, ["configure", "build"], "first native build");
 
   reportNativeScenario(context.family, "secondary-target");
@@ -503,9 +524,16 @@ async function executeCoreScenarios(
     context.family,
     "secondary-target",
     "secondary_app",
-    60_000,
+    context.taskTimeoutMs,
   );
-  const secondEvents = await waitForTask(client, subscription, second.taskId);
+  const secondEvents = await waitForTask(
+    client,
+    subscription,
+    second.taskId,
+    "succeeded",
+    [],
+    context.taskTimeoutMs,
+  );
   assertStepOrder(secondEvents, ["build"], "unchanged native build");
 
   reportNativeScenario(context.family, "configure-invalidation");
@@ -519,9 +547,16 @@ async function executeCoreScenarios(
     context.family,
     "configure-invalidation",
     [],
-    60_000,
+    context.taskTimeoutMs,
   );
-  const thirdEvents = await waitForTask(client, subscription, third.taskId);
+  const thirdEvents = await waitForTask(
+    client,
+    subscription,
+    third.taskId,
+    "succeeded",
+    [],
+    context.taskTimeoutMs,
+  );
   assertStepOrder(thirdEvents, ["configure", "build"], "changed CMake input build");
 
   reportNativeScenario(context.family, "typed-rejections");
@@ -531,7 +566,7 @@ async function executeCoreScenarios(
     "unknown-target-rejected",
     (selected) =>
       expectProtocolError(
-        () => startBuild(client, selected, ["f".repeat(64)], 60_000),
+        () => startBuild(client, selected, ["f".repeat(64)], context.taskTimeoutMs),
         "TARGET_NOT_FOUND",
       ),
   );
@@ -548,7 +583,7 @@ async function executeCoreScenarios(
           buildProfileId: selected.profile.buildProfileId,
           targetIds: [],
           jobs: 2,
-          timeoutMs: 60_000,
+          timeoutMs: context.taskTimeoutMs,
         }),
         "WORKSPACE_CHANGED",
       ),
@@ -560,7 +595,7 @@ async function executeCoreScenarios(
     context.family,
     "cancellation-reconnect",
     "slow_target",
-    60_000,
+    context.taskTimeoutMs,
   );
   const cancellationEvents = await waitForStep(
     subscription,
@@ -583,6 +618,7 @@ async function executeCoreScenarios(
     cancellable.taskId,
     "cancelled",
     cancellationEvents,
+    context.taskTimeoutMs,
   );
   assertContinuousSequences(cancelledEvents, `${context.family} cancellation reconnect`);
 
@@ -592,7 +628,12 @@ async function executeCoreScenarios(
   // build checkpoint so the following target lookup cannot reuse that stale
   // generation (or an incompletely persisted configure fingerprint).
   reportNativeScenario(context.family, "cancellation-recovery");
-  await recoverAfterCancellation(client, context.family, subscription);
+  await recoverAfterCancellation(
+    client,
+    context.family,
+    subscription,
+    context.taskTimeoutMs,
+  );
 
   reportNativeScenario(context.family, "timeout");
   const timed = await startNamedTargetBuildAtCheckpoint(
@@ -664,19 +705,22 @@ async function executeCoreScenarios(
     context.family,
     "service-recovery-ready",
     [],
-    60_000,
+    context.taskTimeoutMs,
   );
   await waitForTask(
     context.fixture.client,
     subscription,
     recoveryReady.taskId,
+    "succeeded",
+    [],
+    context.taskTimeoutMs,
   );
   const recoverable = await startNamedTargetBuildAtCheckpoint(
     context.fixture.client,
     context.family,
     "service-recovery-interruption",
     "slow_target",
-    60_000,
+    context.taskTimeoutMs,
   );
   await waitForStep(subscription, recoverable.taskId, "build");
   await context.fixture.kill();
@@ -733,15 +777,23 @@ async function recoverAfterCancellation(
   client: ProtocolClient,
   family: RequiredToolchainFamily,
   subscription: EventSubscription,
+  timeoutMs = nativeBuildTaskTimeoutMs,
 ): Promise<void> {
   const recovery = await startFamilyBuildAtCheckpoint(
     client,
     family,
     "cancellation-recovery",
     [],
-    60_000,
+    timeoutMs,
   );
-  await waitForTask(client, subscription, recovery.taskId);
+  await waitForTask(
+    client,
+    subscription,
+    recovery.taskId,
+    "succeeded",
+    [],
+    timeoutMs,
+  );
 }
 
 function reportNativeScenario(
@@ -792,11 +844,15 @@ async function runPresetBuildScenario(
       selected,
       context.toolchain,
       `${context.family} preset-build`,
+      context.taskTimeoutMs,
     );
     const events = await waitForTask(
       fixture.client,
       subscription,
       task.taskId,
+      "succeeded",
+      [],
+      context.taskTimeoutMs,
     );
     assertStepOrder(events, ["configure", "build"], `${context.family} preset build`);
     assertPresetCompiler(
@@ -916,16 +972,17 @@ async function startPresetBuildWithStaleRetry(
   selected: SelectedProfile,
   toolchain: ToolchainElement,
   scenario: string,
+  timeoutMs = nativeBuildTaskTimeoutMs,
 ) {
   try {
-    return await startBuild(client, selected, [], 60_000);
+    return await startBuild(client, selected, [], timeoutMs);
   } catch (error) {
     if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
       throw error;
     }
   }
   const refreshed = await inspectPresetProfile(client, toolchain, scenario);
-  return startBuild(client, refreshed, [], 60_000);
+  return startBuild(client, refreshed, [], timeoutMs);
 }
 
 function assertPresetCompiler(
@@ -1035,12 +1092,15 @@ async function runFailureScenario(
       selected,
       context.family,
       fixtureName,
+      context.taskTimeoutMs,
     );
     const events = await waitForTask(
       fixture.client,
       subscription,
       task.taskId,
       "command_failed",
+      [],
+      context.taskTimeoutMs,
     );
     const diagnostics = events
       .filter((event) => event.event === "task.diagnostic")
@@ -1201,16 +1261,17 @@ async function startFailureBuildWithStaleRetry(
   selected: SelectedProfile,
   family: RequiredToolchainFamily,
   scenario: string,
+  timeoutMs = nativeBuildTaskTimeoutMs,
 ) {
   try {
-    return await startBuild(client, selected, [], 60_000);
+    return await startBuild(client, selected, [], timeoutMs);
   } catch (error) {
     if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
       throw error;
     }
   }
   const refreshed = await inspectEstablishedFamily(client, family, scenario);
-  return startBuild(client, refreshed, [], 60_000);
+  return startBuild(client, refreshed, [], timeoutMs);
 }
 
 async function loadGoldenDiagnostics(
@@ -1283,9 +1344,11 @@ async function waitForTask(
   taskId: string,
   expectedOutcome = "succeeded",
   initialEvents: ProtocolTaskEvent[] = [],
+  timeoutMs = nativeTimeoutMs,
+  heartbeatMs = nativeEventHeartbeatMs,
 ): Promise<ProtocolTaskEvent[]> {
   const events = [...initialEvents];
-  const deadline = Date.now() + nativeTimeoutMs;
+  const deadline = Date.now() + timeoutMs + nativeTaskCompletionGraceMs;
   let pending = subscription.next();
   let lastSnapshot: ProtocolTaskSnapshot | undefined;
   let terminalReplayRequested = false;
@@ -1300,7 +1363,7 @@ async function waitForTask(
     }
     const result = await waitForNativeEvent(
       pending,
-      Math.min(nativeEventHeartbeatMs, remaining),
+      Math.min(heartbeatMs, remaining),
     );
     if (result.kind === "heartbeat") {
       try {
@@ -1418,7 +1481,7 @@ async function recoverNativeLiveness(
   }
   throw new Error(
     `native task ${taskId} liveness recovery failed after sequence ${lastSequence}: ` +
-    `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    `${lastError instanceof Error ? lastError.message : String(lastError ?? "deadline exhausted before reconnect")}`,
     { cause: lastError },
   );
 }
@@ -1861,6 +1924,7 @@ export const __testing = Object.freeze({
   startNamedTargetBuildAtCheckpoint,
   recoverAfterCancellation,
   recoverNativeLiveness,
+  waitForTask,
   startFailureBuildWithStaleRetry,
   frameworkExecutableDigest,
 });

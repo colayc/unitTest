@@ -6,6 +6,327 @@ import addFormats from "ajv-formats";
 
 const load = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
 
+async function compileV16() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.6/${name}.schema.json`));
+  }
+  return { ajv, message: ajv.compile(await load("../schema/v1.6/message.schema.json")) };
+}
+
+test("protocol 1.6 accepts all seven closed detail and managed-test routes", async () => {
+  const { message } = await compileV16();
+  const requests = await load("../fixtures/v1.6/methods.valid.json");
+  assert.equal(new Set(requests.map((request) => request.method)).size, 7);
+  for (const request of requests) assert.equal(message(request), true, `${request.method}: ${JSON.stringify(message.errors)}`);
+  const old = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(old);
+  old.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) old.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  const v15 = old.compile(await load("../schema/v1.5/message.schema.json"));
+  for (const request of requests) assert.equal(v15({ ...request, protocolVersion: "1.5" }), false, request.method);
+  const previousStart = await load("../fixtures/v1.5/test-generation-start.valid.json");
+  assert.equal(v15({ ...previousStart, payload: { ...previousStart.payload, functionId: "a".repeat(32) } }), false, "v1.5 function ID selector");
+  assert.equal(v15({ ...previousStart, payload: { ...previousStart.payload, coverageGapId: "a".repeat(32) } }), false, "v1.5 gap ID selector");
+  const capabilitiesAjv = new Ajv2020({ strict: true });
+  const oldCapabilities = capabilitiesAjv.compile(await load("../schema/v1.5/capabilities.schema.json"));
+  const previous = (await load("../schema/v1.5/capabilities.schema.json")).properties;
+  const basic = Object.fromEntries(Object.entries(previous).map(([key, schema]) => [key,
+    key === "frameworkAdapters" ? [] : schema.const ?? (schema.type === "boolean" ? false : "1")]));
+  assert.equal(oldCapabilities({ ...basic, coverageDetails: true, managedTests: true }), false, "v1.5 capability bitset remains closed");
+  for (const request of requests) {
+    for (const field of ["source", "sourcePath", "argv", "environment", "outputPath", "collectorOutput"]) {
+      assert.equal(message({ ...request, payload: { ...request.payload, [field]: "secret" } }), false, `${request.method}/${field}`);
+    }
+  }
+});
+
+test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", async () => {
+  const { ajv, message } = await compileV16();
+  const requests = await load("../fixtures/v1.6/methods.valid.json");
+  const start = { ...await load("../fixtures/v1.5/test-generation-start.valid.json"), protocolVersion: "1.6" };
+  const identity = "a".repeat(32);
+  const selectors = [
+    ["functionId", "symbol", identity], ["fileId", "file", identity],
+    ["targetId", "target", "a".repeat(64)], ["coverageGapId", "coverage-gap", identity]
+  ];
+  for (const [key, scope, value] of selectors) {
+    const payload = { ...start.payload, scope, [key]: value };
+    if (scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
+    delete payload.symbolId;
+    assert.equal(message({ ...start, payload }), true, `${key}: ${JSON.stringify(message.errors)}`);
+    assert.equal(message({ ...start, payload: { ...payload, file: "src/source.cpp" } }), false, `${key} with legacy file`);
+    assert.equal(message({ ...start, payload: { ...payload, symbolId: "target:symbol" } }), false, `${key} with legacy symbol`);
+  }
+  assert.equal(message({ ...start, payload: { ...start.payload, scope: "symbol" } }), false, "legacy symbol selector");
+  assert.equal(message({ ...start, payload: { ...start.payload, scope: "file", file: "../escape.cpp" } }), false, "path traversal");
+  for (const request of requests.filter((item) => item.method.endsWith("/list"))) {
+    assert.equal(message({ ...request, payload: { ...request.payload, limit: 0 } }), false, `${request.method} zero limit`);
+    assert.equal(message({ ...request, payload: { ...request.payload, limit: request.method === "coverage/details/lines/list" ? 1001 : 201 } }), false, `${request.method} oversized page`);
+    assert.equal(message({ ...request, payload: { ...request.payload, cursor: "" } }), false, `${request.method} empty cursor`);
+  }
+  assert.equal(message({ ...requests[1], payload: { ...requests[1].payload, coverageReportId: "ABC" } }), false, "malformed report ID");
+  assert.equal(message({ ...requests[2], payload: { ...requests[2].payload, fileId: "ABC" } }), false, "malformed file ID");
+  assert.equal(message({ ...requests[6], payload: { ...requests[6].payload, reviewDigest: "ABC" } }), false, "malformed or stale-shaped digest");
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const metric = ajv.compile({ ...coverage.$defs.detailMetric, $defs: coverage.$defs });
+  const valid = { covered: 4, total: 5, coveredDelta: -1 };
+  assert.equal(metric(valid), true);
+  for (const value of [{ ...valid, covered: -1 }, { ...valid, total: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, raw: "secret" }]) {
+    assert.equal(metric(value), false, JSON.stringify(value));
+  }
+});
+
+test("protocol 1.6 closes detail status, reasons, managed states, and digest-bound review choices", async () => {
+  const { ajv, message } = await compileV16();
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const generation = await load("../schema/v1.6/test-generation.schema.json");
+  for (const [definition, valid, invalid] of [
+    [coverage.$defs.detailStatus, ["current", "stale", "incomplete"], ["unknown", "partial"]],
+    [coverage.$defs.detailReason, ["source_changed", "tool_identity_changed", "report_partial", "attribution_ambiguous", "baseline_unavailable", "source_missing"], ["other", "sourceChanged"]],
+    [generation.$defs.managedStatus, ["current", "stale", "conflicted", "orphaned", "invalid"], ["deleted", "unknown"]],
+    [generation.$defs.conflictChoice, ["keep-current", "use-generated", "convert-to-manual"], ["delete", "accept"]]
+  ]) {
+    const validate = ajv.compile(definition);
+    for (const value of valid) assert.equal(validate(value), true, value);
+    for (const value of invalid) assert.equal(validate(value), false, value);
+  }
+  const apply = (await load("../fixtures/v1.6/methods.valid.json"))[6];
+  assert.equal(message(apply), true, JSON.stringify(message.errors));
+  assert.equal(message({ ...apply, payload: { ...apply.payload, reviewDigest: "a".repeat(64) } }), true,
+    "a well-formed but stale digest is syntactically valid; the service must compare it to durable state");
+  assert.equal(message({ ...apply, payload: { ...apply.payload, reviewDigest: "b".repeat(63) } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "a".repeat(32), choice: "keep-current" }] } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId: "utc_" + "a".repeat(32), choice: "delete" }] } }), false);
+  assert.equal(message({ ...apply, payload: { ...apply.payload, resolutions: [{ ...apply.payload.resolutions[0], extra: true }] } }), false);
+});
+
+test("protocol 1.6 scaffold resolution keys use only closed canonical ASCII paths", async () => {
+  const { message } = await compileV16();
+  const apply = (await load("../fixtures/v1.6/methods.valid.json"))[6];
+  const withKey = (caseId) => ({ ...apply, payload: { ...apply.payload, resolutions: [{ caseId, choice: "keep-current" }] } });
+  assert.equal(message(withKey("scaffold:tests/generated/src/a_test.cpp")), true);
+  for (const key of ["scaffold:tests/generated/é_test.c", "scaffold:tests/generated/a%20b_test.c", "scaffold:tests/generated/../a_test.c", "scaffold:tests/generated/./a_test.c", "scaffold:tests/generated/" + "a".repeat(221) + "_test.c"]) {
+    assert.equal(message(withKey(key)), false, key);
+  }
+});
+
+test("protocol 1.6 validates paginated detail and managed-review responses", async () => {
+  const { message } = await compileV16();
+  const id = "a".repeat(32);
+  const digest = "b".repeat(64);
+  const summary = Object.fromEntries(["functions", "lines", "branches"].map((key) => [key, { covered: 1, total: 2, coveredDelta: 1 }]));
+  const file = { fileId: id, relativePath: "src/math.cpp", sourceSha256: digest, status: "current", reasons: [], summary, functionCount: 1 };
+  const fn = { functionId: id, fileId: id, qualifiedName: "math::add", startLine: 1, endLine: 4, status: "current", reasons: [], summary };
+  const line = { line: 1, count: 1, baselineCount: 0, branchesCovered: 1, branchesTotal: 2, baselineBranchesCovered: 0, baselineBranchesTotal: 2 };
+  const record = { caseId: "utc_" + id, fileId: id, functionId: id, status: "current", acceptedDigest: digest, currentDigest: digest };
+  const metadata = { workspaceGeneration: digest, coverageReportId: id };
+  const responses = [
+    ["coverage/details/project/get", { ...metadata, projectId: "core", status: "current", reasons: [], summary, fileCount: 1 }],
+    ["coverage/details/files/list", { ...metadata, items: [file] }],
+    ["coverage/details/functions/list", { ...metadata, items: [fn] }],
+    ["coverage/details/lines/list", { ...metadata, items: [line] }],
+    ["managedTests/records/list", { ...metadata, items: [record] }],
+    ["managedTests/reviews/get", { reviewId: id, reviewDigest: digest, ...metadata, cases: [{ caseId: record.caseId, status: "conflicted", acceptedDigest: digest, currentDigest: digest, generatedDigest: digest }] }],
+    ["managedTests/reviews/apply", { reviewId: id, reviewDigest: digest, applied: true }]
+  ];
+  const base = { protocolVersion: "1.6", kind: "response", messageId: id, requestId: id, sentAt: "2026-09-28T00:00:00Z" };
+  const managedRun = { runId: id, taskId: id, workspaceGeneration: digest, projectId: "core", state: "awaiting_confirmation", createdAt: "2026-09-28T00:00:00Z", lastSequence: 1, candidateCount: 1 };
+  assert.equal(message({ ...base, method: "testGeneration/runs/get", payload: managedRun }), true, "managed awaiting run uses a separate durable review, not a fabricated v1.5 preview");
+  for (const [method, payload] of responses) assert.equal(message({ ...base, method, payload }), true, `${method}: ${JSON.stringify(message.errors)}`);
+  assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, relativePath: "../secret.cpp" }] } }), false, "traversal path");
+  assert.equal(message({ ...base, method: responses[1][0], payload: { ...responses[1][1], items: [{ ...file, source: "int secret;" }] } }), false, "unknown file key");
+  assert.equal(message({ ...base, method: responses[3][0], payload: { ...responses[3][1], items: [{ ...line, count: -1 }] } }), false, "negative line count");
+  assert.equal(message({ ...base, method: responses[3][0], payload: { ...responses[3][1], items: [{ ...line, branchesTotal: Number.MAX_SAFE_INTEGER + 1 }] } }), false, "overflow branch count");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: [{ ...record, caseId: id }] } }), false, "malformed case ID");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...responses[4][1], items: Array(201).fill(record) } }), false, "oversized record page");
+  const reviewRequest = (await load("../fixtures/v1.6/methods.valid.json"))[5];
+  assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "opaque", limit: 32 } }), true, "review continuation");
+  for (const limit of [0, 33]) assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, limit } }), false, `review limit ${limit}`);
+  assert.equal(message({ ...reviewRequest, payload: { ...reviewRequest.payload, cursor: "" } }), false, "empty review cursor");
+  const review = responses[5][1];
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, previewArtifactDigest: digest } }), false,
+    "unbacked response-side preview proof is not part of the closed protocol");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, nextCursor: "opaque" } }), true, "review continuation response");
+  const emptyDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const firstRecord = { ...record, acceptedDigest: emptyDigest, absentSides: ["accepted"] };
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...metadata, items: [firstRecord] } }), true, "record absent ancestor");
+  assert.equal(message({ ...base, method: responses[4][0], payload: { ...metadata, items: [{ ...record, absentSides: ["accepted"] }] } }), false, "record incorrect sentinel");
+  const firstTime = { ...review, cases: [{ ...review.cases[0], acceptedDigest: emptyDigest, absentSides: ["accepted"] }] };
+  assert.equal(message({ ...base, method: responses[5][0], payload: firstTime }), true, "first-time review absent ancestor");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], absentSides: ["accepted"] }] } }), false, "incorrect sentinel");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], acceptedDigest: emptyDigest, absentSides: ["accepted", "accepted"] }] } }), false, "duplicate absent side");
+  assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: Array(33).fill(review.cases[0]) } }), false, "oversized review page");
+});
+
+test("protocol 1.5 generation boundaries reject caller classification, leaked text, and filesystem artifacts", async () => {
+  const ajv = new Ajv2020({ strict: true, strictRequired: false });
+  addFormats(ajv);
+  const generation = await load("../schema/v1.5/test-generation.schema.json");
+  const accept = ajv.compile({ ...generation.$defs.acceptRequest, $defs: generation.$defs });
+  assert.equal(accept({ runId: "a".repeat(32), candidateId: "b".repeat(32), confirmCharacterization: false }), false,
+    "acceptance without the preview confirmation digest must be rejected");
+  const request = { runId: "a".repeat(32), candidateId: "b".repeat(32), confirmationDigest: "c".repeat(64), confirmCharacterization: true };
+  assert.equal(accept(request), true, "candidate kind must be resolved by the service, not supplied by the caller");
+  assert.equal(accept({ ...request, candidateKind: "verified", confirmCharacterization: false }), false);
+
+  const target = ajv.compile({ ...generation.$defs.target, $defs: generation.$defs });
+  const diagnostic = ajv.compile({ ...generation.$defs.diagnostic, $defs: generation.$defs });
+  const stableTarget = { kind: "build-target", targetId: "c".repeat(64), frameworks: ["cpputest"] };
+  const structuredDiagnostic = { code: "COVERAGE_GAP", severity: "warning", reason: "uncovered-branch" };
+  assert.equal(target(stableTarget), true);
+  assert.equal(diagnostic(structuredDiagnostic), true);
+  for (const displayName of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp", "API KEY secretvalue123", "Bearer sk123456789", "int secret 42"]) {
+    assert.equal(target({ ...stableTarget, displayName }), false, displayName);
+  }
+  for (const message of ["C:\\private\\source.cpp: API_KEY=secret", "/private/source.cpp", "C:/private/source.cpp", "API KEY secretvalue123", "Bearer sk123456789", "int secret 42"]) {
+    assert.equal(diagnostic({ ...structuredDiagnostic, message }), false, message);
+  }
+  assert.equal(diagnostic({ ...structuredDiagnostic, reason: "Bearer sk123456789" }), false);
+  assert.equal(diagnostic({ ...structuredDiagnostic, code: "SECRET_VALUE_123" }), false);
+  const artifact = ajv.compile(await load("../schema/v1.5/artifact.schema.json"));
+  const metadata = { artifactId: "a".repeat(32), taskId: "b".repeat(32), kind: "task-summary", mimeType: "application/json", sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-09-27T00:00:00Z", uri: "unit-test-ide://artifact/" + "a".repeat(32) };
+  assert.equal(artifact(metadata), true);
+  assert.equal(artifact({ ...metadata, uri: "file:///C:/private/source.cpp" }), false);
+});
+
+test("protocol 1.5 generation project ids match tasks and scope selectors are exclusive", async () => {
+  const ajv = new Ajv2020({ strict: true, strictRequired: false });
+  addFormats(ajv);
+  const generation = await load("../schema/v1.5/test-generation.schema.json");
+  const start = ajv.compile({ ...generation.$defs.startRequest, $defs: generation.$defs });
+  const run = ajv.compile({ ...generation.$defs.run, $defs: generation.$defs });
+  const targetListRequest = ajv.compile({ ...generation.$defs.targetListRequest, $defs: generation.$defs });
+  const task = ajv.compile(await load("../schema/v1.5/task.schema.json"));
+  const base = { idempotencyKey: "a".repeat(32), workspaceGeneration: "b".repeat(64), projectId: "core", framework: "cpputest", goals: { functionPercent: 1, linePercent: 2, branchPercent: 3 }, budgets: { wallTimeMs: 1, candidateCount: 1, memoryMiB: 64, concurrency: 1 } };
+  const selectors = { symbol: { symbolId: "target:foo" }, file: { file: "src/foo.cpp" }, target: { targetId: "c".repeat(64) }, workspace: {}, "coverage-gap": { coverageReportId: "d".repeat(32) } };
+  for (const [scope, selected] of Object.entries(selectors)) {
+    assert.equal(start({ ...base, scope, ...selected }), true, scope);
+    for (const [otherScope, other] of Object.entries(selectors)) {
+      if (scope !== otherScope && Object.keys(other).length > 0) assert.equal(start({ ...base, scope, ...selected, ...other }), false, `${scope} with ${otherScope} selector`);
+    }
+  }
+  const longProjectId = "p".repeat(65);
+  assert.equal(start({ ...base, scope: "workspace", projectId: longProjectId }), false);
+  assert.equal(targetListRequest({ workspaceGeneration: "c".repeat(64), projectId: longProjectId }), false);
+  assert.equal(run({ runId: "a".repeat(32), taskId: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: longProjectId, state: "queued", createdAt: "2026-09-27T00:00:00Z", lastSequence: 0 }), false);
+  assert.equal(task({ taskId: "a".repeat(32), kind: "testGeneration", runId: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: longProjectId, status: "running", createdAt: "2026-09-27T00:00:00Z", lastSequence: 0 }), false);
+});
+
+test("protocol 1.5 validates test-generation methods and rejects unsafe payloads", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  }
+  const validate = ajv.compile(await load("../schema/v1.5/message.schema.json"));
+  for (const fixture of [
+    "test-generation-start.valid.json",
+    "test-generation-run.valid.json",
+    "test-generation-candidate-set.valid.json",
+    "test-generation-accept.valid.json"
+  ]) {
+    assert.equal(validate(await load(`../fixtures/v1.5/${fixture}`)), true, fixture);
+  }
+  for (const fixture of ["test-generation-budget.invalid.json", "test-generation-path.invalid.json"]) {
+    assert.equal(validate(await load(`../fixtures/v1.5/${fixture}`)), false, fixture);
+  }
+  const base = { protocolVersion: "1.5", kind: "request", messageId: "a".repeat(32), sentAt: "2026-09-27T00:00:00Z" };
+  const start = {
+    ...base, method: "testGeneration/start", payload: {
+      idempotencyKey: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: "core",
+      scope: "symbol", symbolId: "target:foo", framework: "cpputest",
+      goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+      budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+    }
+  };
+  assert.equal(validate(start), true, JSON.stringify(validate.errors));
+  for (const [method, payload] of [
+    ["testGeneration/targets/list", { workspaceGeneration: "c".repeat(64), projectId: "core" }],
+    ["testGeneration/runs/get", { runId: "d".repeat(32) }],
+    ["testGeneration/runs/cancel", { runId: "d".repeat(32) }],
+    ["testGeneration/events/replay", { runId: "d".repeat(32), afterSequence: 0 }],
+    ["testGeneration/candidates/list", { runId: "d".repeat(32) }],
+    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), confirmationDigest: "f".repeat(64), confirmCharacterization: true }]
+  ]) assert.equal(validate({ ...base, method, payload }), true, `${method}: ${JSON.stringify(validate.errors)}`);
+  for (const [name, payload] of [
+    ["unknown", { ...start.payload, command: "rm -rf /" }],
+    ["percentage", { ...start.payload, goals: { ...start.payload.goals, branchPercent: 101 } }],
+    ["zero budget", { ...start.payload, budgets: { ...start.payload.budgets, candidateCount: 0 } }],
+    ["overflow budget", { ...start.payload, budgets: { ...start.payload.budgets, wallTimeMs: Number.MAX_SAFE_INTEGER + 1 } }],
+    ["absolute path", { ...start.payload, sourcePath: "C:\\private\\source.c" }]
+  ]) assert.equal(validate({ ...start, payload }), false, name);
+  assert.equal(validate({ ...base, method: "testGeneration/accept", payload: { runId: "d".repeat(32), candidateId: "e".repeat(32) } }), false);
+  assert.equal(validate({ ...start, protocolVersion: "1.4" }), false);
+});
+
+test("protocol 1.5 closes candidate summaries, responses, and state transitions", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  }
+  const message = ajv.compile(await load("../schema/v1.5/message.schema.json"));
+  const candidate = {
+    candidateId: "e".repeat(32), kind: "characterization", codeDigest: "a".repeat(64),
+    artifactDigest: "b".repeat(64), assertionProvenance: { kind: "observed-output", evidenceDigest: "c".repeat(64) },
+    baselineCoverage: { functionPercent: 25, linePercent: 35, branchPercent: 15 },
+    deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+    plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+    diagnostics: [], characterizationConfirmed: false
+  };
+  const response = {
+    protocolVersion: "1.5", kind: "response", messageId: "1".repeat(32), requestId: "2".repeat(32),
+    sentAt: "2026-09-27T00:00:00Z", method: "testGeneration/candidates/list", payload: { items: [candidate] }
+  };
+  assert.equal(message(response), true);
+  for (const [name, mutation] of [
+    ["raw source", { source: "int secret;" }],
+    ["absolute path", { plannedEdits: [{ ...candidate.plannedEdits[0], path: "C:/private/test.cpp" }] }],
+    ["traversal", { plannedEdits: [{ ...candidate.plannedEdits[0], path: "../test.cpp" }] }],
+    ["digest", { codeDigest: "ABC" }],
+    ["provenance", { assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) } }]
+  ]) {
+    assert.equal(message({ ...response, payload: { items: [{ ...candidate, ...mutation }] } }), false, name);
+  }
+  const event = {
+    protocolVersion: "1.5", kind: "event", messageId: "3".repeat(32), sentAt: "2026-09-27T00:00:00Z",
+    sequence: 1, taskId: "4".repeat(32), payloadVersion: 1, event: "testGeneration.state.changed",
+    payload: { runId: "5".repeat(32), from: "queued", to: "baseline" }
+  };
+  assert.equal(message(event), true);
+  assert.equal(message({ ...event, payload: { ...event.payload, to: "accepted" } }), false);
+  assert.equal(message({ ...event, payload: { ...event.payload, from: "nonsense" } }), false);
+  const oldAjv = new Ajv2020({ strict: true });
+  addFormats(oldAjv);
+  oldAjv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "task", "event", "artifact"]) oldAjv.addSchema(await load(`../schema/v1.4/${name}.schema.json`));
+  assert.equal(oldAjv.compile(await load("../schema/v1.4/message.schema.json"))({ ...response, protocolVersion: "1.4" }), false);
+});
+
+test("protocol 1.5 advertises generation and snapshots generation tasks", async () => {
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const capabilities = ajv.compile(await load("../schema/v1.5/capabilities.schema.json"));
+  const v14 = await load("../schema/v1.4/capabilities.schema.json");
+  const base = Object.fromEntries(Object.entries(v14.properties).map(([key, schema]) => [key,
+    key === "frameworkAdapters" ? [] : schema.const ?? (schema.type === "boolean" ? false : "1.0")]));
+  const advertised = { ...base, testGeneration: true, maxTestGenerationCandidates: 1000 };
+  assert.equal(capabilities(advertised), true);
+  assert.equal(capabilities({ ...advertised, maxTestGenerationCandidates: 0 }), false);
+  const task = ajv.compile(await load("../schema/v1.5/task.schema.json"));
+  const snapshot = {
+    taskId: "a".repeat(32), kind: "testGeneration", runId: "b".repeat(32), workspaceGeneration: "c".repeat(64),
+    projectId: "core", status: "running", createdAt: "2026-09-27T00:00:00Z", lastSequence: 2
+  };
+  assert.equal(task(snapshot), true);
+  assert.equal(task({ ...snapshot, sourcePath: "C:/secret.c" }), false);
+});
+
 test("protocol v1 accepts authenticated handshake shape and rejects a missing token", async () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);

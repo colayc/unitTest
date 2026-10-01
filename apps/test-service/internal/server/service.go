@@ -17,6 +17,7 @@ type Service struct {
 	token, platform, transport string
 	backend                    session.Backend
 	coverageBackend            session.CoverageBackend
+	generationBackend          session.GenerationBackend
 	config                     ServiceConfig
 	stop                       chan struct{}
 	stopOnce                   sync.Once
@@ -33,6 +34,12 @@ func NewService(listener net.Listener, token, platform, transport string, backen
 // boundary. Ordinary sessions remain on the negotiated legacy protocol until
 // a real coverage execution provider is supplied.
 func NewServiceWithCoverage(listener net.Listener, token, platform, transport string, backend session.Backend, coverage session.CoverageBackend, config ServiceConfig) *Service {
+	return NewServiceWithGeneration(listener, token, platform, transport, backend, coverage, nil, config)
+}
+
+// NewServiceWithGeneration opts into v1.5 only with a ready, product-owned
+// generation provider. Nil preserves the existing v1.4 service behavior.
+func NewServiceWithGeneration(listener net.Listener, token, platform, transport string, backend session.Backend, coverage session.CoverageBackend, generation session.GenerationBackend, config ServiceConfig) *Service {
 	if config.MaxConnections <= 0 {
 		config.MaxConnections = 64
 	}
@@ -41,7 +48,7 @@ func NewServiceWithCoverage(listener net.Listener, token, platform, transport st
 	}
 	return &Service{
 		listener: listener, token: token, platform: platform, transport: transport,
-		backend: backend, coverageBackend: coverage, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		backend: backend, coverageBackend: coverage, generationBackend: generation, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -75,7 +82,7 @@ func (s *Service) Serve() error {
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
-			active := session.NewWithCoverage(s.token, s.platform, s.transport, s.backend, s.coverageBackend)
+			active := session.NewWithGeneration(s.token, s.platform, s.transport, s.backend, s.coverageBackend, s.generationBackend)
 			ServeConnectionWithConfig(connection, active, s.config.Connection)
 			s.mu.Lock()
 			delete(s.connections, connection)

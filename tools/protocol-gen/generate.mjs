@@ -31,7 +31,23 @@ const models = [
   { directory: "v1.4", schema: "coverage.schema.json", top: "CoverageContractV14", bundle: ["test.schema.json"], template: "coverageV14", ts: "coverage-v1-4.ts", go: "v1_4/coverage/generated.go", goPackage: "protocolmodelv14coverage" },
   { directory: "v1.4", schema: "task.schema.json", top: "TaskSnapshotV14", template: "taskV14", ts: "task-v1-4.ts", go: "v1_4/task/generated.go", goPackage: "protocolmodelv14task" },
   { directory: "v1.4", schema: "event.schema.json", top: "TaskEventV14", bundle: ["diagnostic.schema.json", "test.schema.json", "coverage.schema.json"], template: "eventV14", ts: "event-v1-4.ts", go: "v1_4/event/generated.go", goPackage: "protocolmodelv14event" },
-  { directory: "v1.4", schema: "artifact.schema.json", top: "ArtifactMetadataV14", ts: "artifact-v1-4.ts", go: "v1_4/artifact/generated.go", goPackage: "protocolmodelv14artifact" }
+  { directory: "v1.4", schema: "artifact.schema.json", top: "ArtifactMetadataV14", ts: "artifact-v1-4.ts", go: "v1_4/artifact/generated.go", goPackage: "protocolmodelv14artifact" },
+  { directory: "v1.5", schema: "capabilities.schema.json", top: "CapabilitiesV15", ts: "capabilities-v1-5.ts", go: "v1_5/capabilities/generated.go", goPackage: "protocolmodelv15capabilities" },
+  { directory: "v1.5", schema: "diagnostic.schema.json", top: "DiagnosticV15", ts: "diagnostic-v1-5.ts", go: "v1_5/diagnostic/generated.go", goPackage: "protocolmodelv15diagnostic" },
+  { directory: "v1.5", schema: "test.schema.json", top: "TestContractV15", bundle: ["diagnostic.schema.json"], template: "testV15", ts: "test-v1-5.ts", go: "v1_5/test/generated.go", goPackage: "protocolmodelv15test" },
+  { directory: "v1.5", schema: "coverage.schema.json", top: "CoverageContractV15", bundle: ["test.schema.json"], template: "coverageV15", ts: "coverage-v1-5.ts", go: "v1_5/coverage/generated.go", goPackage: "protocolmodelv15coverage" },
+  { directory: "v1.5", schema: "test-generation.schema.json", top: "TestGenerationContractV15", ts: "test-generation-v1-5.ts", go: "v1_5/testgeneration/generated.go", goPackage: "protocolmodelv15testgeneration" },
+  { directory: "v1.5", schema: "task.schema.json", top: "TaskSnapshotV15", template: "taskV15", ts: "task-v1-5.ts", go: "v1_5/task/generated.go", goPackage: "protocolmodelv15task" },
+  { directory: "v1.5", schema: "event.schema.json", top: "TaskEventV15", bundle: ["diagnostic.schema.json", "test.schema.json", "coverage.schema.json", "test-generation.schema.json"], template: "eventV15", ts: "event-v1-5.ts", go: "v1_5/event/generated.go", goPackage: "protocolmodelv15event" },
+  { directory: "v1.5", schema: "artifact.schema.json", top: "ArtifactMetadataV15", ts: "artifact-v1-5.ts", go: "v1_5/artifact/generated.go", goPackage: "protocolmodelv15artifact" },
+  { directory: "v1.6", schema: "capabilities.schema.json", top: "CapabilitiesV16", ts: "capabilities-v1-6.ts", go: "v1_6/capabilities/generated.go", goPackage: "protocolmodelv16capabilities" },
+  { directory: "v1.6", schema: "diagnostic.schema.json", top: "DiagnosticV16", ts: "diagnostic-v1-6.ts", go: "v1_6/diagnostic/generated.go", goPackage: "protocolmodelv16diagnostic" },
+  { directory: "v1.6", schema: "test.schema.json", top: "TestContractV16", bundle: ["diagnostic.schema.json"], template: "testV16", ts: "test-v1-6.ts", go: "v1_6/test/generated.go", goPackage: "protocolmodelv16test" },
+  { directory: "v1.6", schema: "coverage.schema.json", top: "CoverageContractV16", bundle: ["test.schema.json"], template: "coverageV16", ts: "coverage-v1-6.ts", go: "v1_6/coverage/generated.go", goPackage: "protocolmodelv16coverage" },
+  { directory: "v1.6", schema: "test-generation.schema.json", top: "TestGenerationContractV16", ts: "test-generation-v1-6.ts", go: "v1_6/testgeneration/generated.go", goPackage: "protocolmodelv16testgeneration" },
+  { directory: "v1.6", schema: "task.schema.json", top: "TaskSnapshotV16", template: "taskV16", ts: "task-v1-6.ts", go: "v1_6/task/generated.go", goPackage: "protocolmodelv16task" },
+  { directory: "v1.6", schema: "event.schema.json", top: "TaskEventV16", bundle: ["diagnostic.schema.json", "test.schema.json", "coverage.schema.json", "test-generation.schema.json"], template: "eventV16", ts: "event-v1-6.ts", go: "v1_6/event/generated.go", goPackage: "protocolmodelv16event" },
+  { directory: "v1.6", schema: "artifact.schema.json", top: "ArtifactMetadataV16", ts: "artifact-v1-6.ts", go: "v1_6/artifact/generated.go", goPackage: "protocolmodelv16artifact" }
 ];
 const typescriptTemplates = {
   task: `export interface TaskSnapshotBaseV12 { taskId: string; status: TaskStatusV12; createdAt: Date; lastSequence: number; outcome?: TaskOutcomeV12; startedAt?: Date; finishedAt?: Date; errorCode?: string; errorMessage?: string; }\nexport interface CmakeBuildTaskSnapshotV12 extends TaskSnapshotBaseV12 { kind: TaskKindV12.CmakeBuild; workspaceGeneration: string; projectId: string; buildProfileId: string; targetIds: string[]; jobs: number; timeoutMs: number; scenario?: never; }\nexport interface SimulationTaskSnapshotV12 extends TaskSnapshotBaseV12 { kind: TaskKindV12.Simulation; scenario: SimulationScenarioV12; timeoutMs?: number; workspaceGeneration?: never; projectId?: never; buildProfileId?: never; targetIds?: never; jobs?: never; }\nexport type TaskSnapshotV12 = CmakeBuildTaskSnapshotV12 | SimulationTaskSnapshotV12;\nexport enum TaskKindV12 { CmakeBuild = "cmakeBuild", Simulation = "simulation" }\nexport enum TaskStatusV12 { Queued = "queued", Running = "running", Cancelling = "cancelling", Finished = "finished" }\nexport enum TaskOutcomeV12 { Succeeded = "succeeded", CommandFailed = "command_failed", Cancelled = "cancelled", TimedOut = "timed_out", Interrupted = "interrupted", InfrastructureFailed = "infrastructure_failed" }\nexport enum SimulationScenarioV12 { Success = "success", ExitNonzero = "exit-nonzero", Hang = "hang", SpawnChild = "spawn-child", EmitOutput = "emit-output" }\n`,
@@ -404,6 +420,66 @@ const ( FrameworkCppUTestV14 TestEventFrameworkV14 = "cpputest"; FrameworkUnityV
 type TestContainerOutcomeV14 string
 const ( ContainerPassedV14 TestContainerOutcomeV14 = "passed"; ContainerFailedV14 TestContainerOutcomeV14 = "failed"; ContainerErroredV14 TestContainerOutcomeV14 = "errored"; ContainerCancelledV14 TestContainerOutcomeV14 = "cancelled"; ContainerTimedOutV14 TestContainerOutcomeV14 = "timed_out"; ContainerNotRunV14 TestContainerOutcomeV14 = "not_run" )
 `;
+const typescriptTaskV15 = typescriptTaskV14
+  .replaceAll("V14", "V15")
+  .replace(
+    "export type TaskSnapshotV15 =",
+    "export interface TestGenerationTaskSnapshotV15 extends TaskSnapshotBaseV15 { kind: TaskKindV15.TestGeneration; runId: string; workspaceGeneration: string; projectId: string; scenario?: never; profileId?: never; catalogRevision?: never; repeatCount?: never; coverageProfileId?: never; coverageRunId?: never; testRunId?: never; }\nexport type TaskSnapshotV15 ="
+  )
+  .replace("CoverageRunTaskSnapshotV15;\nexport enum TaskKindV15", "CoverageRunTaskSnapshotV15 | TestGenerationTaskSnapshotV15;\nexport enum TaskKindV15")
+  .replace('CoverageRun = "coverageRun" }', 'CoverageRun = "coverageRun", TestGeneration = "testGeneration" }');
+const goTaskV15 = goTaskV14
+  .replaceAll("V14", "V15")
+  .replace(
+    "type TaskKindV15 string",
+    'type TestGenerationTaskSnapshotV15 struct { TaskID string `json:"taskId"`; Kind TaskKindV15 `json:"kind"`; RunID string `json:"runId"`; WorkspaceGeneration string `json:"workspaceGeneration"`; ProjectID string `json:"projectId"`; Status TaskStatusV15 `json:"status"`; Outcome *TaskOutcomeV15 `json:"outcome,omitempty"`; CreatedAt time.Time `json:"createdAt"`; StartedAt *time.Time `json:"startedAt,omitempty"`; FinishedAt *time.Time `json:"finishedAt,omitempty"`; LastSequence int64 `json:"lastSequence"`; ErrorCode *string `json:"errorCode,omitempty"`; ErrorMessage *string `json:"errorMessage,omitempty"` }\nfunc (TestGenerationTaskSnapshotV15) isTaskSnapshotV15() {}\ntype TaskKindV15 string'
+  )
+  .replace('TaskKindCoverageRunV15 TaskKindV15 = "coverageRun" )', 'TaskKindCoverageRunV15 TaskKindV15 = "coverageRun"; TaskKindTestGenerationV15 TaskKindV15 = "testGeneration" )');
+const typescriptEventV15 = typescriptEventV14
+  .replaceAll("V14", "V15")
+  .replaceAll("v1-4", "v1-5")
+  .replace('The14 = "1.4"', 'The15 = "1.5"')
+  .replace(
+    'import type { TestItemResult',
+    'import type { TestGenerationStateV15 } from "./test-generation-v1-5.js";\nimport type { TestItemResult'
+  )
+  .replace(
+    "export type CoverageEventV15 =",
+    "export interface TestGenerationStateChangedEventV15 extends TaskEventBaseV15 { event: TaskEventNameV15.TestGenerationStateChanged; payload: TestGenerationStateChangedPayloadV15; }\nexport type CoverageEventV15 ="
+  )
+  .replace(" | CoverageEventV15;\nexport interface TaskCreatedPayloadV15", " | CoverageEventV15 | TestGenerationStateChangedEventV15;\nexport interface TaskCreatedPayloadV15")
+  .replace(
+    "export enum EventProtocolVersionV15",
+    "export interface TestGenerationStateChangedPayloadV15 { runId: string; from: TestGenerationStateV15; to: TestGenerationStateV15; }\nexport enum EventProtocolVersionV15"
+  )
+  .replace('CoverageRunFinished = "coverage.run.finished" }', 'CoverageRunFinished = "coverage.run.finished", TestGenerationStateChanged = "testGeneration.state.changed" }');
+const goEventV15 = goEventV14
+  .replaceAll("V14", "V15")
+  .replaceAll("v14", "v15")
+  .replaceAll("v1_4", "v1_5")
+  .replace('= "1.4"', '= "1.5"')
+  .replace("EventProtocol14V15", "EventProtocol15V15")
+  .replace(
+    'protocolmodelv15test "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/test"',
+    'protocolmodelv15test "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/test"\n\tprotocolmodelv15testgeneration "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"'
+  )
+  .replace(
+    "type EventProtocolVersionV15 string",
+    'type TestGenerationStateChangedEventV15 struct { TaskEventBaseV15; Event TaskEventNameV15 `json:"event"`; Payload TestGenerationStateChangedPayloadV15 `json:"payload"` }\nfunc (TestGenerationStateChangedEventV15) isTaskEventV15() {}\ntype TestGenerationStateChangedPayloadV15 struct { RunID string `json:"runId"`; From protocolmodelv15testgeneration.TestGenerationStateV15 `json:"from"`; To protocolmodelv15testgeneration.TestGenerationStateV15 `json:"to"` }\ntype EventProtocolVersionV15 string'
+  )
+  .replace('CoverageRunFinishedV15 TaskEventNameV15 = "coverage.run.finished" )', 'CoverageRunFinishedV15 TaskEventNameV15 = "coverage.run.finished"; TestGenerationStateChangedV15 TaskEventNameV15 = "testGeneration.state.changed" )');
+const typescriptTaskV16 = typescriptTaskV15.replaceAll("V15", "V16");
+const goTaskV16 = goTaskV15.replaceAll("V15", "V16");
+const typescriptEventV16 = typescriptEventV15
+  .replaceAll("V15", "V16")
+  .replaceAll("v1-5", "v1-6")
+  .replace('The15 = "1.5"', 'The16 = "1.6"');
+const goEventV16 = goEventV15
+  .replaceAll("V15", "V16")
+  .replaceAll("v15", "v16")
+  .replaceAll("v1_5", "v1_6")
+  .replace('= "1.5"', '= "1.6"')
+  .replace('EventProtocol15V16', 'EventProtocol16V16');
 const goUnionBodies = {
   task: `type TaskSnapshotV12 interface{ isTaskSnapshotV12() }
 type CmakeBuildTaskSnapshotV12 struct { TaskID string \`json:"taskId"\`; Kind TaskKindV12 \`json:"kind"\`; WorkspaceGeneration string \`json:"workspaceGeneration"\`; ProjectID string \`json:"projectId"\`; BuildProfileID string \`json:"buildProfileId"\`; TargetIDs []string \`json:"targetIds"\`; Jobs int64 \`json:"jobs"\`; TimeoutMS int64 \`json:"timeoutMs"\`; Status TaskStatusV12 \`json:"status"\`; CreatedAt time.Time \`json:"createdAt"\`; LastSequence int64 \`json:"lastSequence"\`; Outcome *TaskOutcomeV12 \`json:"outcome,omitempty"\`; StartedAt *time.Time \`json:"startedAt,omitempty"\`; FinishedAt *time.Time \`json:"finishedAt,omitempty"\`; ErrorCode *string \`json:"errorCode,omitempty"\`; ErrorMessage *string \`json:"errorMessage,omitempty"\` }
@@ -602,6 +678,23 @@ function rewriteGoCapabilitiesV14(source) {
   return result;
 }
 
+function rewriteCoverageV16(source) {
+  const names = new Map([
+    ["DetailProjectSummary", "CoverageSummaryV16"],
+    ["PurpleCoverageMetricV16", "CoverageMetricV16"],
+    ["ReportSummary", "CoverageReportSummaryV16"],
+    ["FluffyCoverageMetricV16", "CoverageReportMetricV16"],
+    ["RunOutcome", "CoverageRunOutcomeV16"],
+    ["RunReason", "CoverageRunReasonV16"]
+  ]);
+  let result = source;
+  for (const [from, to] of names) {
+    if (!new RegExp(`\\b${from}\\b`).test(result)) throw new Error(`Unable to rewrite v1.6 coverage model ${from}`);
+    result = result.replaceAll(new RegExp(`\\b${from}\\b`, "g"), to);
+  }
+  return result;
+}
+
 function rewriteReferences(value, transform) {
   if (Array.isArray(value)) {
     return value.map((item) => rewriteReferences(item, transform));
@@ -713,7 +806,24 @@ try {
       const result = spawnSync(process.execPath, [quicktype, "--quiet", "--src-lang", "schema", "--src", source, ...target.args, "--out", output], { cwd: root, stdio: "inherit" });
       if (result.status !== 0) throw new Error(`quicktype failed for ${model.top} with status ${result.status ?? 1}`);
       if (!target.packageName && model.template) {
-        if (model.template === "eventV14") {
+        if (model.template === "eventV16") {
+          await writeFile(output, typescriptEventV16);
+        } else if (model.template === "taskV16") {
+          await writeFile(output, typescriptTaskV16);
+        } else if (model.template === "eventV15") {
+          assertContainsAll(typescriptEventV15, [
+            "TestGenerationStateChangedEventV15",
+            "from: TestGenerationStateV15;",
+            'TestGenerationStateChanged = "testGeneration.state.changed"'
+          ], "Unable to create v1.5 event template");
+          await writeFile(output, typescriptEventV15);
+        } else if (model.template === "taskV15") {
+          assertContainsAll(typescriptTaskV15, [
+            "TestGenerationTaskSnapshotV15",
+            'TestGeneration = "testGeneration"'
+          ], "Unable to create v1.5 task template");
+          await writeFile(output, typescriptTaskV15);
+        } else if (model.template === "eventV14") {
           assertExactLines(typescriptEventV14, [
             'import type { CoverageCompletenessV14, CoverageRunOutcomeV14, CoverageRunReasonV14, CoverageSummaryV14 } from "./coverage-v1-4.js";',
             'import type { DiagnosticV14 } from "./diagnostic-v1-4.js";',
@@ -732,22 +842,27 @@ try {
         } else if (model.template === "taskV14") {
           if (!typescriptTaskV14.includes("CoverageRunTaskSnapshotV14")) throw new Error("Unable to create v1.4 task template");
           await writeFile(output, typescriptTaskV14);
-        } else if (model.template === "coverageV14") {
-          assertExactLines(typescriptCoverageV14, [
-            'import type { TestSelectionSnapshotV14, TestSelectionV14 } from "./test-v1-4.js";'
+        } else if (model.template === "coverageV16") {
+          await writeFile(output, rewriteCoverageV16(await readFile(output, "utf8")));
+        } else if (model.template === "coverageV14" || model.template === "coverageV15") {
+          const coverageTemplate = model.template === "coverageV14" ? typescriptCoverageV14 : typescriptCoverageV14.replaceAll("V14", "V15").replaceAll("v1-4", "v1-5");
+          assertExactLines(coverageTemplate, [
+            model.template === "coverageV14"
+              ? 'import type { TestSelectionSnapshotV14, TestSelectionV14 } from "./test-v1-4.js";'
+              : 'import type { TestSelectionSnapshotV15, TestSelectionV15 } from "./test-v1-5.js";'
           ], "Unable to create v1.4 coverage template");
-          assertContainsAll(typescriptCoverageV14, [
-            "selection: TestSelectionV14;",
-            "selectionSnapshot: TestSelectionSnapshotV14;"
+          assertContainsAll(coverageTemplate, [
+            model.template === "coverageV14" ? "selection: TestSelectionV14;" : "selection: TestSelectionV15;",
+            model.template === "coverageV14" ? "selectionSnapshot: TestSelectionSnapshotV14;" : "selectionSnapshot: TestSelectionSnapshotV15;"
           ], "Unable to create v1.4 coverage template");
-          await writeFile(output, typescriptCoverageV14);
-        } else if (model.template === "testV13" || model.template === "testV14") {
+          await writeFile(output, coverageTemplate);
+        } else if (model.template === "testV13" || model.template === "testV14" || model.template === "testV15" || model.template === "testV16") {
           const generated = await readFile(output, "utf8");
-          const unionType = model.template === "testV13" ? "TestSelection" : "TestSelectionV14";
+          const unionType = model.template === "testV13" ? "TestSelection" : model.template === "testV14" ? "TestSelectionV14" : model.template === "testV15" ? "TestSelectionV15" : "TestSelectionV16";
           const renamed = model.template === "testV13" ? generated : generated.replaceAll(/\bTestSelection\b/g, unionType);
           const replaced = renamed.replace(
             new RegExp(`export interface ${unionType} \\{[\\s\\S]*?\\n\\}\\n`),
-            model.template === "testV13" ? typescriptTestSelectionV13 : typescriptTestSelectionV14
+            model.template === "testV13" ? typescriptTestSelectionV13 : model.template === "testV14" ? typescriptTestSelectionV14 : typescriptTestSelectionV14.replaceAll("V14", model.template === "testV15" ? "V15" : "V16")
           );
           if (replaced === renamed) throw new Error(`Unable to create TypeScript union for ${unionType}`);
           await writeFile(output, replaced);
@@ -756,7 +871,21 @@ try {
         }
       }
       if (target.packageName && model.template) {
-        if (model.template === "eventV14") {
+        if (model.template === "eventV16") {
+          await writeFile(output, goEventV16);
+        } else if (model.template === "taskV16") {
+          await writeFile(output, goTaskV16);
+        } else if (model.template === "eventV15") {
+          assertContainsAll(goEventV15, [
+            "TestGenerationStateChangedEventV15",
+            "isTaskEventV15()",
+            "protocolmodelv15testgeneration.TestGenerationStateV15"
+          ], "Unable to create v1.5 event template");
+          await writeFile(output, goEventV15);
+        } else if (model.template === "taskV15") {
+          assertExactMarkerMethods(goTaskV15, "isTaskSnapshotV15", ["CmakeBuildTaskSnapshotV15", "SimulationTaskSnapshotV15", "TestDiscoveryTaskSnapshotV15", "TestRunTaskSnapshotV15", "CoverageRunTaskSnapshotV15", "TestGenerationTaskSnapshotV15"], "Unable to create v1.5 task template");
+          await writeFile(output, goTaskV15);
+        } else if (model.template === "eventV14") {
           assertExactLines(goEventV14, [
             'protocolmodelv14coverage "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/coverage"',
             'protocolmodelv14diagnostic "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/diagnostic"',
@@ -780,23 +909,25 @@ try {
         } else if (model.template === "taskV14") {
           assertExactMarkerMethods(goTaskV14, "isTaskSnapshotV14", ["CmakeBuildTaskSnapshotV14", "SimulationTaskSnapshotV14", "TestDiscoveryTaskSnapshotV14", "TestRunTaskSnapshotV14", "CoverageRunTaskSnapshotV14"], "Unable to create v1.4 task template");
           await writeFile(output, goTaskV14);
-        } else if (model.template === "coverageV14") {
-          assertExactLines(goCoverageV14, [
-            'protocolmodelv14test "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test"'
+        } else if (model.template === "coverageV16") {
+          await writeFile(output, rewriteCoverageV16(await readFile(output, "utf8")));
+        } else if (model.template === "coverageV14" || model.template === "coverageV15") {
+          const coverageTemplate = model.template === "coverageV14" ? goCoverageV14 : goCoverageV14.replaceAll("V14", "V15").replaceAll("v14", "v15").replaceAll("v1_4", "v1_5");
+          assertExactLines(coverageTemplate, [
+            model.template === "coverageV14"
+              ? 'protocolmodelv14test "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test"'
+              : 'protocolmodelv15test "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/test"'
           ], "Unable to create v1.4 coverage template");
-          assertMatchesAll(goCoverageV14, [
-            /\bSelection\s+protocolmodelv14test\.TestSelectionV14\s+`json:"selection"`/,
-            /\bSelectionSnapshot\s+protocolmodelv14test\.TestSelectionSnapshotV14\s+`json:"selectionSnapshot"`/
-          ], "Unable to create v1.4 coverage template");
-          await writeFile(output, goCoverageV14);
+          await writeFile(output, coverageTemplate);
         } else if (model.template === "event" || model.template === "eventV13") {
           const imports = model.template === "event" ? `import "time"\n\n` : "";
           await writeFile(output, `${imports}${goUnionBodies[model.template]}`);
         } else {
           const generated = await readFile(output, "utf8");
-          const unionType = model.template === "testV13" ? "TestSelection" : model.template === "testV14" ? "TestSelectionV14" : model.top;
-          const renamed = model.template === "testV14" ? generated.replaceAll(/\bTestSelection\b/g, unionType) : generated;
-          const replaced = renamed.replace(new RegExp(`type ${unionType} struct \\{[\\s\\S]*?\\n\\}\\n\\n`), goUnionBodies[model.template]);
+          const unionType = model.template === "testV13" ? "TestSelection" : model.template === "testV14" ? "TestSelectionV14" : model.template === "testV15" ? "TestSelectionV15" : model.template === "testV16" ? "TestSelectionV16" : model.top;
+          const renamed = model.template === "testV14" || model.template === "testV15" || model.template === "testV16" ? generated.replaceAll(/\bTestSelection\b/g, unionType) : generated;
+          const unionBody = model.template === "testV15" || model.template === "testV16" ? goUnionBodies.testV14.replaceAll("V14", model.template === "testV15" ? "V15" : "V16") : goUnionBodies[model.template];
+          const replaced = renamed.replace(new RegExp(`type ${unionType} struct \\{[\\s\\S]*?\\n\\}\\n\\n`), unionBody);
           if (replaced === renamed) throw new Error(`Unable to create Go union for ${unionType}`);
           await writeFile(output, replaced);
         }

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "llvmVersion": "22.1.8",
+  "sourceCommit": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+  "platform": "linux-x64",
+  "archive": {
+    "filename": "LLVM-22.1.8-Linux-X64.tar.xz",
+    "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz",
+    "sha256": "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384"
+  },
+  "archiveRoot": "LLVM-22.1.8-Linux-X64",
+  "tools": {
+    "clang": "bin/clang",
+    "clangxx": "bin/clang++",
+    "llvmProfdata": "bin/llvm-profdata",
+    "llvmCov": "bin/llvm-cov"
+  },
+  "license": {
+    "path": "licenses/llvm/LICENSE.TXT",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-project/ca7933e47d3a3451d81e72ac174dcb5aa28b59d1/LICENSE.TXT",
+    "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+    "size": 15141
+  }
+}

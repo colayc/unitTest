@@ -77,6 +77,21 @@ export async function openCoverageSource(
   await host.openCoverageSource(verified.path);
 }
 
+export async function verifyCoverageDetailLocation(
+  workspaceRoot: string,
+  relativePath: string,
+  sourceSha256: string,
+  reportSources: readonly CoverageSourceSnapshot[]
+): Promise<VerifiedCoverageSource> {
+  const target = resolveCoverageSourcePath(workspaceRoot, relativePath);
+  const source = reportSources.find((candidate) => {
+    try { return candidate.sha256 === sourceSha256 && resolveCoverageSourcePath(workspaceRoot, candidate.uri) === target; }
+    catch { return false; }
+  });
+  if (!source) throw new Error("Coverage detail source does not match the report snapshot digest.");
+  return verifyCoverageSource(workspaceRoot, source);
+}
+
 function sameIdentity(left: { dev: number; ino: number; size: number }, right: { dev: number; ino: number; size: number }): boolean {
   if (left.dev !== 0 || left.ino !== 0 || right.dev !== 0 || right.ino !== 0) {
     return left.dev === right.dev && left.ino === right.ino && left.size === right.size;

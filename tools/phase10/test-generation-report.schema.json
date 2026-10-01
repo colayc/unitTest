@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.local/schema/phase10/test-generation-report.v1.json",
+  "title": "Phase 10 native test-generation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "candidateCommit", "evidenceKind", "producerReceiptSha256", "platform", "toolchainFamily", "framework", "compiler", "frameworkIdentity", "cmake", "coverage", "candidates", "tests", "faultScenarios", "inputArtifactSha256", "outputArtifactSha256", "performance", "mutation"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "candidateCommit": { "$ref": "#/$defs/commit" },
+    "evidenceKind": { "enum": ["local-static", "external-native-receipt"] },
+    "producerReceiptSha256": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "platform": { "enum": ["linux", "win32"] },
+    "toolchainFamily": { "enum": ["gcc", "clang", "msvc", "clang-cl"] },
+    "framework": { "enum": ["cpputest", "unity"] },
+    "compiler": { "$ref": "#/$defs/compiler" },
+    "frameworkIdentity": { "$ref": "#/$defs/frameworkIdentity" },
+    "cmake": { "$ref": "#/$defs/cmake" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "candidates": { "$ref": "#/$defs/candidates" },
+    "tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/generatedTest" } },
+    "faultScenarios": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/faultScenario" } },
+    "inputArtifactSha256": { "$ref": "#/$defs/digest" },
+    "outputArtifactSha256": { "$ref": "#/$defs/digest" },
+    "performance": { "$ref": "#/$defs/performance" },
+    "mutation": { "$ref": "#/$defs/mutation" }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "safeToken": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+\\-]{0,127}$" },
+    "compiler": {
+      "type": "object", "additionalProperties": false,
+      "required": ["family", "version", "sha256"],
+      "properties": { "family": { "enum": ["gcc", "clang", "msvc", "clang-cl"] }, "version": { "$ref": "#/$defs/safeToken" }, "sha256": { "$ref": "#/$defs/digest" } }
+    },
+    "frameworkIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256", "treeSha256"],
+      "properties": { "version": { "enum": ["4.0", "2.6.1"] }, "sha256": { "$ref": "#/$defs/digest" }, "treeSha256": { "$ref": "#/$defs/digest" } }
+    },
+    "cmake": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": { "version": { "$ref": "#/$defs/safeToken" }, "sha256": { "$ref": "#/$defs/digest" } }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["covered", "total"],
+      "properties": { "covered": { "type": "integer", "minimum": 0 }, "total": { "type": "integer", "minimum": 1 } }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["baseline", "final"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/coverageTotals" },
+        "final": { "$ref": "#/$defs/coverageTotals" }
+      }
+    },
+    "coverageTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functions", "lines", "branches"],
+      "properties": { "functions": { "$ref": "#/$defs/metric" }, "lines": { "$ref": "#/$defs/metric" }, "branches": { "$ref": "#/$defs/metric" } }
+    },
+    "candidates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["generated", "retained", "rejected"],
+      "properties": { "generated": { "type": "integer", "minimum": 1 }, "retained": { "type": "integer", "minimum": 0 }, "rejected": { "type": "integer", "minimum": 0 } }
+    },
+    "generatedTest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "candidateKind", "assertionCount", "sourceArtifactSha256", "outputArtifactSha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9\\-]{0,127}$" },
+        "candidateKind": { "enum": ["verified", "characterization"] },
+        "assertionCount": { "type": "integer", "minimum": 1 },
+        "sourceArtifactSha256": { "$ref": "#/$defs/digest" },
+        "outputArtifactSha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "faultScenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "artifactSha256"],
+      "properties": { "id": { "enum": ["cancel-before-build", "compile-failure", "service-restart"] }, "status": { "const": "passed" }, "artifactSha256": { "$ref": "#/$defs/digest" } }
+    },
+    "performance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["durationMs", "budgetMs", "peakMemoryBytes", "memoryBudgetBytes"],
+      "properties": { "durationMs": { "type": "integer", "minimum": 1 }, "budgetMs": { "type": "integer", "minimum": 1 }, "peakMemoryBytes": { "type": "integer", "minimum": 1 }, "memoryBudgetBytes": { "type": "integer", "minimum": 1 } }
+    },
+    "mutation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "killed", "requiredKilled"],
+      "properties": { "total": { "type": "integer", "minimum": 1 }, "killed": { "type": "integer", "minimum": 0 }, "requiredKilled": { "type": "integer", "minimum": 1 } }
+    },
+    "managedCoverageLocalReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "candidateCommit", "evidenceKind", "releaseReady", "deferredReleaseBlockers", "blocks"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "candidateCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "evidenceKind": { "const": "local-missing-hosted" },
+        "releaseReady": { "const": false },
+        "deferredReleaseBlockers": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "prefixItems": [{ "const": "windows-signing" }, { "const": "third-party-license-legal" }],
+          "items": false
+        },
+        "blocks": {
+          "type": "array", "minItems": 8, "maxItems": 8,
+          "prefixItems": [
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsMsvcCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsMsvcUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsClangclCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockWindowsClangclUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxGccCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxGccUnity" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxClangCpputest" },
+            { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlockLinuxClangUnity" }
+          ],
+          "items": false
+        }
+      },
+      "$defs": {
+        "managedBlockWindowsMsvcCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-msvc-cpputest" } } },
+        "managedBlockWindowsMsvcUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-msvc-unity" } } },
+        "managedBlockWindowsClangclCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-clangcl-cpputest" } } },
+        "managedBlockWindowsClangclUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "windows-clangcl-unity" } } },
+        "managedBlockLinuxGccCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-gcc-cpputest" } } },
+        "managedBlockLinuxGccUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-gcc-unity" } } },
+        "managedBlockLinuxClangCpputest": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-clang-cpputest" } } },
+        "managedBlockLinuxClangUnity": { "type": "object", "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedBlock", "properties": { "id": { "const": "linux-clang-unity" } } },
+        "managedBlock": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "status", "evidence"],
+          "properties": {
+            "id": { "type": "string" },
+            "status": { "const": "MISSING" },
+            "evidence": { "$ref": "#/$defs/managedCoverageLocalReport/$defs/managedEvidence" }
+          }
+        },
+        "managedEvidence": {
+          "type": "object", "additionalProperties": false,
+          "required": ["candidateSha256", "runId", "runAttempt", "jobId", "runnerId", "toolchainId", "frameworkId", "artifactId", "artifactSha256", "coverageReportSha256", "coverageIndexSha256", "reviewSha256", "publicationSha256", "mutationSha256", "abuseSha256", "performanceSha256"],
+          "properties": {
+            "candidateSha256": { "type": "null" }, "runId": { "type": "null" }, "runAttempt": { "type": "null" }, "jobId": { "type": "null" },
+            "runnerId": { "type": "null" }, "toolchainId": { "type": "null" }, "frameworkId": { "type": "null" },
+            "artifactId": { "type": "null" }, "artifactSha256": { "type": "null" }, "coverageReportSha256": { "type": "null" },
+            "coverageIndexSha256": { "type": "null" }, "reviewSha256": { "type": "null" }, "publicationSha256": { "type": "null" },
+            "mutationSha256": { "type": "null" }, "abuseSha256": { "type": "null" }, "performanceSha256": { "type": "null" }
+          }
+        }
+      }
+    }
+  }
+}

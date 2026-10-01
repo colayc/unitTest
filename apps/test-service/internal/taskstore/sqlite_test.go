@@ -1036,8 +1036,8 @@ func TestMigration009UpgradesCoverageSchemaAndPreservesRelations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
-		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	if len(migrations) < 9 || migrations[8].version != 9 {
+		t.Fatalf("migration 9 missing from %#v", migrations)
 	}
 	wantLegacyChecksums := []string{
 		"2f3f3db3d9811852897799f6e5b210e615edb47002dde34a51bb21432b8a3158",
@@ -1109,8 +1109,8 @@ func TestMigration009FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
-		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	if len(migrations) < 9 || migrations[8].version != 9 {
+		t.Fatalf("migration 9 missing from %#v", migrations)
 	}
 	applyMigrationsThrough(t, ctx, store, migrations[:8])
 	legacy := seedCoverageMigrationLegacyData(t, db)
@@ -1137,6 +1137,178 @@ func TestMigration009FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 	}
 	if rows := foreignKeyViolations(t, db); rows != 0 {
 		t.Fatalf("foreign key violations after failed v9 = %d", rows)
+	}
+}
+
+func TestMigration016UpgradeAndOptionalFailurePreserveV1(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) < 16 || migrations[15].version != 16 {
+		t.Fatalf("migration list ends at %#v", migrations[len(migrations)-1])
+	}
+	for _, broken := range []bool{false, true} {
+		name := "upgrade"
+		if broken {
+			name = "failed detail migration"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "upgrade.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:15])
+			if broken {
+				if _, err := db.Exec(`CREATE TABLE coverage_detail_reports (unexpected INTEGER)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			opened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1 store unavailable after detail migration: %v", err)
+			}
+			defer opened.Close()
+			var count int
+			if err := opened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=16`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if broken && count != 0 || !broken && count != 1 {
+				t.Fatalf("v16 migration count = %d, broken=%v", count, broken)
+			}
+			if _, err := opened.Get(ctx, id(1)); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("v1 Get after upgrade = %v", err)
+			}
+			if broken {
+				if _, err := opened.GetCoverageProject(ctx, id(1)); !errors.Is(err, task.ErrStorageUnavailable) {
+					t.Fatalf("detail capability after migration failure = %v", err)
+				}
+			} else {
+				if _, err := opened.GetCoverageProject(ctx, id(1)); !errors.Is(err, task.ErrNotFound) {
+					t.Fatalf("detail missing report = %v", err)
+				}
+			}
+			var foreignKeys int
+			if err := opened.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+				t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
+			}
+		})
+	}
+}
+
+func TestMigration017FailureOrChecksumMismatchDisablesOnlyManagedCapability(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil || len(migrations) < 17 || migrations[16].version != 17 {
+		t.Fatalf("migration 017: %v, %d", err, len(migrations))
+	}
+	for _, mode := range []string{"apply-failure", "checksum-mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "managed-optional.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:16])
+			if mode == "apply-failure" {
+				if _, err := db.Exec(`CREATE TABLE managed_test_records (wrong INTEGER)`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := store.applyMigration(ctx, migrations[16]); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=17`, strings.Repeat("0", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1.5 operation failed: %v", err)
+			}
+			defer reopened.Close()
+			if !reopened.CoverageDetailReady() {
+				t.Fatal("coverage detail migration lost")
+			}
+			if reopened.ManagedTestsReady() {
+				t.Fatal("invalid managed schema advertised")
+			}
+			var count int
+			if err := reopened.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='coverage_reports'`).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("v1.5 schema lost: %d, %v", count, err)
+			}
+		})
+	}
+}
+
+func TestMigration018UpgradeAndFailurePreserveV15(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := loadMigrations()
+	if err != nil || len(migrations) < 18 || migrations[17].version != 18 {
+		t.Fatalf("migration 018: %v, %d", err, len(migrations))
+	}
+	for _, name := range []string{"upgrade", "optional-failure", "checksum-mismatch"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "migration018.sqlite")
+			db := openConfiguredDatabase(t, path)
+			store := &Store{db: db, newID: task.NewID}
+			applyMigrationsThrough(t, ctx, store, migrations[:17])
+			if name == "optional-failure" {
+				if _, err := db.Exec(`ALTER TABLE managed_test_commits ADD COLUMN acceptance_json TEXT`); err != nil {
+					t.Fatal(err)
+				}
+			} else if name == "checksum-mismatch" {
+				if err := store.applyMigration(ctx, migrations[17]); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=18`, strings.Repeat("0", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatalf("v1.5 unavailable: %v", err)
+			}
+			defer reopened.Close()
+			if !reopened.CoverageDetailReady() {
+				t.Fatal("v1.5 coverage detail lost")
+			}
+			if reopened.ManagedTestsReady() != (name == "upgrade") {
+				t.Fatalf("managed readiness after migration mode=%s", name)
+			}
+		})
+	}
+}
+
+func TestMigration016ChecksumMismatchDisablesOnlyDetails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checksum.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=16`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("v1 store after optional checksum mismatch = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Get(context.Background(), id(1)); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("v1 Get = %v", err)
+	}
+	if _, err := store.GetCoverageProject(context.Background(), id(1)); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("detail getter = %v", err)
 	}
 }
 
@@ -1297,6 +1469,10 @@ func TestStepPersistencePreservesCMakeTaskAndStepOrder(t *testing.T) {
 }
 
 func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	store, err := Open(path)
 	if err != nil {
@@ -1312,7 +1488,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 9 || len(checksum) != 64 {
+	if count != len(migrations) || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -1322,7 +1498,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 9 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != len(migrations) {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {

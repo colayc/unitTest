@@ -262,6 +262,30 @@ function fixtureDigest(label) {
   return createHash("sha256").update(label, "utf8").digest("hex");
 }
 
+function coverageBackendReport(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    candidateCommit,
+    rows: ["linux-gcc", "linux-clang", "windows-clang-cl"].map((backend) => ({
+      schemaVersion: 1, candidateCommit, backend, status: "passed",
+      runnerImage: backend === "windows-clang-cl" ? "windows-2025-vs2026" : "ubuntu-24.04",
+      compiler: { family: backend === "linux-gcc" ? "gcc" : backend === "linux-clang" ? "clang" : "clang-cl", version: "18.1.0", sha256: fixtureDigest(`compiler:${backend}`) },
+      summary: { functions: { covered: 2, total: 2 }, lines: { covered: 3, total: 4 }, branches: { covered: 1, total: 2 } },
+      sourceArtifactSha256: fixtureDigest(`source:${backend}`),
+    })),
+    ...overrides,
+  };
+}
+
+function coverageBackendJobs() {
+  return [
+    { id: "101", name: "coverage-backend-matrix", conclusion: "success", runnerImage: "ubuntu-24.04" },
+    { id: "102", name: "coverage-linux-gcc", conclusion: "success", runnerImage: "ubuntu-24.04" },
+    { id: "103", name: "coverage-linux-clang", conclusion: "success", runnerImage: "ubuntu-24.04" },
+    { id: "104", name: "coverage-windows-clang-cl", conclusion: "success", runnerImage: "windows-2025-vs2026" },
+  ];
+}
+
 function p7Report(gateId, overrides = {}) {
   const contracts = {
     "P7-COVERAGE-UI-AND-SOURCE-DECORATION": {
@@ -1248,14 +1272,14 @@ test("unsigned P8 qualification rejects signed ambiguous and malformed reports",
 test("generic successful foundation jobs cannot satisfy feature-specific gates without their artifacts", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
-    "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
-    "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows-{runAttempt}",
-    "P6-BRANDING-AND-BUILTIN-REGISTRATION": "code-oss-branding-builtin-report",
-    "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
-    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report-{runAttempt}",
-    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report-{runAttempt}",
-    "P7-MAIN-USER-JOURNEY": "main-user-journey-report-{runAttempt}",
-    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report-{runAttempt}",
+    "P5-LINUX-CLANG-COVERAGE": ["coverage-backends-{runAttempt}", "linux-clang-coverage-backend-{runAttempt}"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-backends-{runAttempt}", "windows-clang-cl-coverage-backend-{runAttempt}"],
+    "P6-BRANDING-AND-BUILTIN-REGISTRATION": ["code-oss-branding-builtin-report"],
+    "P6-CODEOSS-HOST-SMOKE": ["code-oss-host-smoke-report"],
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": ["coverage-ui-source-decoration-report-{runAttempt}"],
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": ["history-artifact-browser-report-{runAttempt}"],
+    "P7-MAIN-USER-JOURNEY": ["main-user-journey-report-{runAttempt}"],
+    "P7-MOCK-CONFIGURATION-UX": ["mock-configuration-ux-report-{runAttempt}"],
   };
   const gateIds = Object.keys(gateArtifacts);
   const receipt = githubReceipt({
@@ -1279,10 +1303,10 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
     changedPaths: [],
   });
 
-  assert.equal(new Set(Object.values(gateArtifacts)).size, gateIds.length);
+  assert.equal(new Set(Object.values(gateArtifacts).map((value) => JSON.stringify(value))).size, gateIds.length);
   for (const gateId of gateIds) {
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
-    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, gateArtifacts[gateId]);
   }
   assert.deepEqual(
     registry.gates.find(({ id }) => id === "P6-BRANDING-AND-BUILTIN-REGISTRATION").verification.jobs,
@@ -1461,10 +1485,10 @@ test("P7 Windows WFP gate rejects workflow_dispatch runs that skip native covera
 test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
-    "P5-COVERAGE-FAULT-MAPPING": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
-    "P5-COVERAGE-REPORTS": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
-    "P5-LINUX-GCC-COVERAGE": ["linux-gcc-coverage-report-{runAttempt}"],
-    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-execution-windows-{runAttempt}"],
+    "P5-COVERAGE-FAULT-MAPPING": ["coverage-backends-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-COVERAGE-REPORTS": ["coverage-backends-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-LINUX-GCC-COVERAGE": ["coverage-backends-{runAttempt}", "linux-gcc-coverage-backend-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-backends-{runAttempt}", "windows-clang-cl-coverage-backend-{runAttempt}"],
   };
   const gateIds = Object.keys(gateArtifacts);
   const receipt = githubReceipt({
@@ -1494,6 +1518,23 @@ test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts"
   }
 });
 
+test("Phase 10A coverage rows require exact candidate-bound backend artifacts and jobs", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 10A registry", maxBytes: 1024 * 1024 });
+  const contracts = {
+    "P5-LINUX-GCC-COVERAGE": ["coverage-linux-gcc", "coverage-backend-matrix", "linux-gcc-coverage-backend-{runAttempt}"],
+    "P5-LINUX-CLANG-COVERAGE": ["coverage-linux-clang", "coverage-backend-matrix", "linux-clang-coverage-backend-{runAttempt}"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-windows-clang-cl", "coverage-backend-matrix", "windows-clang-cl-coverage-backend-{runAttempt}"],
+  };
+  for (const [gateId, [producerJob, matrixJob, artifact]] of Object.entries(contracts)) {
+    const gate = registry.gates.find(({ id }) => id === gateId);
+    assert.ok(gate, `${gateId} is absent`);
+    assert.deepEqual(gate.verification.jobs, [matrixJob, producerJob]);
+    assert.ok(gate.verification.artifacts.includes(artifact));
+    assert.ok(gate.verification.artifacts.includes("coverage-backends-{runAttempt}"));
+  }
+  assert.deepEqual(registry.allowedDeferredGateIds, ["P8-DOCS-CLOSEOUT", "P8-LEGAL-THIRD-PARTY", "P8-SIGN-WINDOWS"]);
+});
+
 test("P5 attempt-qualified artifact contracts derive exact names from receipt runAttempt", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
   const receipt = githubReceipt({
@@ -1503,10 +1544,12 @@ test("P5 attempt-qualified artifact contracts derive exact names from receipt ru
       workflowPath: ".github/workflows/foundation.yml",
       runId: "42",
       runAttempt: 2,
-      jobs: [{ name: "coverage-linux-gcc", conclusion: "success" }],
+      jobs: coverageBackendJobs(),
       artifacts: [
         { id: "51", name: "linux-gcc-coverage-report-1", digest: "c".repeat(64), expired: false },
         { id: "52", name: "linux-gcc-coverage-report-2", digest: "d".repeat(64), expired: false },
+        { id: "53", name: "linux-gcc-coverage-backend-2", digest: "e".repeat(64), expired: false },
+        { id: "54", name: "coverage-backends-2", digest: "f".repeat(64), expired: false, report: coverageBackendReport() },
       ],
     },
   });
@@ -1529,6 +1572,43 @@ test("P5 attempt-qualified artifact contracts derive exact names from receipt ru
     changedPaths: [],
   });
   assert.equal(wrongAttemptMatrix.gates.find(({ id }) => id === "P5-LINUX-GCC-COVERAGE").status, "MISSING");
+});
+
+test("P5 coverage gates reject missing, skipped, cross-commit, and empty backend totals", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    gateIds: ["P5-LINUX-CLANG-COVERAGE"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      jobs: coverageBackendJobs(),
+      artifacts: [
+        { id: "10", name: "linux-clang-coverage-backend-1", digest: fixtureDigest("clang artifact"), expired: false },
+        { id: "11", name: "coverage-backends-1", digest: fixtureDigest("matrix artifact"), expired: false, report: coverageBackendReport() },
+      ],
+    },
+  });
+  const status = () => evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt], currentCommit, changedPaths: [],
+  }).gates.find(({ id }) => id === "P5-LINUX-CLANG-COVERAGE").status;
+  assert.equal(status(), "PASS");
+  delete receipt.evidence.jobs.find(({ name }) => name === "coverage-linux-clang").id;
+  assert.equal(status(), "MISSING");
+  receipt.evidence.jobs.find(({ name }) => name === "coverage-linux-clang").id = "103";
+  const artifact = receipt.evidence.artifacts[1];
+  const original = artifact.report;
+  delete artifact.report;
+  assert.equal(status(), "MISSING");
+  artifact.report = structuredClone(original);
+  artifact.report.rows[1].status = "skipped";
+  assert.throws(status, /PHASE9_GATE_SCHEMA_INVALID/u);
+  artifact.report = structuredClone(original);
+  artifact.report.rows[1].candidateCommit = "b".repeat(40);
+  assert.equal(status(), "MISSING");
+  artifact.report = structuredClone(original);
+  artifact.report.rows[1].summary.branches.covered = 0;
+  assert.throws(status, /PHASE9_GATE_SCHEMA_INVALID/u);
 });
 
 test("generic foundation verification cannot PASS P4 without the native framework matrix report", async () => {

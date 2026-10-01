@@ -184,6 +184,7 @@ export class CoverageController {
       });
       return this.getState();
     } catch (error) {
+      if (operation !== this.#operation || this.#closed) throw error;
       const detail = redactServiceError(error, []).message;
       this.#publish({ state: "unavailable", detail });
       throw new Error(detail);

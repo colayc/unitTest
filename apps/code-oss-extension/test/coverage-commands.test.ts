@@ -16,6 +16,7 @@ import {
 import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type { CoverageControllerState } from "../src/coverage-controller.js";
 import type { ExtensionProtocolClient } from "../src/protocol-client.js";
+import type { CoverageTreeNode, CoverageFilter } from "../src/coverage-detail-tree.js";
 
 const id = "0123456789abcdef0123456789abcdef";
 
@@ -164,4 +165,29 @@ test("openCoverageSource lets the host pick from the current report when no argu
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("detail commands route only supported filters and current service-backed nodes", async () => {
+  const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
+  const selected: CoverageTreeNode[] = [];
+  const filters: CoverageFilter[] = [];
+  const context: CommandContext = { subscriptions: [] };
+  const host: CoverageCommandHost = {
+    registerCommand(name, handler) { handlers.set(name, handler); return { dispose() {} }; },
+    showErrorMessage() {}
+  };
+  registerCoverageCommands(context, {
+    getState: () => state(), startCurrent: async () => state(), refreshCurrent: async () => state()
+  }, () => undefined, { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} }, host,
+  { appendLine() {}, dispose() {} }, undefined, {
+    available: () => true,
+    select: async (node) => { selected.push(node); },
+    filter: (value) => { filters.push(value); }
+  });
+  const node: CoverageTreeNode = { kind: "file", id: "f".repeat(32), label: "file", status: "current", metrics: { functions: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, lines: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, branches: { covered: 0, total: 0, percent: 100, coveredDelta: 0 } }, relativePath: "src/main.cpp" };
+  await handlers.get("unitTestIde.openCoverageDetail")!(node);
+  await handlers.get("unitTestIde.filterCoverageDetails")!("regressed");
+  await handlers.get("unitTestIde.filterCoverageDetails")!("bogus");
+  assert.deepEqual(selected, [node]);
+  assert.deepEqual(filters, ["regressed"]);
 });

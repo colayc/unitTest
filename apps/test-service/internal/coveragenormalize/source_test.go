@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -25,8 +26,29 @@ func TestDigestSourceBindsIdentityAndComputesSHA256(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := sha256.Sum256(contents)
-	if binding.SHA256 != hex.EncodeToString(expected[:]) || binding.NativePath != path {
+	if binding.SHA256 != hex.EncodeToString(expected[:]) || binding.NativePath != canonicalNativePath(path) {
 		t.Fatalf("binding = %#v", binding)
+	}
+}
+
+func TestDigestSourceCanonicalizesCaseVariantNativeAlias(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path aliases are case-insensitive")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "src", "file.cpp")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("int main() { return 0; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := strings.ToUpper(path)
+	if alias == path {
+		t.Skip("case variant is unavailable")
+	}
+	if _, err := DigestSource(root, alias, DefaultLimits()); err != nil {
+		t.Fatalf("case-variant native alias rejected: %v", err)
 	}
 }
 

@@ -51,6 +51,23 @@ func TestNormalizeGCCFiltersSourcesBuildsMetricsAndStableCanonicalBytes(t *testi
 	}
 }
 
+func TestNormalizeGCCWithDetailBindsRelativeObservationToSnapshot(t *testing.T) {
+	input := gccNormalizationFixture(t)
+	file := &input.Export.Files[1]
+	file.Observations = []coveragedomain.FunctionObservation{{QualifiedName: "foo", LinkageName: "foo", File: file.RelativePath, ExecutionCount: 1}}
+	_, _, observations, err := NormalizeGCCWithDetail(input)
+	if err != nil || len(observations) != 1 || observations[0].File != "src/a.c" {
+		t.Fatalf("detail = %#v / %v", observations, err)
+	}
+	input.Export.Files[1].Observations[0].File = "../private.c"
+	if _, _, _, err := NormalizeGCCWithDetail(input); err == nil {
+		t.Fatal("accepted unbound relative observation path")
+	}
+	if _, _, err := NormalizeGCC(input); err != nil {
+		t.Fatalf("legacy aggregate changed: %v", err)
+	}
+}
+
 func TestNormalizeGCCPartialAndInvalidEvidenceFailClosed(t *testing.T) {
 	input := gccNormalizationFixture(t)
 	input.Export.Files = input.Export.Files[:1]

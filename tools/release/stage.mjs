@@ -4,10 +4,11 @@ import { copyFile, chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, re
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildReleaseManifest } from "./manifest.mjs";
+import { buildReleaseManifest, readReleaseConfig } from "./manifest.mjs";
 import { validateCodeOssRuntime } from "./code-oss-runtime.mjs";
 import { isPortableReleasePath } from "./portable-path.mjs";
 import { normalizeTreeTimestamps, resolveSourceDateEpoch } from "./release-reproducibility.mjs";
+import { checkBundle as checkTestgenBundle } from "../testgen-bundle/check.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
@@ -21,6 +22,7 @@ const requiredKeys = [
   "outRoot",
   "platform",
   "service",
+  "testgenRoot",
   "version",
 ];
 const cliFlagMap = new Map([
@@ -32,6 +34,7 @@ const cliFlagMap = new Map([
   ["--service", "service"],
   ["--cmake-root", "cmakeRoot"],
   ["--coverage-root", "coverageRoot"],
+  ["--testgen-root", "testgenRoot"],
   ["--out", "outRoot"],
 ]);
 
@@ -183,6 +186,7 @@ function artifactKind(relativePath) {
   if (relativePath.startsWith("app/extensions/unit-test-ide/")) return "extension";
   if (relativePath.startsWith("bundles/cmake/")) return "bundle-cmake";
   if (relativePath.startsWith("bundles/coverage/")) return "bundle-coverage";
+  if (relativePath.startsWith("bundles/testgen/")) return "bundle-testgen";
   if (relativePath.startsWith("app/code-oss-runtime/")) return "runtime";
   if (relativePath === "service/unit-test-service" || relativePath === "service/unit-test-service.exe") return "service";
   return "payload";
@@ -244,7 +248,7 @@ function currentSourceCommit(root) {
 }
 
 function usage() {
-  return "Usage: node tools/release/stage.mjs --platform <windows|linux> --architecture <x64> --version <semver> --code-oss-root <dir> --code-oss-sha256 <lowercase-sha256> --service <file> --cmake-root <dir> --coverage-root <dir> --out <dir>";
+  return "Usage: node tools/release/stage.mjs --platform <windows|linux> --architecture <x64> --version <semver> --code-oss-root <dir> --code-oss-sha256 <lowercase-sha256> --service <file> --cmake-root <dir> --coverage-root <dir> --testgen-root <dir> --out <dir>";
 }
 
 function parseCliArguments(argv) {
@@ -290,6 +294,7 @@ function normalizeInput(input) {
     service: input.service,
     cmakeRoot: input.cmakeRoot,
     coverageRoot: input.coverageRoot,
+    testgenRoot: input.testgenRoot,
     outRoot: input.outRoot,
     extensionRoot: input.extensionRoot ?? join(repositoryRoot, "apps", "code-oss-extension"),
     sourceCommit: input.sourceCommit ?? currentSourceCommit(input.repositoryRoot ?? repositoryRoot),
@@ -300,10 +305,12 @@ function normalizeInput(input) {
 
 export async function stageRelease(input, {
   validateRuntime = validateCodeOssRuntime,
+  validateTestgenBundle = checkTestgenBundle,
 } = {}) {
   const normalized = normalizeInput(input);
+  const releaseConfig = await readReleaseConfig();
   const sourceEpoch = resolveSourceDateEpoch(normalized.sourceDateEpoch);
-  const [validated, service, cmakeRoot, coverageRoot, extensionRoot] = await Promise.all([
+  const [validated, service, cmakeRoot, coverageRoot, testgenRoot, extensionRoot] = await Promise.all([
     validateRuntime({
       root: normalized.codeOssRoot,
       platform: normalized.platform,
@@ -312,8 +319,10 @@ export async function stageRelease(input, {
     validateRealFile(normalized.service, "service binary"),
     validateRealDirectory(normalized.cmakeRoot, "cmake bundle root"),
     validateRealDirectory(normalized.coverageRoot, "coverage bundle root"),
+    validateRealDirectory(normalized.testgenRoot, "test-generation bundle root"),
     validateRealDirectory(normalized.extensionRoot, "extension root"),
   ]);
+  await validateTestgenBundle({ root: testgenRoot.path, platform: `${normalized.platform}-${normalized.architecture}` });
   const runtimeSource = { path: validated.root, canonicalPath: validated.canonicalRoot };
   const extensionDist = await validateRealDirectory(join(extensionRoot.path, "dist"), "extension dist");
   const extensionManifest = await validateRealFile(join(extensionRoot.path, "package.json"), "extension manifest");
@@ -341,6 +350,9 @@ export async function stageRelease(input, {
     await copyTree(extensionDist, join(temporaryRoot, "app", "extensions", "unit-test-ide", "dist"));
     await copyTree(cmakeRoot, join(temporaryRoot, "bundles", "cmake"));
     await copyTree(coverageRoot, join(temporaryRoot, "bundles", "coverage"));
+    const stagedTestgenRoot = join(temporaryRoot, ...releaseConfig.testgenBundlePath.split("/"));
+    await copyTree(testgenRoot, stagedTestgenRoot);
+    await validateTestgenBundle({ root: stagedTestgenRoot, platform: `${normalized.platform}-${normalized.architecture}` });
     const stagedRuntimeRoot = join(temporaryRoot, "app", "code-oss-runtime");
     const stagedRuntime = await validateRuntime({
       root: stagedRuntimeRoot,
@@ -348,12 +360,13 @@ export async function stageRelease(input, {
       expectedLauncherSha256: normalized.codeOssSha256,
     });
     const stagedRuntimeSource = { path: stagedRuntime.root, canonicalPath: stagedRuntime.canonicalRoot };
-    const [codeOssLicenses, cmakeLicenses, coverageLicenses] = await Promise.all([
+    const [codeOssLicenses, cmakeLicenses, coverageLicenses, testgenLicenses] = await Promise.all([
       copyLicenseSet(stagedRuntimeSource, temporaryRoot, "code-oss"),
       copyLicenseSet(cmakeRoot, temporaryRoot, "cmake"),
       copyLicenseSet(coverageRoot, temporaryRoot, "coverage"),
+      copyLicenseSet(testgenRoot, temporaryRoot, "testgen"),
     ]);
-    const licenses = [...codeOssLicenses, ...cmakeLicenses, ...coverageLicenses]
+    const licenses = [...codeOssLicenses, ...cmakeLicenses, ...coverageLicenses, ...testgenLicenses]
       .sort((left, right) => left.localeCompare(right, "en"));
     const artifacts = await buildArtifacts(temporaryRoot);
     const manifest = await buildReleaseManifest({

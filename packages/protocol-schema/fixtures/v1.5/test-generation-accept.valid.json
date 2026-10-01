@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.5",
+  "kind": "request",
+  "messageId": "11111111111111111111111111111111",
+  "sentAt": "2026-09-27T00:00:00Z",
+  "method": "testGeneration/accept",
+  "payload": {
+    "runId": "44444444444444444444444444444444",
+    "candidateId": "77777777777777777777777777777777",
+    "confirmCharacterization": true,
+    "confirmationDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}

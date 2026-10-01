@@ -1,9 +1,13 @@
 // Package gcovr parses the closed gcovr 8.6 JSON export used by Linux GCC
-// coverage collection. The model intentionally contains only evidence needed
-// by the public coverage schema.
+// coverage collection. Aggregate fields feed the public v1 schema;
+// observations remain internal evidence for later detailed indexing.
 package gcovr
 
-import "errors"
+import (
+	"errors"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
+)
 
 const maxSafeInteger int64 = 9_007_199_254_740_991
 
@@ -22,6 +26,7 @@ type File struct {
 	RelativePath string
 	Functions    Metric
 	Lines        []Line
+	Observations []coveragedomain.FunctionObservation
 }
 
 type Metric struct {

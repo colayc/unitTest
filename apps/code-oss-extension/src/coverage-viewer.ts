@@ -32,3 +32,14 @@ export async function openCoverageHtml(
 ): Promise<void> {
   await host.openCoverageHtml(renderCoverageHtml(artifact));
 }
+
+import type { CoverageTreeNode } from "./coverage-detail-tree.js";
+
+export function coverageTreeItem(node: CoverageTreeNode): { label: string; description: string; command?: string; line?: number } {
+  return {
+    label: node.label,
+    description: node.status,
+    ...(node.kind === "file" || node.kind === "function" ? { command: "unitTestIde.openCoverageDetail" } : {}),
+    ...(node.startLine !== undefined ? { line: node.startLine } : {})
+  };
+}

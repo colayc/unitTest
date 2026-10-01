@@ -1146,6 +1146,8 @@ func artifactDescriptor(kind string) (mimeType, extension string, ok bool) {
 		return "application/xml", ".junit.xml", true
 	case "coverage-html":
 		return "text/html", ".coverage.html", true
+	case "test-generation-source":
+		return "application/octet-stream", ".source", true
 	default:
 		return "", "", false
 	}

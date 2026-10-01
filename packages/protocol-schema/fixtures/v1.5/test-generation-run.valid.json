@@ -1,0 +1,23 @@
+{
+  "protocolVersion": "1.5",
+  "kind": "response",
+  "messageId": "11111111111111111111111111111111",
+  "sentAt": "2026-09-27T00:00:00Z",
+  "requestId": "66666666666666666666666666666666",
+  "method": "testGeneration/runs/get",
+  "payload": {
+    "runId": "44444444444444444444444444444444",
+    "taskId": "55555555555555555555555555555555",
+    "workspaceGeneration": "3333333333333333333333333333333333333333333333333333333333333333",
+    "projectId": "core",
+    "state": "awaiting_confirmation",
+    "createdAt": "2026-09-27T00:00:00Z",
+    "lastSequence": 8,
+    "candidateCount": 1,
+    "preview": {
+      "candidateSetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "diffDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "confirmationDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  }
+}

@@ -47,14 +47,59 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	for _, current := range migrations {
+		if s.managedInvalid && current.version >= 18 {
+			break
+		}
 		if applied[current.version] {
+			if current.version == 16 && !s.detailInvalid {
+				s.detailAvailable = true
+			}
+			if current.version == 19 && !s.managedInvalid {
+				s.managedAvailable = true
+			}
+			if current.version == 20 && !s.attestationInvalid {
+				s.attestationAvailable = true
+			}
+			if current.version == 21 && !s.reviewInvalid {
+				s.reviewAvailable = true
+			}
 			continue
 		}
 		if err := s.applyMigration(ctx, current); err != nil {
+			if current.version == 16 {
+				// Detailed coverage is an optional extension. Its failed migration
+				// rolls back independently; all durable v1 reports remain readable.
+				s.detailAvailable = false
+				break
+			}
+			if current.version >= 17 && current.version <= 19 {
+				s.managedAvailable = false
+				break
+			}
+			if current.version == 20 {
+				s.attestationAvailable = false
+				break
+			}
+			if current.version == 21 {
+				s.reviewAvailable = false
+				break
+			}
 			return err
 		}
+		if current.version == 16 {
+			s.detailAvailable = true
+		}
+		if current.version == 19 {
+			s.managedAvailable = true
+		}
+		if current.version == 20 {
+			s.attestationAvailable = true
+		}
+		if current.version == 21 {
+			s.reviewAvailable = true
+		}
 	}
-	return nil
+	return s.reconcileGenerationRecords(ctx)
 }
 
 func (s *Store) applyMigration(ctx context.Context, current migration) (resultErr error) {
@@ -209,6 +254,27 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 			return nil, fmt.Errorf("%w: unknown migration version %d", task.ErrStorageUnavailable, version)
 		}
 		if !expectedMigration.acceptsChecksum(checksum) {
+			if version == 16 {
+				// A compromised optional detail schema must not hide legacy reports.
+				s.detailInvalid = true
+				applied[version] = true
+				continue
+			}
+			if version >= 17 && version <= 19 {
+				s.managedInvalid = true
+				applied[version] = true
+				continue
+			}
+			if version == 20 {
+				s.attestationInvalid = true
+				applied[version] = true
+				continue
+			}
+			if version == 21 {
+				s.reviewInvalid = true
+				applied[version] = true
+				continue
+			}
 			return nil, fmt.Errorf("%w: migration %d checksum mismatch", task.ErrStorageUnavailable, version)
 		}
 		applied[version] = true

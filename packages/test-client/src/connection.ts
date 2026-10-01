@@ -7,7 +7,9 @@ import { decodeTaskEvent } from "./decoders.js";
 import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
-export const MAX_MESSAGE_BYTES = 1024 * 1024;
+export const LEGACY_MAX_MESSAGE_BYTES = 1024 * 1024;
+// JSON may escape every byte of a 262144-byte v1.5 preview diff sixfold.
+export const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 
 const require = createRequire(import.meta.url);
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
@@ -35,12 +37,20 @@ ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/coverage"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+  ajv.addSchema(require(`@unit-test-ide/protocol-schema/v1.5/${name}`));
+}
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+  ajv.addSchema(require(`@unit-test-ide/protocol-schema/v1.6/${name}`));
+}
 const validators: Record<ProtocolVersion, ValidateFunction> = {
   "1.0": ajv.compile(require("@unit-test-ide/protocol-schema/v1/message")),
   "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message")),
   "1.2": ajv.compile(require("@unit-test-ide/protocol-schema/v1.2/message")),
   "1.3": ajv.compile(require("@unit-test-ide/protocol-schema/v1.3/message")),
-  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message"))
+  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message")),
+  "1.5": ajv.compile(require("@unit-test-ide/protocol-schema/v1.5/message")),
+  "1.6": ajv.compile(require("@unit-test-ide/protocol-schema/v1.6/message"))
 };
 
 type Pending = {
@@ -94,13 +104,14 @@ export class Connection {
       sentAt: new Date().toISOString(),
       payload
     };
+    const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
+    const limit = Math.min(messageLimitForVersion(version), messageLimitForVersion(this.#negotiatedVersion ?? version));
+    if (encoded.byteLength - 1 > limit) {
+      return Promise.reject(protocolLineLimitError(limit));
+    }
     const validator = validators[version];
     if (!validator(request)) {
       return Promise.reject(new Error(`invalid protocol request: ${ajv.errorsText(validator.errors)}`));
-    }
-    const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
-    if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
-      return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
     const handshakeAttempt = method === "handshake";
     const acceptLegacyUnsupportedProtocol = handshakeAttempt
@@ -156,22 +167,32 @@ export class Connection {
       let line = this.#buffer.subarray(0, newline);
       this.#buffer = this.#buffer.subarray(newline + 1);
       if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
-      if (line.byteLength > MAX_MESSAGE_BYTES) {
-        this.#closeWithError(new Error("protocol line exceeds the 1 MiB limit"));
+      const bufferedLimit = this.#bufferLimit();
+      if (line.byteLength > bufferedLimit) {
+        this.#closeWithError(protocolLineLimitError(bufferedLimit));
         return;
       }
-      if (!this.#onLine(line.toString("utf8"))) return;
+      if (!this.#onLine(line)) return;
     }
     const bufferedBodyBytes = this.#buffer.at(-1) === 0x0d ? this.#buffer.byteLength - 1 : this.#buffer.byteLength;
-    if (bufferedBodyBytes > MAX_MESSAGE_BYTES) {
-      this.#closeWithError(new Error("protocol line exceeds the 1 MiB limit"));
+    const bufferedLimit = this.#bufferLimit();
+    if (bufferedBodyBytes > bufferedLimit) {
+      this.#closeWithError(protocolLineLimitError(bufferedLimit));
     }
   }
 
-  #onLine(line: string): boolean {
+  #bufferLimit(): number {
+    if (this.#negotiatedVersion !== undefined) return messageLimitForVersion(this.#negotiatedVersion);
+    for (const pending of this.#pending.values()) {
+      if (pending.version === "1.5" || pending.version === "1.6") return MAX_MESSAGE_BYTES;
+    }
+    return LEGACY_MAX_MESSAGE_BYTES;
+  }
+
+  #onLine(line: Buffer): boolean {
     let value: unknown;
     try {
-      value = JSON.parse(line);
+      value = JSON.parse(line.toString("utf8"));
     } catch {
       this.#closeWithError(new Error("service returned invalid JSON"));
       return false;
@@ -185,11 +206,24 @@ export class Connection {
       this.#closeWithError(new Error("service returned an unsupported protocol version"));
       return false;
     }
+    const requestId = (value as { requestId?: unknown }).requestId;
+    const pendingVersion = typeof requestId === "string" ? this.#pending.get(requestId)?.version : undefined;
+    const contextVersion = this.#negotiatedVersion ?? pendingVersion ?? version;
+    const limit = Math.min(messageLimitForVersion(version), messageLimitForVersion(contextVersion));
+    if (line.byteLength > limit) {
+      this.#closeWithError(protocolLineLimitError(limit));
+      return false;
+    }
     const validator = validators[version];
     if (!validator(value)) {
       const eventName = isSafeProtocolToken((value as { event?: unknown }).event)
         ? (value as { event: string }).event
         : "unknown";
+      if (process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1" && eventName === "coverage.run.finished") {
+        const payload = (value as { payload?: unknown }).payload;
+        const payloadRecord = payload && typeof payload === "object" ? payload as Record<string, unknown> : undefined;
+        process.stderr.write(`protocol invalid coverage event keys[${payloadRecord ? Object.keys(payloadRecord).sort().join(",") : "none"}] outcome[${String(payloadRecord?.outcome ?? "missing")}]\n`);
+      }
       const keywords = [...new Set((validator.errors ?? [])
         .map((error) => error.keyword)
         .map((keyword) => keyword.toLowerCase())
@@ -303,11 +337,19 @@ export class Connection {
 }
 
 function isProtocolVersion(value: unknown): value is ProtocolVersion {
-  return value === "1.0" || value === "1.1" || value === "1.2" || value === "1.3" || value === "1.4";
+  return value === "1.0" || value === "1.1" || value === "1.2" || value === "1.3" || value === "1.4" || value === "1.5" || value === "1.6";
 }
 
 function protocolRank(version: ProtocolVersion): number {
-  return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4 }[version];
+  return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4, "1.5": 5, "1.6": 6 }[version];
+}
+
+function messageLimitForVersion(version: ProtocolVersion): number {
+  return version === "1.5" || version === "1.6" ? MAX_MESSAGE_BYTES : LEGACY_MAX_MESSAGE_BYTES;
+}
+
+function protocolLineLimitError(limit: number): Error {
+  return new Error(`protocol line exceeds the ${limit === MAX_MESSAGE_BYTES ? "2" : "1"} MiB limit`);
 }
 
 function isSafeProtocolToken(value: unknown): value is string {

@@ -33,30 +33,31 @@ const (
 	ScenarioSpawnChild  Scenario = "spawn-child"
 	ScenarioEmitOutput  Scenario = "emit-output"
 
-	EventTaskCreated               EventType = "task.created"
-	EventTaskStarted               EventType = "task.started"
-	EventTaskStepStarted           EventType = "task.step_started"
-	EventTaskStepFinished          EventType = "task.step_finished"
-	EventTaskOutput                EventType = "task.output"
-	EventTaskCancellationRequested EventType = "task.cancellation_requested"
-	EventTaskFinished              EventType = "task.finished"
-	EventArtifactCreated           EventType = "artifact.created"
-	EventTaskDiagnostic            EventType = "task.diagnostic"
-	EventTestDiscoveryStarted      EventType = "test.discovery.started"
-	EventTestContainerDiscovered   EventType = "test.container.discovered"
-	EventTestCatalogPublished      EventType = "test.catalog.published"
-	EventTestRunStarted            EventType = "test.run.started"
-	EventTestContainerStarted      EventType = "test.container.started"
-	EventTestItemStarted           EventType = "test.item.started"
-	EventTestOutput                EventType = "test.output"
-	EventTestItemFinished          EventType = "test.item.finished"
-	EventTestContainerFinished     EventType = "test.container.finished"
-	EventTestRunFinished           EventType = "test.run.finished"
-	EventCoverageRunStarted        EventType = "coverage.run.started"
-	EventCoverageBuildFinished     EventType = "coverage.build.finished"
-	EventCoverageCollectionStarted EventType = "coverage.collection.started"
-	EventCoverageReportAvailable   EventType = "coverage.report.available"
-	EventCoverageRunFinished       EventType = "coverage.run.finished"
+	EventTaskCreated                EventType = "task.created"
+	EventTaskStarted                EventType = "task.started"
+	EventTaskStepStarted            EventType = "task.step_started"
+	EventTaskStepFinished           EventType = "task.step_finished"
+	EventTaskOutput                 EventType = "task.output"
+	EventTaskCancellationRequested  EventType = "task.cancellation_requested"
+	EventTaskFinished               EventType = "task.finished"
+	EventArtifactCreated            EventType = "artifact.created"
+	EventTaskDiagnostic             EventType = "task.diagnostic"
+	EventTestDiscoveryStarted       EventType = "test.discovery.started"
+	EventTestContainerDiscovered    EventType = "test.container.discovered"
+	EventTestCatalogPublished       EventType = "test.catalog.published"
+	EventTestRunStarted             EventType = "test.run.started"
+	EventTestContainerStarted       EventType = "test.container.started"
+	EventTestItemStarted            EventType = "test.item.started"
+	EventTestOutput                 EventType = "test.output"
+	EventTestItemFinished           EventType = "test.item.finished"
+	EventTestContainerFinished      EventType = "test.container.finished"
+	EventTestRunFinished            EventType = "test.run.finished"
+	EventCoverageRunStarted         EventType = "coverage.run.started"
+	EventCoverageBuildFinished      EventType = "coverage.build.finished"
+	EventCoverageCollectionStarted  EventType = "coverage.collection.started"
+	EventCoverageReportAvailable    EventType = "coverage.report.available"
+	EventCoverageRunFinished        EventType = "coverage.run.finished"
+	EventTestGenerationStateChanged EventType = "testGeneration.state.changed"
 )
 
 type Task struct {
@@ -167,7 +168,8 @@ func ValidEventType(value EventType) bool {
 		EventCoverageBuildFinished,
 		EventCoverageCollectionStarted,
 		EventCoverageReportAvailable,
-		EventCoverageRunFinished:
+		EventCoverageRunFinished,
+		EventTestGenerationStateChanged:
 		return true
 	default:
 		return false

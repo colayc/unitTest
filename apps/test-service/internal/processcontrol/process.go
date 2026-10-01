@@ -17,14 +17,15 @@ const (
 )
 
 type Spec struct {
-	Executable   string
-	LaunchPlan   []string
-	LaunchInputs []cmake.FingerprintFile
-	Args         []string
-	Dir          string
-	Env          []string
-	EnvUnset     []string
-	Batch        []BatchItem
+	Executable        string
+	ClosedEnvironment bool
+	LaunchPlan        []string
+	LaunchInputs      []cmake.FingerprintFile
+	Args              []string
+	Dir               string
+	Env               []string
+	EnvUnset          []string
+	Batch             []BatchItem
 }
 
 type BatchItem struct {

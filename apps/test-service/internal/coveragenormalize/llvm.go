@@ -3,6 +3,7 @@ package coveragenormalize
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,6 +113,69 @@ func NormalizeLLVM(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []Sourc
 		return fail(fmt.Errorf("%w: %v", ErrInvalidLLVM, err))
 	}
 	return document, append([]SourceBinding(nil), bindings...), nil
+}
+
+// NormalizeLLVMWithDetail retains the v1 aggregate document and additionally
+// binds parser-only observations to the exact verified source snapshot. Any
+// selected observation that cannot be bound fails closed without a raw path in
+// the returned error or detail result.
+func NormalizeLLVMWithDetail(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []SourceBinding, []coveragedomain.FunctionObservation, error) {
+	document, bindings, err := NormalizeLLVM(input)
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrInvalidLLVM
+	}
+	root, err := canonicalWorkspaceRoot(input.WorkspaceRoot)
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, err
+	}
+	byURI := make(map[string]SourceBinding, len(bindings))
+	for _, binding := range bindings {
+		byURI[binding.URI] = binding
+	}
+	observations := make([]coveragedomain.FunctionObservation, 0)
+	verifiedPaths := make(map[string]SourceBinding)
+	for _, file := range input.Export.Files {
+		if len(file.Observations) == 0 {
+			continue
+		}
+		_, relative, err := workspaceRelativeSource(root, file.NativePath)
+		if err != nil {
+			return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrInvalidSourcePath
+		}
+		if !input.Matcher.Include(relative) {
+			continue
+		}
+		containing, err := DigestSource(root, file.NativePath, input.Limits)
+		if err != nil {
+			return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+		}
+		bound, ok := byURI[containing.URI]
+		if !ok || bound.SHA256 != containing.SHA256 {
+			return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+		}
+		for _, observation := range file.Observations {
+			candidate, verified := verifiedPaths[observation.File]
+			if !verified {
+				candidate, err = DigestSource(root, observation.File, input.Limits)
+				if err != nil {
+					return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+				}
+				verifiedPaths[observation.File] = candidate
+			}
+			match := candidate.URI == bound.URI
+			if runtime.GOOS == "windows" {
+				match = strings.EqualFold(candidate.URI, bound.URI)
+			}
+			if !match || candidate.SHA256 != bound.SHA256 {
+				return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+			}
+			observation.File = bound.URI
+			observation.Lines = append([]coveragedomain.LineObservation(nil), observation.Lines...)
+			observation.Branches = append([]coveragedomain.BranchObservation(nil), observation.Branches...)
+			observations = append(observations, observation)
+		}
+	}
+	return document, bindings, observations, nil
 }
 
 func validateLLVMExport(value coverageparserllvm.Export, limits Limits) error {

@@ -1,0 +1,41 @@
+{
+  "protocolVersion": "1.5",
+  "kind": "response",
+  "messageId": "11111111111111111111111111111111",
+  "sentAt": "2026-09-27T00:00:00Z",
+  "requestId": "66666666666666666666666666666666",
+  "method": "testGeneration/candidates/list",
+  "payload": {
+    "items": [
+      {
+        "candidateId": "77777777777777777777777777777777",
+        "kind": "characterization",
+        "codeDigest": "8888888888888888888888888888888888888888888888888888888888888888",
+        "artifactDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "assertionProvenance": {
+          "kind": "observed-output",
+          "evidenceDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "baselineCoverage": {
+          "functionPercent": 25,
+          "linePercent": 35,
+          "branchPercent": 15
+        },
+        "deltaCoverage": {
+          "functionPercent": 5,
+          "linePercent": 4,
+          "branchPercent": 3
+        },
+        "plannedEdits": [
+          {
+            "path": "tests/new_test.cpp",
+            "operation": "create",
+            "afterDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "diagnostics": [],
+        "characterizationConfirmed": false
+      }
+    ]
+  }
+}

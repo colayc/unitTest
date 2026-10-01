@@ -25,3 +25,11 @@ func TestTaskOutputRedactsNativePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskOutputRedactsPosixPaths(t *testing.T) {
+	input := `error: /home/runner/work/unitTest/unitTest/build/generated.cpp:4:2`
+	got := nativePathInTaskOutput.ReplaceAllString(input, "$1[redacted-path]")
+	if got != "error: [redacted-path]" {
+		t.Fatalf("POSIX path leaked from task output: %q", got)
+	}
+}

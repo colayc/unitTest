@@ -18,11 +18,12 @@ import (
 type Kind string
 
 const (
-	KindSimulation    Kind = "simulation"
-	KindCMakeBuild    Kind = "cmake_build"
-	KindTestDiscovery Kind = "test_discovery"
-	KindTestRun       Kind = "test_run"
-	KindCoverageRun   Kind = "coverage_run"
+	KindSimulation     Kind = "simulation"
+	KindCMakeBuild     Kind = "cmake_build"
+	KindTestDiscovery  Kind = "test_discovery"
+	KindTestRun        Kind = "test_run"
+	KindCoverageRun    Kind = "coverage_run"
+	KindTestGeneration Kind = "test_generation"
 )
 
 type StepKind string
@@ -79,8 +80,8 @@ type ServiceAction string
 
 const (
 	ServiceActionCoverageNormalize ServiceAction = "coverage-normalize"
-	ServiceActionCoverageReport  ServiceAction = "coverage-report"
-	ServiceActionCoveragePublish ServiceAction = "coverage-publish"
+	ServiceActionCoverageReport    ServiceAction = "coverage-report"
+	ServiceActionCoveragePublish   ServiceAction = "coverage-publish"
 )
 
 type ExecutionStep struct {

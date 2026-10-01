@@ -152,6 +152,14 @@ export UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1
 pnpm test:e2e:native -- --platform linux
 ```
 
+Hosted `coverage-linux-clang` 使用同一条 fail-closed 边界：它先从
+`tools/llvm-coverage-bundle/manifest.json` 下载并校验固定的 LLVM 22.1.8 Linux x64
+归档，原子准备 `.superpowers/cache/llvm-coverage-bundle/22.1.8/linux-x64`，再以只读
+`check.mjs` 验证 `READY`、manifest、license 和四个常规文件工具入口，最后通过
+`GITHUB_ENV` 导出 `UTIDE_NATIVE_LLVM_BUNDLE`。只有这些步骤全部成功后，才进入
+`tools/linux-offline/run.mjs`；offline boundary 内不联网、不读取 GitHub repository
+variable、不回退到 PATH 或系统包管理器。准备失败不会发布 READY bundle。
+
 两平台 required matrix 都必须设置上述 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS` 和
 `UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1`。本地 producer/matrix 成功不是 hosted
 四工具链证据，不创建 P4 receipt、不改变 gate 状态，`releaseReady=false` 保持不变。
@@ -236,6 +244,26 @@ Service、构建/测试进程和 coverage evidence validator 都通过同一显�
 stable identity、实际 executable digest 和 Service artifact digest。required mode 会在
 命令成功前重新读取并按 closed schema 验证该文件；缺失、截断、路径字段、scenario
 缺失或 provenance 缺失均不能被 `toolchain-report.json` 掩盖。
+
+## Phase 10 离线测试生成证据边界
+
+测试生成的本地静态 fixture、Protocol v1.5 契约测试、扩展控制器测试、mutation fixture
+和性能/安全单元测试，只能证明实现的闭集行为与 fail-closed 规则。它们不产生
+Phase 10 native coverage receipt，也不能替代 Linux Clang/LLVM、Linux GCC/gcovr、
+Windows clang-cl/LLVM 的真实 Service 矩阵。
+
+真正的 Phase 10 native/hosted evidence 必须绑定合并候选 SHA、固定 Clang/analyzer
+bundle 的逐文件摘要与 license inventory、实际 runner/job/artifact identity、四个
+4×2=8 个 toolchain/framework blocks 的 coverage delta、mutation 和性能报告，并在全部报告关闭
+后才写入 gate catalog。cross-compile、parser-only、local-static 或缺少 immutable
+artifact receipt 的结果保持 `MISSING`，不得标为 PASS。
+
+本地可以先运行 `pnpm test:phase10:test-generation` 验证报告 schema、断言/覆盖率增量、
+故障场景、mutation 和预算逻辑；该命令不上传 artifact、不创建 receipt、不改变 gate
+状态。任何正式 Code-OSS/native workflow 尚未运行时，`releaseReady=false` 必须保持不变。
+
+Phase 10 完成后仍需重新执行完整 Phase 9 regression，随后才进入正式 Windows 签名、
+第三方 license/legal 人工审批和最终发布资格验证。
 
 ## 后续阶段
 

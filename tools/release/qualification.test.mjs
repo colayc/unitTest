@@ -633,10 +633,13 @@ test("foundation P8 report trust path uses only reviewed immutable action commit
 
 test("foundation P8 trust path rejects a mutable direct sequence action", async () => {
   const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
-  const mutated = workflow.replace(
+  const job = foundationJobSource(workflow, "verify-windows");
+  const mutatedJob = job.replace(
     "- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
     "- uses: actions/checkout@v6",
   );
+  assert.notEqual(mutatedJob, job);
+  const mutated = workflow.replace(job, () => mutatedJob);
   assert.notEqual(mutated, workflow);
   assert.throws(() => assertFoundationP8TrustPathPinned(mutated), /verify-windows contains mutable action actions\/checkout@v6/u);
 });

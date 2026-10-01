@@ -718,6 +718,24 @@ func TestWindowsTargetEnvironmentRemovesInheritedValue(t *testing.T) {
 	}
 }
 
+func TestWindowsHostEnvironmentPreservesSanitizedLaunchEnvironment(t *testing.T) {
+	t.Setenv("UT_PROCESSCONTROL_HOST_ENV", "visible")
+	environment := hostWindowsEnvironment(os.Environ(), 99)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[strings.ToUpper(name)] = value
+		}
+	}
+	if values["UT_PROCESSCONTROL_HOST_ENV"] != "visible" {
+		t.Fatalf("host environment = %#v, want sanitized launch environment retained", values)
+	}
+	if values["UNIT_TEST_IDE_STATUS_HANDLE"] != "99" {
+		t.Fatalf("status handle environment = %#v", values)
+	}
+}
+
 func TestWindowsCloseIsIdempotentWithoutHandleOrGoroutineLeak(t *testing.T) {
 	binary := buildWindowsService(t)
 	beforeHandleSnapshot := windowsHandleSnapshot(t)

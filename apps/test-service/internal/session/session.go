@@ -33,6 +33,7 @@ import (
 	taskv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task"
 	testv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test"
 	taskv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task"
+	capabilitiesv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/capabilities"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 	"unit-test-ide.local/test-service/internal/toolchain"
@@ -119,6 +120,9 @@ type Session struct {
 	negotiatedVersion          string
 	backend                    Backend
 	coverageBackend            CoverageBackend
+	generationBackend          GenerationBackend
+	coverageDetails            CoverageDetailsProvider
+	managedTests               ManagedTestsProvider
 	shutdown                   chan struct{}
 	shutdownOnce               sync.Once
 }
@@ -129,6 +133,11 @@ type handshake struct {
 	ClientVersion             string   `json:"clientVersion"`
 	SupportedProtocolVersions []string `json:"supportedProtocolVersions,omitempty"`
 }
+
+// Providers are readiness-gated here; their durable read/write contracts are
+// introduced by the later coverage-detail and managed-test tasks.
+type CoverageDetailsProvider interface{ CoverageDetailsReady() bool }
+type ManagedTestsProvider interface{ ManagedTestsReady() bool }
 
 type startPayload struct {
 	IdempotencyKey string        `json:"idempotencyKey"`
@@ -265,6 +274,91 @@ func NewWithCoverage(token, platform, transport string, backend Backend, coverag
 	return &Session{token: token, platform: platform, transport: transport, backend: backend, coverageBackend: coverage, shutdown: make(chan struct{})}
 }
 
+// NewWithGeneration only advertises v1.5 when both coverage and the fully
+// initialized generation provider are available. Legacy constructors keep
+// their existing negotiation ceiling.
+func NewWithGeneration(token, platform, transport string, backend Backend, coverage CoverageBackend, generation GenerationBackend) *Session {
+	s := NewWithCoverage(token, platform, transport, backend, coverage)
+	s.generationBackend = generation
+	return s
+}
+
+// NewWithManagedDetails is the only constructor that may negotiate v1.6.
+// Both durable providers must be healthy as well as v1.5's providers.
+func NewWithManagedDetails(token, platform, transport string, backend Backend, coverage CoverageBackend, generation GenerationBackend, details CoverageDetailsProvider, managed ManagedTestsProvider) *Session {
+	s := NewWithGeneration(token, platform, transport, backend, coverage, generation)
+	s.coverageDetails = details
+	s.managedTests = managed
+	return s
+}
+
+func (s *Session) detailsReady() bool {
+	managedGeneration, ok := s.generationBackend.(ManagedGenerationBackend)
+	_, canResolveStart := s.generationBackend.(ManagedStartResolverBackend)
+	_, canStart := s.generationBackend.(ManagedStartBackend)
+	_, canRead := s.generationBackend.(ManagedRunReadBackend)
+	return s.coverageBackend != nil && ok && canResolveStart && canStart && canRead && managedGeneration.TestGenerationReady() && managedGeneration.ManagedTestsReady() &&
+		s.coverageDetails != nil && s.coverageDetails.CoverageDetailsReady() &&
+		s.managedTests != nil && s.managedTests.ManagedTestsReady()
+}
+
+func coverageDetailMethod(method string) bool {
+	switch method {
+	case "coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list", "coverage/details/lines/list":
+		return true
+	}
+	return false
+}
+
+func managedTestMethod(method string) bool {
+	switch method {
+	case "managedTests/records/list", "managedTests/reviews/get", "managedTests/reviews/apply":
+		return true
+	}
+	return false
+}
+
+func (s *Session) negotiateVersion(envelope string, supported []string) (string, bool) {
+	if envelope != protocol.Version16 {
+		return negotiateForGeneration(envelope, supported, s.coverageBackend, s.generationBackend)
+	}
+	if s.detailsReady() {
+		return negotiateCandidates(envelope, supported, []string{protocol.Version16, protocol.Version15, protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	if s.coverageBackend != nil && s.generationBackend != nil && s.generationBackend.TestGenerationReady() {
+		return negotiateCandidates(protocol.Version15, supported, []string{protocol.Version15, protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	if s.coverageBackend != nil {
+		return negotiateCandidates(protocol.Version14, supported, []string{protocol.Version14, protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+	}
+	return negotiateCandidates(protocol.Version13, supported, []string{protocol.Version13, protocol.Version12, protocol.Version11, protocol.Version10})
+}
+
+func capabilitiesV16() capabilitiesv16.CapabilitiesV16 {
+	old := capabilitiesV15()
+	adapters := make([]capabilitiesv16.FrameworkAdapterCapabilityV16, len(old.FrameworkAdapters))
+	for i, adapter := range old.FrameworkAdapters {
+		adapters[i] = capabilitiesv16.FrameworkAdapterCapabilityV16{
+			ID: capabilitiesv16.FrameworkAdapterIDV16(adapter.ID), ContractVersion: adapter.ContractVersion,
+			DisplayName: adapter.DisplayName, CanDiscoverCases: adapter.CanDiscoverCases,
+			CanRunCase: adapter.CanRunCase, CanReportSkipped: adapter.CanReportSkipped,
+			CanReportSourceLocation: adapter.CanReportSourceLocation, CanReportMockDetails: adapter.CanReportMockDetails,
+		}
+	}
+	return capabilitiesv16.CapabilitiesV16{
+		WorkspaceInspect: old.WorkspaceInspect, TargetList: old.TargetList, CmakeBuild: old.CmakeBuild,
+		TestDiscovery: old.TestDiscovery, TestRun: old.TestRun, CoverageRun: old.CoverageRun,
+		CoverageReport: old.CoverageReport, CtestJSON: old.CtestJSON, OpaqueCTestFallback: old.OpaqueCTestFallback,
+		MaxRepeatCount: old.MaxRepeatCount, MaxSelectionSize: old.MaxSelectionSize,
+		MaxCatalogPageSize: old.MaxCatalogPageSize, MaxCoveragePageSize: old.MaxCoveragePageSize,
+		MaxCoverageTimeoutMS: old.MaxCoverageTimeoutMS, UnityHelperContractVersion: old.UnityHelperContractVersion,
+		UnityRunnerContractVersion: old.UnityRunnerContractVersion, FrameworkAdapters: adapters,
+		TestGeneration: old.TestGeneration, MaxTestGenerationCandidates: old.MaxTestGenerationCandidates,
+		CoverageDetails: true, ManagedTests: true, MaxCoverageDetailPageSize: 200,
+		MaxCoverageLinePageSize: 1000, MaxManagedTestPageSize: 200,
+	}
+}
+
 func (s *Session) ShutdownRequested() <-chan struct{} { return s.shutdown }
 
 func (s *Session) Authenticated() bool {
@@ -303,7 +397,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "invalid handshake payload", false))
 		}
-		negotiatedVersion, ok := negotiateForBackend(request.ProtocolVersion, payload.SupportedProtocolVersions, s.coverageBackend)
+		negotiatedVersion, ok := s.negotiateVersion(request.ProtocolVersion, payload.SupportedProtocolVersions)
 		if !ok {
 			return handled(protocol.Failure(responseVersion, request, "UNSUPPORTED_PROTOCOL", "protocol version is not supported", false))
 		}
@@ -316,6 +410,15 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	case "capabilities/get":
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
+		}
+		if s.negotiatedVersion == protocol.Version16 {
+			if !s.detailsReady() {
+				return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "detail service is unavailable", true))
+			}
+			return handled(protocol.Success(responseVersion, request, capabilitiesV16()))
+		}
+		if s.negotiatedVersion == protocol.Version15 {
+			return handled(protocol.Success(responseVersion, request, capabilitiesV15()))
 		}
 		if s.negotiatedVersion == protocol.Version14 {
 			return handled(protocol.Success(responseVersion, request, capabilitiesV14()))
@@ -356,8 +459,36 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
 	}
+	if coverageDetailMethod(request.Method) {
+		if s.negotiatedVersion != protocol.Version16 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.6", false))
+		}
+		provider, ok := s.coverageDetails.(CoverageDetailBackend)
+		if !ok || !provider.CoverageDetailsReady() {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "coverage detail service is unavailable", true))
+		}
+		return s.handleCoverageDetail(ctx, responseVersion, request, provider)
+	}
+	if managedTestMethod(request.Method) {
+		if s.negotiatedVersion != protocol.Version16 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.6", false))
+		}
+		return s.handleManagedTests(ctx, responseVersion, request)
+	}
+	if generationMethod(request.Method) {
+		if s.negotiatedVersion == protocol.Version16 {
+			return s.handleManagedGeneration(ctx, responseVersion, request)
+		}
+		if s.negotiatedVersion != protocol.Version15 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.5", false))
+		}
+		if s.generationBackend == nil || !s.generationBackend.TestGenerationReady() {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "test generation service is unavailable", true))
+		}
+		return s.handleGeneration(ctx, responseVersion, request, s.generationBackend)
+	}
 	if coverageMethod(request.Method) {
-		if s.negotiatedVersion != protocol.Version14 {
+		if s.negotiatedVersion != protocol.Version14 && s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.4", false))
 		}
 		if s.coverageBackend == nil {
@@ -369,7 +500,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	if phase3Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version12 &&
 			s.negotiatedVersion != protocol.Version13 &&
-			s.negotiatedVersion != protocol.Version14 {
+			s.negotiatedVersion != protocol.Version14 &&
+			s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
 		}
 		if s.backend == nil {
@@ -379,7 +511,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	}
 	if phase4Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version13 &&
-			s.negotiatedVersion != protocol.Version14 {
+			s.negotiatedVersion != protocol.Version14 &&
+			s.negotiatedVersion != protocol.Version15 && s.negotiatedVersion != protocol.Version16 {
 			return handled(protocol.Failure(
 				responseVersion,
 				request,
@@ -417,6 +550,12 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	if phase2Method(request.Method) {
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
+		}
+		if s.negotiatedVersion == protocol.Version15 || s.negotiatedVersion == protocol.Version16 {
+			// The legacy task and artifact projections cannot encode generation
+			// ownership; the broker is workspace-global. Do not misproject or
+			// expose another realm's generation rows via inherited methods.
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped task routes are unavailable", false))
 		}
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "task service is unavailable", true))
@@ -550,6 +689,8 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 				task.KindTestDiscovery,
 				task.KindTestRun,
 			}
+		} else if version == protocol.Version14 {
+			kinds = []task.Kind{task.KindSimulation, task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun}
 		}
 		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
@@ -669,7 +810,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return invalidPayload(version, request)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
 			parent, getErr := s.backend.Get(ctx, payload.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
@@ -706,7 +847,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return backendFailure(version, request, err)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
 			parent, getErr := s.backend.Get(ctx, chunk.Metadata.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
@@ -2216,6 +2357,9 @@ func validBuildStart(value buildStartPayloadV12) bool {
 }
 
 func legacyTaskHidden(version string, kind task.Kind) bool {
+	if kind == task.KindTestGeneration {
+		return true
+	}
 	switch version {
 	case protocol.Version11:
 		return kind != task.KindSimulation

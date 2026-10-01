@@ -5,8 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Family string
@@ -34,6 +38,71 @@ type CoverageCapability struct {
 	GCovEvidence        ExecutableEvidence
 	GCovVersion         string
 	ToolsetIdentity     string
+}
+
+// LLVMToolEvidence binds a fixed LLVM role to one executable snapshot.
+type LLVMToolEvidence struct {
+	Role     string
+	Path     string
+	Evidence ExecutableEvidence
+}
+
+var (
+	llvmCompilerBannerVersion = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+	llvmUtilityBannerVersion  = regexp.MustCompile(`(?i)\b(?:llvm|llvm-profdata|llvm-cov) version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+)
+
+// LLVMVersionFromBanner accepts one unambiguous version anywhere in a bounded
+// tool banner; llvm-profdata commonly prints its version on a later line.
+func LLVMVersionFromBanner(role string, output []byte) (string, error) {
+	if len(output) == 0 || len(output) > 64*1024 || !utf8.Valid(output) || strings.IndexByte(string(output), 0) >= 0 {
+		return "", errors.New("invalid LLVM version banner")
+	}
+	var pattern *regexp.Regexp
+	switch role {
+	case "clang", "clang++":
+		pattern = llvmCompilerBannerVersion
+	case "llvm-profdata", "llvm-cov":
+		pattern = llvmUtilityBannerVersion
+	default:
+		return "", errors.New("unknown LLVM tool role")
+	}
+	matches := pattern.FindAllSubmatch(output, 2)
+	if len(matches) != 1 {
+		return "", errors.New("ambiguous LLVM version banner")
+	}
+	return string(matches[0][1]), nil
+}
+
+// LLVMToolsetIdentityForTools constructs the Linux four-tool identity. Paths
+// participate in the hash but are never returned in the serialized identity.
+func LLVMToolsetIdentityForTools(version string, tools []LLVMToolEvidence) (string, error) {
+	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+	if version == "" || len(tools) != len(roles) {
+		return "", fmt.Errorf("invalid LLVM tool count or version")
+	}
+	root := ""
+	identities := make(map[string]struct{}, len(tools))
+	parts := []string{"llvm-toolset-v2", version}
+	for index, tool := range tools {
+		if tool.Role != roles[index] || tool.Path == "" || !filepath.IsAbs(tool.Path) ||
+			filepath.Clean(tool.Path) != tool.Path || filepath.Base(tool.Path) != tool.Role ||
+			!validUnixExecutableEvidence(tool.Evidence) {
+			return "", fmt.Errorf("invalid LLVM %s evidence", roles[index])
+		}
+		if index == 0 {
+			root = filepath.Dir(tool.Path)
+		} else if filepath.Dir(tool.Path) != root {
+			return "", fmt.Errorf("LLVM tools have different installation roots")
+		}
+		if _, duplicate := identities[tool.Evidence.FileIdentity]; duplicate {
+			return "", fmt.Errorf("LLVM tool roles share one executable")
+		}
+		identities[tool.Evidence.FileIdentity] = struct{}{}
+		parts = append(parts, tool.Role, identityPath(tool.Path), tool.Evidence.FileIdentity, tool.Evidence.SHA256)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // LLVMToolsetIdentity binds a discovery version and the three exact executable
@@ -129,6 +198,11 @@ type Candidate struct {
 	Manual      bool
 	Ninja       string
 	Make        string
+	// PathDirectories contains the canonical directories accepted from the
+	// host PATH during Unix discovery.  The adapter carries these forward so
+	// compiler helper programs (for example GNU as) remain resolvable when a
+	// production build is launched with the exact toolchain environment.
+	PathDirectories []string
 }
 
 type Issue struct {

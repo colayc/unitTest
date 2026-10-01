@@ -17,7 +17,9 @@ import (
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
@@ -60,27 +62,30 @@ type execution struct {
 	terminalErr     error
 	terminalOutcome task.Outcome
 
-	mu                sync.Mutex
-	embedded          testrun.EmbeddedRun
-	testOriginals     map[string]task.ExecutionStep
-	testOrder         []string
-	outcomes          map[string]testrun.InvocationOutcome
-	binaries          []*retainedFile
-	targets           []processTarget
-	state             coveragerun.State
-	failedPhase       coveragerun.Phase
-	exportOutput      bytes.Buffer
-	document          coveragemodelv1.CoverageDocumentV1
-	coverageJSON      []byte
-	normalized        bool
-	bindings          []coveragenormalize.SourceBinding
-	reportSet         *coveragereport.Set
-	finishedTestRun   *testdomain.TestRun
-	events            []task.DomainEvent
-	completionEvents  []task.DomainEvent
-	coverageStarted   bool
-	buildFinished     bool
-	collectionStarted bool
+	mu                   sync.Mutex
+	embedded             testrun.EmbeddedRun
+	testOriginals        map[string]task.ExecutionStep
+	testOrder            []string
+	outcomes             map[string]testrun.InvocationOutcome
+	binaries             []*retainedFile
+	targets              []processTarget
+	state                coveragerun.State
+	failedPhase          coveragerun.Phase
+	exportOutput         bytes.Buffer
+	collectorOutputBytes int64
+	document             coveragemodelv1.CoverageDocumentV1
+	coverageJSON         []byte
+	normalized           bool
+	bindings             []coveragenormalize.SourceBinding
+	observations         []coveragedomain.FunctionObservation
+	detailNormalized     bool
+	reportSet            *coveragereport.Set
+	finishedTestRun      *testdomain.TestRun
+	events               []task.DomainEvent
+	completionEvents     []task.DomainEvent
+	coverageStarted      bool
+	buildFinished        bool
+	collectionStarted    bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -759,6 +764,11 @@ func validateInstrumentationContract(
 		snapshot.InstrumentationFingerprint != instrumentation.Fingerprint {
 		return task.ErrInvalidArgument
 	}
+	if snapshot.Platform == coveragedomain.PlatformLinux &&
+		snapshot.Compiler.Family == coveragedomain.CompilerFamilyClang &&
+		instrumentation.Fingerprint != coveragellvm.InstrumentationFingerprintForPlatform("linux") {
+		return task.ErrInvalidArgument
+	}
 	return nil
 }
 
@@ -924,14 +934,18 @@ func (execution *execution) ObserveOutput(
 		}
 		return embedded.ObserveOutput(ctx, current, original, output)
 	}
-	if step.Kind != task.StepCoverageNormalize || output.Stream != "stdout" {
+	if step.Kind != task.StepCoverageNormalize && step.Kind != task.StepCoverageMerge {
 		return nil
 	}
 	limits := coveragenormalize.DefaultLimits()
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
-	if int64(execution.exportOutput.Len()) > limits.MaxInputBytes-int64(len(output.Data)) {
+	if execution.collectorOutputBytes > limits.MaxInputBytes-int64(len(output.Data)) {
 		return coveragenormalize.ErrLimitExceeded
+	}
+	execution.collectorOutputBytes += int64(len(output.Data))
+	if step.Kind != task.StepCoverageNormalize || output.Stream != "stdout" {
+		return nil
 	}
 	_, _ = execution.exportOutput.Write(output.Data)
 	return nil
@@ -1268,11 +1282,28 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	if adapter == nil {
 		return task.ErrInvalidArgument
 	}
-	document, bindings, err := adapter.Normalize(ctx, NormalizeInput{
+	input := NormalizeInput{
 		ProcessOutput: raw, PinnedOutput: pinned,
 		WorkspaceRoot: execution.config.WorkspaceRoot.NativePath, Matcher: matcher,
 		Toolchain: execution.run.Toolchain, Completeness: completeness, Limits: limits,
-	})
+	}
+	var document coveragemodelv1.CoverageDocumentV1
+	var bindings []coveragenormalize.SourceBinding
+	var observations []coveragedomain.FunctionObservation
+	detailNormalized := false
+	if detail, ok := adapter.(DetailNormalizer); ok && execution.config.DetailStore != nil {
+		document, bindings, observations, err = detail.NormalizeWithDetail(ctx, input)
+		detailNormalized = err == nil
+		if err != nil {
+			// Detail attribution must not make a valid v1 aggregate run fail.
+			document, bindings, err = adapter.Normalize(ctx, input)
+			if err == nil && execution.config.DetailFailure != nil {
+				execution.config.DetailFailure(coveragedetail.ErrInvalidDetail)
+			}
+		}
+	} else {
+		document, bindings, err = adapter.Normalize(ctx, input)
+	}
 	if err != nil {
 		return err
 	}
@@ -1285,6 +1316,8 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	execution.coverageJSON = append([]byte(nil), coverageJSON...)
 	execution.normalized = true
 	execution.bindings = append([]coveragenormalize.SourceBinding(nil), bindings...)
+	execution.observations = append([]coveragedomain.FunctionObservation(nil), observations...)
+	execution.detailNormalized = detailNormalized
 	execution.mu.Unlock()
 	return nil
 }

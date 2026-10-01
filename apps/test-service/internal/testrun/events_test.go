@@ -30,6 +30,14 @@ func TestNativePathsAreRedactedFromTestOutputEvents(t *testing.T) {
 	}
 }
 
+func TestPosixPathsAreRedactedFromTestOutputEvents(t *testing.T) {
+	input := `CTest command: /home/runner/work/unitTest/unitTest/build/test_math`
+	got := nativePathInOutput.ReplaceAllString(input, "$1[redacted-path]")
+	if got != "CTest command: [redacted-path]" {
+		t.Fatalf("POSIX path leaked from test output: %q", got)
+	}
+}
+
 func TestInterpreterEmitsBoundedOrderedLifecycleEventsAfterResults(
 	t *testing.T,
 ) {

@@ -68,8 +68,10 @@ type Target struct {
 }
 
 type FileAPIReply struct {
-	Targets          []Target
-	ToolchainIDs     []string
+	Targets      []Target
+	ToolchainIDs []string
+	// CompilerPaths is File API identity metadata, never launch authority.
+	CompilerPaths    map[string]string
 	CMakeInputs      []string
 	CMakeInputStates []FingerprintFile
 	Cache            FingerprintFile
@@ -805,6 +807,7 @@ func (reader *fileAPIReader) assemble(
 		return FileAPIReply{}, fmt.Errorf("%w: toolchains exceed %d", ErrFileAPILimit, maxFileAPIToolchains)
 	}
 	toolchainByLanguage := make(map[string]string, len(toolchains.Toolchains))
+	result.CompilerPaths = make(map[string]string, 2)
 	for _, toolchain := range toolchains.Toolchains {
 		if toolchain.Language == "" {
 			return FileAPIReply{}, fmt.Errorf("%w: toolchain language is empty", ErrFileAPIReply)
@@ -860,6 +863,7 @@ func (reader *fileAPIReader) assemble(
 			continue
 		}
 		toolchainByLanguage[toolchain.Language] = identity
+		result.CompilerPaths[toolchain.Language] = compilerPath
 		result.ToolchainIDs = append(result.ToolchainIDs, identity)
 	}
 	result.ToolchainIDs = sortedUniqueStrings(result.ToolchainIDs)

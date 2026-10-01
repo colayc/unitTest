@@ -94,6 +94,39 @@ func NormalizeGCC(input GCCInput) (coveragemodelv1.CoverageDocumentV1, []SourceB
 	return document, append([]SourceBinding(nil), bindings...), nil
 }
 
+// NormalizeGCCWithDetail binds gcovr's relative observation evidence to the
+// verified source snapshot used by the unchanged v1 aggregate normalizer.
+func NormalizeGCCWithDetail(input GCCInput) (coveragemodelv1.CoverageDocumentV1, []SourceBinding, []coveragedomain.FunctionObservation, error) {
+	document, bindings, err := NormalizeGCC(input)
+	if err != nil {
+		return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrInvalidGCC
+	}
+	byURI := make(map[string]SourceBinding, len(bindings))
+	for _, binding := range bindings {
+		byURI[binding.URI] = binding
+	}
+	observations := make([]coveragedomain.FunctionObservation, 0)
+	for _, file := range input.Export.Files {
+		if !input.Matcher.Include(file.RelativePath) {
+			continue
+		}
+		binding, ok := byURI[file.RelativePath]
+		if !ok {
+			return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+		}
+		for _, observation := range file.Observations {
+			if observation.File != file.RelativePath {
+				return coveragemodelv1.CoverageDocumentV1{}, nil, nil, ErrSourceIdentity
+			}
+			observation.File = binding.URI
+			observation.Lines = append([]coveragedomain.LineObservation(nil), observation.Lines...)
+			observation.Branches = append([]coveragedomain.BranchObservation(nil), observation.Branches...)
+			observations = append(observations, observation)
+		}
+	}
+	return document, bindings, observations, nil
+}
+
 func validateGCCExport(value coverageparsergcovr.Export, limits Limits) error {
 	if value.FormatVersion != "0.14" {
 		return ErrInvalidGCC

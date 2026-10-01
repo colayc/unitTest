@@ -497,6 +497,9 @@ func (execution *execution) completionDomainEvents(
 		"coverageRunId": coverage.ID,
 		"outcome":       coverage.Outcome,
 	}
+	if coverage.ReportID != "" {
+		payload["reportId"] = coverage.ReportID
+	}
 	if coverage.Reason != "" {
 		payload["reason"] = coverage.Reason
 	}

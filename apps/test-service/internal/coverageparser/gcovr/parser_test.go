@@ -13,7 +13,110 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
+
+func TestParseGCovrRetainsFunctionAndBranchObservations(t *testing.T) {
+	got, err := Parse(strings.NewReader(validExport("src/simple.c")), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []coveragedomain.FunctionObservation{{
+		QualifiedName: "entry", LinkageName: "entry", File: "src/simple.c",
+		Start: coveragedomain.SourceLocation{Line: 1}, ExecutionCount: 2,
+		Lines:    []coveragedomain.LineObservation{{Line: 1, Count: 2}},
+		Branches: []coveragedomain.BranchObservation{{Line: 1, Ordinal: 0, HasOrdinal: true, Count: 1}, {Line: 1, Ordinal: 1, HasOrdinal: true}},
+	}}
+	if !reflect.DeepEqual(got.Files[0].Observations, want) {
+		t.Fatalf("observations = %#v, want %#v", got.Files[0].Observations, want)
+	}
+}
+
+func TestParseGCovrDetailFixtureKeepsOverloadsAndAmbiguousInstancesSeparate(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/detail-observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := got.Files[0]
+	if file.Functions != (Metric{Covered: 2, Total: 5}) || len(file.Observations) != 5 {
+		t.Fatalf("function aggregate/observations = %#v", file)
+	}
+	first, second := file.Observations[0], file.Observations[1]
+	if first.QualifiedName != "ns::over(int)" || first.LinkageName != "_ZN2ns4overEi" || !first.HasExactRange() ||
+		second.QualifiedName != "ns::over(double)" || second.LinkageName != "_ZN2ns4overEd" || second.ExecutionCount != 0 {
+		t.Fatalf("overloads lost identity/range: %#v, %#v", first, second)
+	}
+	if !reflect.DeepEqual(first.Branches, []coveragedomain.BranchObservation{{Line: 3, Ordinal: 0, HasOrdinal: true, Count: 2}, {Line: 3, Ordinal: 1, HasOrdinal: true}}) {
+		t.Fatalf("partial branches = %#v", first.Branches)
+	}
+	if file.Observations[2].InstantiationOrdinal != 0 || file.Observations[3].InstantiationOrdinal != 1 ||
+		len(file.Observations[2].Lines) != 0 || len(file.Observations[3].Lines) != 0 {
+		t.Fatalf("ambiguous inline instances were conflated: %#v", file.Observations[2:4])
+	}
+	if file.Observations[2].IncompleteReason != coveragedomain.ObservationIncompleteAttributionAmbiguous ||
+		file.Observations[3].IncompleteReason != coveragedomain.ObservationIncompleteAttributionAmbiguous ||
+		file.Observations[4].IncompleteReason != "" {
+		t.Fatalf("ambiguous lines indistinguishable from empty function: %#v", file.Observations[2:5])
+	}
+	if !file.Observations[4].HasExactRange() || len(file.Observations[4].Lines) != 0 {
+		t.Fatalf("empty function was fabricated: %#v", file.Observations[4])
+	}
+}
+
+func TestParseGCovrRejectsMalformedAndUnsafeFunctionPositions(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/detail-observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, replacement := range map[string]string{
+		"reversed":        `["4:1","3:2"]`,
+		"overflow":        `["3:9007199254740992","4:1"]`,
+		"unbounded tuple": `["3:2","4:1","5:1"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := bytes.Replace(encoded, []byte(`["3:2","4:1"]`), []byte(replacement), 1)
+			got, err := Parse(bytes.NewReader(bad), DefaultLimits())
+			if err == nil || !reflect.DeepEqual(got, Export{}) {
+				t.Fatalf("Parse() = %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestParseGCovrDoesNotInventMissingRangeOrBranchOrdinal(t *testing.T) {
+	encoded := strings.Replace(schemaVariantExport(), `{"line_number":3,"count":4`, `{"line_number":3,"function_name":"entry","count":4`, 1)
+	got, err := Parse(strings.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := got.Files[0].Observations[0]
+	if value.HasExactRange() || value.End != (coveragedomain.SourceLocation{}) || value.Start.Column != 0 {
+		t.Fatalf("missing range inferred: %#v", value)
+	}
+	if len(value.Branches) != 2 || value.Branches[1].Line != 3 || value.Branches[1].HasOrdinal || value.Branches[1].Ordinal != 0 {
+		t.Fatalf("missing branch ordinal inferred: %#v", value.Branches)
+	}
+}
+
+func TestParseGCovrKeepsExplicitPositionWhenDeclarationLineDiffers(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/detail-observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = bytes.Replace(encoded, []byte(`"lineno":3,"pos":["3:2","4:1"]`), []byte(`"lineno":2,"pos":["3:2","4:1"]`), 1)
+	got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Files[0].Observations[0].Start != (coveragedomain.SourceLocation{Line: 3, Column: 2}) {
+		t.Fatalf("explicit position lost: %#v", got.Files[0].Observations[0])
+	}
+}
 
 func TestParseGCovrExportAcrossChunks(t *testing.T) {
 	encoded := validExport("src/simple.c")
@@ -26,6 +129,7 @@ func TestParseGCovrExportAcrossChunks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("chunk %d: Parse() error = %v", chunk, err)
 		}
+		got.Files[0].Observations = nil // aggregate compatibility assertion
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("chunk %d: Parse() = %#v, want %#v", chunk, got, want)
 		}

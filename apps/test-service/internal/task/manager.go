@@ -24,7 +24,7 @@ const (
 	maxPersistedOutput      = 4 * 1024 * 1024
 )
 
-var nativePathInTaskOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?[a-z]:[\\/][^\s"'<>]+`)
+var nativePathInTaskOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?(?:[a-z]:[\\/][^\s"'<>]+|/[^\s/"'<>][^\s"'<>]*)`)
 
 type ManagerConfig struct {
 	Store               Store

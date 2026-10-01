@@ -45,7 +45,7 @@ func BuildCollectorInvocation(
 			return task.ProcessSpec{}, task.ProcessSpec{}, ErrInvalidProfiles
 		}
 		seenProfiles[key] = struct{}{}
-		profiles[index] = entry.Path
+		profiles[index] = filepath.Base(entry.Path)
 	}
 	sort.Slice(profiles, func(left, right int) bool {
 		return profilePathKey(profiles[left]) < profilePathKey(profiles[right])
@@ -68,10 +68,9 @@ func BuildCollectorInvocation(
 		seenBinaries[key] = struct{}{}
 		paths[index] = path
 	}
-	primary := paths[0]
-	additional := append([]string(nil), paths[1:]...)
+	additional := append([]coveragerun.TrustedPath(nil), binaries[1:]...)
 	sort.Slice(additional, func(left, right int) bool {
-		return profilePathKey(additional[left]) < profilePathKey(additional[right])
+		return profilePathKey(additional[left].Path()) < profilePathKey(additional[right].Path())
 	})
 	unset, err := sanitizedProfileUnset(
 		nil,
@@ -81,36 +80,25 @@ func BuildCollectorInvocation(
 	if err != nil {
 		return task.ProcessSpec{}, task.ProcessSpec{}, err
 	}
-	mergeArgs := append([]string{"merge", "-sparse"}, profiles...)
-	mergeArgs = append(mergeArgs, "-o", merged)
-	exportArgs := []string{
-		"export", "-format=text", "-instr-profile=" + merged, primary,
-	}
-	for _, path := range additional {
-		exportArgs = append(exportArgs, "-object", path)
-	}
-	if len(mergeArgs) > 256 || len(exportArgs) > 256 {
-		return task.ProcessSpec{}, task.ProcessSpec{}, ErrInvalidProfiles
-	}
-	profdata := toolset.Profdata()
-	cov := toolset.Cov()
-	if err := profdata.Verify(); err != nil {
-		return task.ProcessSpec{}, task.ProcessSpec{}, err
-	}
-	if err := cov.Verify(); err != nil {
-		return task.ProcessSpec{}, task.ProcessSpec{}, err
+	invocation, err := coveragerun.BuildLLVMInvocation(coveragerun.LLVMInputs{
+		Profdata: toolset.Profdata(), Cov: toolset.Cov(), Binary: binaries[0],
+		AdditionalBinaries: additional, ProfileDirectory: manifestDirectory{manifest},
+		ProfileFiles: profiles, MergedProfile: mergedProfileFileName,
+	})
+	if err != nil || len(invocation.Merge.Args) > 256 || len(invocation.Export.Args) > 256 {
+		return task.ProcessSpec{}, task.ProcessSpec{}, errors.Join(ErrInvalidProfiles, err)
 	}
 	merge = task.ProcessSpec{
-		Executable: profdata.Path(),
-		Args:       mergeArgs,
+		Executable: invocation.Merge.Executable,
+		Args:       invocation.Merge.Args,
 		EnvUnset:   append([]string(nil), unset...),
-		Dir:        root,
+		Dir:        invocation.Merge.Dir,
 	}
 	export = task.ProcessSpec{
-		Executable: cov.Path(),
-		Args:       exportArgs,
+		Executable: invocation.Export.Executable,
+		Args:       invocation.Export.Args,
 		EnvUnset:   append([]string(nil), unset...),
-		Dir:        root,
+		Dir:        invocation.Export.Dir,
 	}
 	if err := toolset.Verify(); err != nil {
 		return task.ProcessSpec{}, task.ProcessSpec{}, err
@@ -129,6 +117,17 @@ func BuildCollectorInvocation(
 	}
 	return merge, export, nil
 }
+
+type manifestDirectory struct{ manifest Manifest }
+
+func (directory manifestDirectory) Path() string {
+	if directory.manifest.state == nil {
+		return ""
+	}
+	return directory.manifest.state.root
+}
+
+func (directory manifestDirectory) Verify() error { return directory.manifest.Verify() }
 
 func verifiedCollectorPath(value coveragerun.TrustedPath) (string, error) {
 	if nilCollectorPath(value) {

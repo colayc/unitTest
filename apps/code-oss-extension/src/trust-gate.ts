@@ -15,6 +15,11 @@ export function canStartService(state: TrustState): state is "trusted" {
   return state === "trusted";
 }
 
+/** Generation has an additional service capability gate; trust alone is not enough. */
+export function canUseTestGeneration(state: TrustState, capabilities: { testGeneration?: boolean } | undefined): boolean {
+  return state === "trusted" && capabilities?.testGeneration === true;
+}
+
 export class TrustGate {
   private state: TrustState | undefined;
   private readonly listeners = new Set<(state: TrustState) => void>();

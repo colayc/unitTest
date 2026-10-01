@@ -1,8 +1,22 @@
+import { createHash } from "node:crypto";
 import type {
   ArtifactMetadata,
   ArtifactMetadataV12,
   ArtifactMetadataV13,
   ArtifactMetadataV14,
+  ArtifactMetadataV15,
+  CapabilitiesV15,
+  CapabilitiesV16,
+  CoverageProjectV16,
+  CoverageFilePageV16,
+  CoverageFunctionPageV16,
+  CoverageLinePageV16,
+  CoverageSummaryV16,
+  CoverageDetailReasonV16,
+  CoverageDetailStatusV16,
+  ManagedTestRecordPageV16,
+  ManagedReviewV16,
+  ManagedReviewApplyResultV16,
   CoverageCompletenessV14,
   CoverageIncompleteReasonV14,
   CoverageMetricV14,
@@ -16,10 +30,13 @@ import type {
   TaskEventV12,
   TaskEventV13,
   TaskEventV14,
+  TaskEventV15,
+  TaskEventV16,
   TaskSnapshot,
   TaskSnapshotV12,
   TaskSnapshotV13,
   TaskSnapshotV14,
+  TaskSnapshotV15,
   TestCatalog,
   TestCatalogV14,
   TestItemResult,
@@ -29,8 +46,37 @@ import type {
   TestRunSummaryV13,
   TestRunV14,
   TestSourceLocationV13,
+  TestGenerationTargetListV15,
+  TestGenerationRunV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationEventPageV15,
+  TestGenerationCoverageV15,
   WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
+import {
+  FrameworkAdapterIDV15,
+  ArtifactKindV15,
+  ArtifactMIMETypeV15,
+  EventProtocolVersionV15,
+  EventKindV15,
+  TaskEventNameV15,
+  TaskKindV15,
+  TaskStatusV15,
+  TaskOutcomeV15,
+  SimulationScenarioV15,
+  TestGenerationCandidateKindV15,
+  TestGenerationStateV15,
+  TestGenerationAssertionKindV15,
+  TestGenerationDiagnosticSeverityV15,
+  TestGenerationDiagnosticCodeV15,
+  TestGenerationDiagnosticReasonV15,
+  TestGenerationEditOperationV15,
+  TestGenerationTargetFrameworkV15,
+  TestGenerationTargetKindV15
+} from "@unit-test-ide/protocol-models";
+import { CoverageDetailReasonV16 as DetailReasonV16, CoverageDetailStatusV16 as DetailStatusV16,
+  FrameworkAdapterIDV16,
+  ManagedTestStatusV16 } from "@unit-test-ide/protocol-models";
 import type { ProtocolTaskEvent } from "./envelopes.js";
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -62,6 +108,434 @@ function iteration(value: unknown, name: string): number {
   const result = safeInteger(value, name);
   if (result < 1 || result > 100) throw new Error(`${name} must be between 1 and 100`);
   return result;
+}
+
+function wireString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new Error(`invalid ${name}`);
+  return value;
+}
+
+function wireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`invalid ${name}`);
+  return value;
+}
+
+function wireEnum<T extends string>(value: unknown, values: readonly T[], name: string): T {
+  const found = values.find((item) => item === value);
+  if (found === undefined) throw new Error(`invalid ${name}`);
+  return found;
+}
+
+function wireArray(value: unknown, name: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+export function decodeCapabilitiesV15(value: unknown): CapabilitiesV15 {
+  const wire = record(value, "protocol 1.5 capabilities");
+  return {
+    workspaceInspect: wireBoolean(wire.workspaceInspect, "workspaceInspect"),
+    targetList: wireBoolean(wire.targetList, "targetList"),
+    cmakeBuild: wireBoolean(wire.cmakeBuild, "cmakeBuild"),
+    testDiscovery: wireBoolean(wire.testDiscovery, "testDiscovery"),
+    testRun: wireBoolean(wire.testRun, "testRun"),
+    frameworkAdapters: wireArray(wire.frameworkAdapters, "frameworkAdapters").map((entry) => {
+      const adapter = record(entry, "framework adapter");
+      return {
+        id: wireEnum(adapter.id, Object.values(FrameworkAdapterIDV15), "framework adapter id"),
+        contractVersion: wireString(adapter.contractVersion, "contract version"),
+        displayName: wireString(adapter.displayName, "display name"),
+        canDiscoverCases: wireBoolean(adapter.canDiscoverCases, "canDiscoverCases"),
+        canRunCase: wireBoolean(adapter.canRunCase, "canRunCase"),
+        canReportSkipped: wireBoolean(adapter.canReportSkipped, "canReportSkipped"),
+        canReportSourceLocation: wireBoolean(adapter.canReportSourceLocation, "canReportSourceLocation"),
+        canReportMockDetails: wireBoolean(adapter.canReportMockDetails, "canReportMockDetails")
+      };
+    }),
+    opaqueCTestFallback: wireBoolean(wire.opaqueCTestFallback, "opaqueCTestFallback"),
+    ctestJson: wireBoolean(wire.ctestJson, "ctestJson"),
+    maxRepeatCount: safeInteger(wire.maxRepeatCount, "maxRepeatCount"),
+    maxSelectionSize: safeInteger(wire.maxSelectionSize, "maxSelectionSize"),
+    maxCatalogPageSize: safeInteger(wire.maxCatalogPageSize, "maxCatalogPageSize"),
+    unityHelperContractVersion: wireString(wire.unityHelperContractVersion, "unityHelperContractVersion"),
+    unityRunnerContractVersion: wireString(wire.unityRunnerContractVersion, "unityRunnerContractVersion"),
+    coverageRun: wireBoolean(wire.coverageRun, "coverageRun"),
+    coverageReport: wireBoolean(wire.coverageReport, "coverageReport"),
+    maxCoveragePageSize: safeInteger(wire.maxCoveragePageSize, "maxCoveragePageSize"),
+    maxCoverageTimeoutMs: safeInteger(wire.maxCoverageTimeoutMs, "maxCoverageTimeoutMs"),
+    testGeneration: wireBoolean(wire.testGeneration, "testGeneration"),
+    maxTestGenerationCandidates: safeInteger(wire.maxTestGenerationCandidates, "maxTestGenerationCandidates")
+  };
+}
+
+export function decodeCapabilitiesV16(value: unknown): CapabilitiesV16 {
+  const wire = record(value, "protocol 1.6 capabilities");
+  const previous = decodeCapabilitiesV15(wire);
+  return {
+    ...previous,
+    frameworkAdapters: previous.frameworkAdapters.map((adapter) => ({
+      ...adapter,
+      id: wireEnum(adapter.id, Object.values(FrameworkAdapterIDV16), "framework adapter id")
+    })),
+    coverageDetails: wireBoolean(wire.coverageDetails, "coverageDetails"),
+    managedTests: wireBoolean(wire.managedTests, "managedTests"),
+    maxCoverageDetailPageSize: safeInteger(wire.maxCoverageDetailPageSize, "maxCoverageDetailPageSize"),
+    maxCoverageLinePageSize: safeInteger(wire.maxCoverageLinePageSize, "maxCoverageLinePageSize"),
+    maxManagedTestPageSize: safeInteger(wire.maxManagedTestPageSize, "maxManagedTestPageSize")
+  };
+}
+
+function detailReasons(value: unknown): CoverageDetailReasonV16[] {
+  const reasons = wireArray(value, "detail reasons").map((entry) =>
+    wireEnum(entry, Object.values(DetailReasonV16), "detail reason"));
+  if (new Set(reasons).size !== reasons.length) throw new Error("duplicate detail reason");
+  return reasons;
+}
+
+function detailStatus(value: unknown, reasons: CoverageDetailReasonV16[]): CoverageDetailStatusV16 {
+  const status = wireEnum(value, Object.values(DetailStatusV16), "detail status");
+  if ((status === "current") !== (reasons.length === 0)) throw new Error("detail status and reasons are inconsistent");
+  return status;
+}
+
+function detailMetric(value: unknown, name: string): CoverageSummaryV16["lines"] {
+  const wire = record(value, name);
+  const covered = safeInteger(wire.covered, `${name} covered`);
+  const total = safeInteger(wire.total, `${name} total`);
+  const coveredDelta = safeInteger(wire.coveredDelta, `${name} coveredDelta`);
+  if (covered < 0 || total < 0 || covered > total) throw new Error(`${name} covered exceeds total`);
+  return { covered, total, coveredDelta };
+}
+
+function detailSummary(value: unknown): CoverageSummaryV16 {
+  const wire = record(value, "detail summary");
+  return {
+    lines: detailMetric(wire.lines, "detail lines"),
+    branches: detailMetric(wire.branches, "detail branches"),
+    functions: detailMetric(wire.functions, "detail functions")
+  };
+}
+
+function uniqueItems<T>(items: T[], key: (item: T) => string, name: string): T[] {
+  if (new Set(items.map(key)).size !== items.length) throw new Error(`duplicate ${name}`);
+  return items;
+}
+
+export function decodeCoverageProjectV16(value: unknown): CoverageProjectV16 {
+  const wire = record(value, "coverage detail project");
+  const reasons = detailReasons(wire.reasons);
+  return {
+    workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"),
+    projectId: wireString(wire.projectId, "project id"),
+    status: detailStatus(wire.status, reasons), reasons,
+    summary: detailSummary(wire.summary), fileCount: safeInteger(wire.fileCount, "file count")
+  };
+}
+
+export function decodeCoverageFilePageV16(value: unknown): CoverageFilePageV16 {
+  const wire = record(value, "coverage detail file page");
+  const items = uniqueItems(wireArray(wire.items, "coverage detail files").map((entry) => {
+    const file = record(entry, "coverage detail file");
+    const reasons = detailReasons(file.reasons);
+    return {
+      fileId: wireString(file.fileId, "file id"), relativePath: wireString(file.relativePath, "relative path"),
+      sourceSha256: wireString(file.sourceSha256, "source digest"), status: detailStatus(file.status, reasons),
+      reasons, summary: detailSummary(file.summary), functionCount: safeInteger(file.functionCount, "function count")
+    };
+  }), (file) => file.fileId, "coverage file id");
+  return { workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"), items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "file cursor") }) };
+}
+
+export function decodeCoverageFunctionPageV16(value: unknown): CoverageFunctionPageV16 {
+  const wire = record(value, "coverage detail function page");
+  const items = uniqueItems(wireArray(wire.items, "coverage detail functions").map((entry) => {
+    const fn = record(entry, "coverage detail function");
+    const reasons = detailReasons(fn.reasons);
+    const startLine = safeInteger(fn.startLine, "function start line");
+    const endLine = safeInteger(fn.endLine, "function end line");
+    if (endLine < startLine) throw new Error("function end line precedes start line");
+    return {
+      functionId: wireString(fn.functionId, "function id"), fileId: wireString(fn.fileId, "file id"),
+      ...(fn.coverageGapId === undefined ? {} : { coverageGapId: wireString(fn.coverageGapId, "coverage gap id") }),
+      qualifiedName: wireString(fn.qualifiedName, "qualified name"), startLine, endLine,
+      status: detailStatus(fn.status, reasons), reasons, summary: detailSummary(fn.summary)
+    };
+  }), (fn) => fn.functionId, "coverage function id");
+  return { workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"), items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "function cursor") }) };
+}
+
+export function decodeCoverageLinePageV16(value: unknown): CoverageLinePageV16 {
+  const wire = record(value, "coverage detail line page");
+  const items = uniqueItems(wireArray(wire.items, "coverage detail lines").map((entry) => {
+    const line = record(entry, "coverage detail line");
+    const branchesCovered = safeInteger(line.branchesCovered, "line branches covered");
+    const branchesTotal = safeInteger(line.branchesTotal, "line branches total");
+    const baselineBranchesCovered = safeInteger(line.baselineBranchesCovered, "baseline branches covered");
+    const baselineBranchesTotal = safeInteger(line.baselineBranchesTotal, "baseline branches total");
+    if (branchesCovered > branchesTotal || baselineBranchesCovered > baselineBranchesTotal) {
+      throw new Error("line branches covered exceeds total");
+    }
+    return {
+      line: safeInteger(line.line, "line number"), count: safeInteger(line.count, "line count"),
+      baselineCount: safeInteger(line.baselineCount, "baseline line count"),
+      branchesCovered, branchesTotal, baselineBranchesCovered, baselineBranchesTotal,
+      ...(line.coverageGapId === undefined ? {} : { coverageGapId: wireString(line.coverageGapId, "coverage gap id") })
+    };
+  }), (line) => String(line.line), "coverage line number");
+  return { workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"), items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "line cursor") }) };
+}
+
+export function decodeManagedTestRecordPageV16(value: unknown): ManagedTestRecordPageV16 {
+  const wire = record(value, "managed test record page");
+  const items = uniqueItems(wireArray(wire.items, "managed test records").map((entry) => {
+    const item = record(entry, "managed test record");
+    return {
+      caseId: wireString(item.caseId, "case id"), fileId: wireString(item.fileId, "file id"),
+      functionId: wireString(item.functionId, "function id"),
+      status: wireEnum(item.status, Object.values(ManagedTestStatusV16), "managed test status"),
+      acceptedDigest: wireString(item.acceptedDigest, "accepted digest"),
+      currentDigest: wireString(item.currentDigest, "current digest"),
+      ...(item.generatedDigest === undefined ? {} : { generatedDigest: wireString(item.generatedDigest, "generated digest") }),
+      ...(item.reviewId === undefined ? {} : { reviewId: wireString(item.reviewId, "review id") })
+    };
+  }), (item) => item.caseId, "managed case id");
+  return { workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"), items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "managed cursor") }) };
+}
+
+export function decodeManagedReviewV16(value: unknown): ManagedReviewV16 {
+  const wire = record(value, "managed review");
+  const cases = uniqueItems(wireArray(wire.cases, "managed review cases").map((entry) => {
+    const item = record(entry, "managed review case");
+    return {
+      caseId: wireString(item.caseId, "case id"),
+      status: wireEnum(item.status, Object.values(ManagedTestStatusV16), "managed test status"),
+      acceptedDigest: wireString(item.acceptedDigest, "accepted digest"),
+      currentDigest: wireString(item.currentDigest, "current digest"),
+      generatedDigest: wireString(item.generatedDigest, "generated digest"),
+      ...(item.diff === undefined ? {} : { diff: wireString(item.diff, "review diff") })
+    };
+  }), (item) => item.caseId, "managed review case id");
+  return {
+    reviewId: wireString(wire.reviewId, "review id"), reviewDigest: wireString(wire.reviewDigest, "review digest"),
+    workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    coverageReportId: wireString(wire.coverageReportId, "coverage report id"), cases,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "review cursor") })
+  };
+}
+
+export function decodeManagedReviewApplyResultV16(value: unknown): ManagedReviewApplyResultV16 {
+  const wire = record(value, "managed review apply result");
+  return { reviewId: wireString(wire.reviewId, "review id"),
+    reviewDigest: wireString(wire.reviewDigest, "review digest"),
+    applied: wireBoolean(wire.applied, "review applied") };
+}
+
+export function decodeArtifactMetadataV15(value: unknown): ArtifactMetadataV15 {
+  const wire = record(value, "protocol 1.5 artifact metadata");
+  return {
+    artifactId: wireString(wire.artifactId, "artifact id"),
+    taskId: wireString(wire.taskId, "artifact task id"),
+    kind: wireEnum(wire.kind, Object.values(ArtifactKindV15), "artifact kind"),
+    mimeType: wireEnum(wire.mimeType, Object.values(ArtifactMIMETypeV15), "artifact mime type"),
+    sizeBytes: safeInteger(wire.sizeBytes, "artifact sizeBytes"),
+    sha256: wireString(wire.sha256, "artifact sha256"),
+    createdAt: date(wire.createdAt, "artifact createdAt"),
+    uri: wireString(wire.uri, "artifact uri")
+  };
+}
+
+export function decodeTaskSnapshotV15(value: unknown): TaskSnapshotV15 {
+  const wire = record(value, "protocol 1.5 task snapshot");
+  const common = {
+    taskId: wireString(wire.taskId, "task id"),
+    status: wireEnum(wire.status, Object.values(TaskStatusV15), "task status"),
+    createdAt: date(wire.createdAt, "task createdAt"),
+    lastSequence: safeInteger(wire.lastSequence, "task lastSequence"),
+    ...(wire.outcome === undefined ? {} : { outcome: wireEnum(wire.outcome, Object.values(TaskOutcomeV15), "task outcome") }),
+    ...(wire.startedAt === undefined ? {} : { startedAt: date(wire.startedAt, "task startedAt") }),
+    ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "task finishedAt") }),
+    ...(wire.errorCode === undefined ? {} : { errorCode: wireString(wire.errorCode, "task errorCode") }),
+    ...(wire.errorMessage === undefined ? {} : { errorMessage: wireString(wire.errorMessage, "task errorMessage") })
+  };
+  switch (wire.kind) {
+    case "testGeneration":
+      return {
+        ...common, kind: TaskKindV15.TestGeneration,
+        runId: wireString(wire.runId, "generation run id"),
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id")
+      };
+    case "cmakeBuild":
+      return {
+        ...common, kind: TaskKindV15.CmakeBuild,
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id"),
+        buildProfileId: wireString(wire.buildProfileId, "build profile id"),
+        targetIds: wireArray(wire.targetIds, "target ids").map((id) => wireString(id, "target id")),
+        jobs: safeInteger(wire.jobs, "jobs"),
+        timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs")
+      };
+    case "simulation":
+      return {
+        ...common, kind: TaskKindV15.Simulation,
+        scenario: wireEnum(wire.scenario, Object.values(SimulationScenarioV15), "scenario"),
+        ...(wire.timeoutMs === undefined ? {} : { timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs") })
+      };
+    case "testDiscovery":
+      return {
+        ...common, kind: TaskKindV15.TestDiscovery,
+        projectId: wireString(wire.projectId, "project id"),
+        profileId: wireString(wire.profileId, "profile id"),
+        ...(wire.catalogRevision === undefined ? {} : { catalogRevision: wireString(wire.catalogRevision, "catalog revision") })
+      };
+    case "testRun":
+      return {
+        ...common, kind: TaskKindV15.TestRun,
+        projectId: wireString(wire.projectId, "project id"),
+        profileId: wireString(wire.profileId, "profile id"),
+        catalogRevision: wireString(wire.catalogRevision, "catalog revision"),
+        runId: wireString(wire.runId, "run id"),
+        repeatCount: safeInteger(wire.repeatCount, "repeat count")
+      };
+    case "coverageRun":
+      return {
+        ...common, kind: TaskKindV15.CoverageRun,
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id"),
+        coverageProfileId: wireString(wire.coverageProfileId, "coverage profile id"),
+        catalogRevision: wireString(wire.catalogRevision, "catalog revision"),
+        coverageRunId: wireString(wire.coverageRunId, "coverage run id"),
+        testRunId: wireString(wire.testRunId, "test run id"),
+        repeatCount: safeInteger(wire.repeatCount, "repeat count"),
+        timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs")
+      };
+    default:
+      throw new Error("invalid protocol 1.5 task kind");
+  }
+}
+
+function decodeGenerationCoverage(value: unknown): TestGenerationCoverageV15 {
+  const wire = record(value, "test generation coverage");
+  return {
+    functionPercent: wireNumber(wire.functionPercent, "function percentage"),
+    linePercent: wireNumber(wire.linePercent, "line percentage"),
+    branchPercent: wireNumber(wire.branchPercent, "branch percentage")
+  };
+}
+
+function wireNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+export function decodeTestGenerationTargetList(value: unknown): TestGenerationTargetListV15 {
+  const wire = record(value, "test generation target list");
+  const items = wireArray(wire.items, "test generation targets").map((entry) => {
+    const target = record(entry, "test generation target");
+    return {
+      kind: wireEnum(target.kind, Object.values(TestGenerationTargetKindV15), "target kind"),
+      targetId: wireString(target.targetId, "target id"),
+      frameworks: wireArray(target.frameworks, "target frameworks").map((framework) =>
+        wireEnum(framework, Object.values(TestGenerationTargetFrameworkV15), "target framework"))
+    };
+  });
+  return {
+    items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "target cursor") })
+  };
+}
+
+export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
+  const wire = record(value, "test generation run");
+  const preview = wire.preview === undefined ? undefined : record(wire.preview, "generation preview");
+  const previewDiff = preview?.diff === undefined ? undefined : wireString(preview.diff, "generation preview diff");
+  if (previewDiff !== undefined && createHash("sha256").update(previewDiff, "utf8").digest("hex") !== preview?.diffDigest) {
+    throw new Error("invalid generation preview diff digest");
+  }
+  return {
+    runId: wireString(wire.runId, "generation run id"),
+    taskId: wireString(wire.taskId, "generation task id"),
+    workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    projectId: wireString(wire.projectId, "generation project id"),
+    state: wireEnum(wire.state, Object.values(TestGenerationStateV15), "generation state"),
+    createdAt: date(wire.createdAt, "generation createdAt"),
+    lastSequence: safeInteger(wire.lastSequence, "generation lastSequence"),
+    ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "generation finishedAt") }),
+    ...(wire.candidateCount === undefined ? {} : { candidateCount: safeInteger(wire.candidateCount, "generation candidateCount") }),
+    ...(preview === undefined ? {} : { preview: {
+      candidateSetDigest: wireString(preview.candidateSetDigest, "candidate set digest"),
+      diffDigest: wireString(preview.diffDigest, "preview diff digest"),
+      confirmationDigest: wireString(preview.confirmationDigest, "preview confirmation digest"),
+      ...(previewDiff === undefined ? {} : { diff: previewDiff }),
+      ...(preview.characterizationDigest === undefined ? {} : { characterizationDigest: wireString(preview.characterizationDigest, "characterization digest") })
+    } })
+  };
+}
+
+export function decodeTestGenerationEventPage(value: unknown): TestGenerationEventPageV15 {
+  const wire = record(value, "test generation event page");
+  return {
+    items: wireArray(wire.items, "test generation events").map((entry) => {
+      const event = record(entry, "test generation progress event");
+      return {
+        sequence: safeInteger(event.sequence, "generation event sequence"),
+        state: wireEnum(event.state, Object.values(TestGenerationStateV15), "generation event state"),
+        occurredAt: date(event.occurredAt, "generation event occurredAt")
+      };
+    }),
+    nextAfterSequence: safeInteger(wire.nextAfterSequence, "generation event nextAfterSequence")
+  };
+}
+
+export function decodeTestGenerationCandidatePage(value: unknown): TestGenerationCandidatePageV15 {
+  const wire = record(value, "test generation candidate page");
+  const items = wireArray(wire.items, "generation candidates").map((entry) => {
+    const candidate = record(entry, "generation candidate");
+    const provenance = record(candidate.assertionProvenance, "assertion provenance");
+    return {
+      candidateId: wireString(candidate.candidateId, "candidate id"),
+      kind: wireEnum(candidate.kind, Object.values(TestGenerationCandidateKindV15), "candidate kind"),
+      codeDigest: wireString(candidate.codeDigest, "code digest"),
+      artifactDigest: wireString(candidate.artifactDigest, "artifact digest"),
+      assertionProvenance: {
+        kind: wireEnum(provenance.kind, Object.values(TestGenerationAssertionKindV15), "assertion provenance kind"),
+        evidenceDigest: wireString(provenance.evidenceDigest, "evidence digest")
+      },
+      baselineCoverage: decodeGenerationCoverage(candidate.baselineCoverage),
+      deltaCoverage: decodeGenerationCoverage(candidate.deltaCoverage),
+      plannedEdits: wireArray(candidate.plannedEdits, "planned edits").map((entry) => {
+        const edit = record(entry, "planned edit");
+        return {
+          path: wireString(edit.path, "planned edit path"),
+          operation: wireEnum(edit.operation, Object.values(TestGenerationEditOperationV15), "planned edit operation"),
+          afterDigest: wireString(edit.afterDigest, "planned edit digest"),
+          ...(edit.beforeDigest === undefined ? {} : { beforeDigest: wireString(edit.beforeDigest, "prior digest") })
+        };
+      }),
+      diagnostics: wireArray(candidate.diagnostics, "generation diagnostics").map((entry) => {
+        const diagnostic = record(entry, "generation diagnostic");
+        return {
+          code: wireEnum(diagnostic.code, Object.values(TestGenerationDiagnosticCodeV15), "diagnostic code"),
+          severity: wireEnum(diagnostic.severity, Object.values(TestGenerationDiagnosticSeverityV15), "diagnostic severity"),
+          ...(diagnostic.reason === undefined ? {} : { reason: wireEnum(diagnostic.reason, Object.values(TestGenerationDiagnosticReasonV15), "diagnostic reason") })
+        };
+      }),
+      characterizationConfirmed: wireBoolean(candidate.characterizationConfirmed, "characterization confirmation")
+    };
+  });
+  return {
+    items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "candidate cursor") })
+  };
 }
 
 function decodeCoverageMetric(value: unknown, name: string): CoverageMetricV14 {
@@ -288,6 +762,11 @@ export function decodeTaskSnapshotV14(value: unknown): TaskSnapshotV14 {
 
 export function decodeTaskEvent(value: unknown): ProtocolTaskEvent {
   const wire = record(value, "task event");
+  if (wire.protocolVersion === "1.6") {
+    const decoded = decodeTaskEventV15({ ...wire, protocolVersion: "1.5" });
+    return { ...decoded, protocolVersion: "1.6" } as unknown as TaskEventV16;
+  }
+  if (wire.protocolVersion === "1.5") return decodeTaskEventV15(wire);
   if (wire.protocolVersion === "1.4") return decodeTaskEventV14(wire);
   if (wire.protocolVersion === "1.3") return decodeTaskEventV13(wire);
   if (wire.protocolVersion === "1.2") return decodeTaskEventV12(wire);
@@ -302,6 +781,59 @@ export function decodeTaskEvent(value: unknown): ProtocolTaskEvent {
     payloadVersion: safeInteger(wire.payloadVersion, "event payloadVersion"),
     payload: record(wire.payload, "event payload")
   };
+}
+
+function decodeTaskEventV15(wire: Record<string, unknown>): TaskEventV15 {
+  const event = wireEnum(wire.event, Object.values(TaskEventNameV15), "protocol 1.5 event");
+  let payload: Record<string, unknown>;
+  if (event === TaskEventNameV15.TestGenerationStateChanged) {
+    const state = record(wire.payload, "generation state transition");
+    const from = wireEnum(state.from, Object.values(TestGenerationStateV15), "previous generation state");
+    const to = wireEnum(state.to, Object.values(TestGenerationStateV15), "next generation state");
+    const transitions: Record<string, readonly string[]> = {
+      queued: ["baseline", "cancelled", "failed"],
+      baseline: ["analyzing", "cancelled", "failed"],
+      analyzing: ["solving", "cancelled", "failed"],
+      solving: ["rendering", "cancelled", "failed"],
+      rendering: ["validating", "cancelled", "failed"],
+      validating: ["minimizing", "rejected", "cancelled", "failed"],
+      minimizing: ["awaiting_confirmation", "rejected", "cancelled", "failed"],
+      awaiting_confirmation: ["accepted", "rejected", "cancelled", "failed"],
+      accepted: [], rejected: [], cancelled: [], failed: []
+    };
+    if (!transitions[from]?.includes(to)) throw new Error("invalid test generation state transition");
+    payload = { runId: wireString(state.runId, "generation run id"), from, to };
+  } else {
+    const legacy = decodeTaskEventV14({ ...wire, protocolVersion: "1.4" });
+    payload = record(legacy.payload, "protocol 1.5 event payload");
+  }
+  const decoded = {
+    protocolVersion: EventProtocolVersionV15.The15,
+    kind: EventKindV15.Event,
+    messageId: wireString(wire.messageId, "event message id"),
+    sentAt: date(wire.sentAt, "event sentAt"),
+    sequence: safeInteger(wire.sequence, "event sequence"),
+    event,
+    taskId: wireString(wire.taskId, "event task id"),
+    payloadVersion: safeInteger(wire.payloadVersion, "event payload version"),
+    payload
+  };
+  if (!isDecodedTaskEventV15(decoded)) throw new Error("invalid protocol 1.5 event");
+  return decoded;
+}
+
+function isDecodedTaskEventV15(value: unknown): value is TaskEventV15 {
+  const wire = record(value, "decoded protocol 1.5 event");
+  if (wire.protocolVersion !== EventProtocolVersionV15.The15 ||
+      wire.kind !== EventKindV15.Event ||
+      !Object.values(TaskEventNameV15).includes(wire.event as TaskEventNameV15)) return false;
+  const payload = record(wire.payload, "decoded protocol 1.5 payload");
+  if (wire.event === TaskEventNameV15.TestGenerationStateChanged) {
+    return typeof payload.runId === "string" &&
+      Object.values(TestGenerationStateV15).includes(payload.from as TestGenerationStateV15) &&
+      Object.values(TestGenerationStateV15).includes(payload.to as TestGenerationStateV15);
+  }
+  return true;
 }
 
 function decodeTaskEventV12(wire: Record<string, unknown>): TaskEventV12 {

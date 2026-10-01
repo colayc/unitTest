@@ -15,10 +15,15 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
-import { __testing as reportTesting } from "./native-report.js";
+import { __testing as reportTesting, parseNativeLLVMFixtureLog } from "./native-report.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 
 const trackedManifestPath = resolve(import.meta.dirname, "../../../tools/cmake-bundle/manifest.json");
+
+test("Linux LLVM native evidence cannot be inferred from a skipped or marker-only fixture", () => {
+  assert.throws(() => parseNativeLLVMFixtureLog("--- SKIP: TestNativeLinuxLLVMFixture (0.01s)\n"), /native LLVM fixture/u);
+  assert.throws(() => parseNativeLLVMFixtureLog('UTIDE_NATIVE_LLVM_EVIDENCE={"summary":{}}\n'), /native LLVM fixture/u);
+});
 
 test("required native toolchain parsing is closed and deterministic", () => {
   assert.deepEqual([...parseRequiredToolchains(undefined)], []);
@@ -768,6 +773,44 @@ test("native liveness recovery retries a transient reconnect failure", async () 
 
   await __testing.recoverNativeLiveness(client, "native-task", 16);
   assert.equal(reconnects, 2);
+});
+
+test("native task completion allows a bounded reconnect grace window", async () => {
+  let reconnects = 0;
+  let lookups = 0;
+  const taskFinished = {
+    taskId: "native-task",
+    event: "task.finished",
+    payload: { outcome: "succeeded" },
+  };
+  const client = {
+    getTask: async () => {
+      lookups++;
+      if (lookups === 1) throw new Error("connection dropped");
+      return { status: "running" };
+    },
+    reconnect: async () => {
+      reconnects++;
+    },
+  } as unknown as ProtocolClient;
+  const subscription = {
+    lastSequence: 0,
+    next: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { done: false, value: taskFinished };
+    },
+  } as unknown as EventSubscription;
+
+  await __testing.waitForTask(
+    client,
+    subscription,
+    "native-task",
+    "succeeded",
+    [],
+    1,
+    1,
+  );
+  assert.equal(reconnects, 1);
 });
 
 test("diagnostic fixture refreshes one stale generation before Task creation", async () => {

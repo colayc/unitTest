@@ -295,6 +295,8 @@ function createExtensionHarness(options: HarnessOptions = {}) {
   const errors: string[] = [];
   const subscriptions: Array<{ dispose(): void }> = [];
   const testingControllers: FakeTestingController[] = [];
+  const detailAvailability: boolean[] = [];
+  const managedAvailability: boolean[] = [];
   const state = {
     folderCount: options.folderCount ?? 1,
     isTrusted: options.isTrusted ?? true,
@@ -331,6 +333,8 @@ function createExtensionHarness(options: HarnessOptions = {}) {
       show() {},
       dispose() {}
     }),
+    setCoverageDetailsAvailable(value) { detailAvailability.push(value); },
+    setManagedTestsAvailable(value) { managedAvailability.push(value); },
     createTestController: options.testingApi ? () => {
       const controller = new FakeTestingController();
       testingControllers.push(controller);
@@ -360,6 +364,9 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     output,
     errors,
     get testingControllers() { return testingControllers; },
+    get detailAvailability() { return detailAvailability; },
+    get managedAvailability() { return managedAvailability; },
+    hasCommand(command: string) { return commands.has(command); },
     get statusText() { return state.statusText; },
     activate: () => controller.activate(),
     deactivate: () => controller.deactivate(),
@@ -475,6 +482,47 @@ test("trusted activation registers one Testing API controller and refreshes thro
   assert.equal(client.catalogCalls, 1);
   assert.equal(client.subscriptionCalls, 1);
   assert.equal(host.testingControllers[0]?.items.entries.size, 1);
+});
+
+test("legacy sessions keep the v1.6 coverage detail UI hidden", async () => {
+  const host = createExtensionHarness({ manager: new FakeServiceManager(testingClient("legacy")), testingApi: true });
+  await host.activate();
+  assert.equal(host.detailAvailability.at(-1), false);
+  assert.equal(host.hasCommand("unitTestIde.reviewManagedTests"), false);
+  assert.equal(host.managedAvailability.at(-1), false);
+  await host.deactivate();
+});
+
+test("v1.6 detail UI appears only for the matching report and clears on workspace switch", async () => {
+  const client = testingClient("v16-workspace") as FakeProtocolClient & Record<string, unknown>;
+  const id = "0123456789abcdef0123456789abcdef";
+  const run = { coverageRunId: id, taskId: id, testRunId: id, workspaceGeneration: "v16-workspace", projectId: "project-a", coverageProfileId: "coverage-debug", catalogRevision: "catalog-r1", selectionSnapshot: { mode: "all" }, repeatCount: 1, timeoutMs: 30000, status: "finished", createdAt: new Date(0), finishedAt: new Date(1), reportId: id, lastSequence: 1 };
+  const report = { reportId: id, coverageRunId: id, testRunId: id, schemaVersion: "1.0", createdAt: new Date(1), completeness: { outcome: "available", reasons: [] }, summary: { lines: { covered: 1, total: 1 }, branches: { covered: 0, total: 0 }, functions: { covered: 1, total: 1 } }, toolProvenance: { platform: "windows", architecture: "x64", compiler: { family: "clang-cl", version: "19" }, driver: { name: "llvm-cov", version: "19" }, collector: { name: "llvm-cov", version: "19" }, normalizerVersion: "1", instrumentationFingerprint: "f" }, artifactId: id, sources: [] };
+  Object.assign(client, {
+    startCoverage: async () => run,
+    getCoverageRun: async () => run,
+    getCoverageReport: async () => report,
+    getCapabilities: async () => ({ coverageDetails: true, managedTests: true, maxCoverageDetailPageSize: 10, maxCoverageLinePageSize: 10 }),
+    getCoverageProject: async () => ({ coverageReportId: id, projectId: "project-a", workspaceGeneration: "v16-workspace", fileCount: 0, status: "current", reasons: [], summary: { lines: { covered: 1, total: 1, coveredDelta: 0 }, branches: { covered: 0, total: 0, coveredDelta: 0 }, functions: { covered: 1, total: 1, coveredDelta: 0 } } }),
+    listCoverageFiles: async () => ({ coverageReportId: id, workspaceGeneration: "v16-workspace", items: [] }),
+    listCoverageFunctions: async () => ({ coverageReportId: id, workspaceGeneration: "v16-workspace", items: [] }),
+    listCoverageLines: async () => ({ coverageReportId: id, workspaceGeneration: "v16-workspace", items: [] }),
+    listManagedTests: async () => ({ coverageReportId: id, workspaceGeneration: "v16-workspace", items: [] }),
+    getManagedReview: async () => { throw new Error("not used"); },
+    applyManagedReview: async () => { throw new Error("not used"); }
+  });
+  const host = createExtensionHarness({ manager: new FakeServiceManager(client), testingApi: true });
+  await host.activate();
+  await host.execute("unitTestIde.runCoverage");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(host.detailAvailability.at(-1), true);
+  assert.equal(host.managedAvailability.at(-1), true);
+  assert.equal(host.hasCommand("unitTestIde.reviewManagedTests"), true);
+  await host.updateWorkspace(1, true, "C:\\different");
+  assert.equal(host.detailAvailability.at(-1), false);
+  assert.equal(host.managedAvailability.at(-1), false);
+  assert.equal(host.hasCommand("unitTestIde.reviewManagedTests"), false);
+  await host.deactivate();
 });
 
 test("untrusted activation and trust loss leave the Testing API without a usable protocol run path", async () => {

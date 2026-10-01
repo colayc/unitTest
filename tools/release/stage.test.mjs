@@ -80,6 +80,10 @@ async function createReleaseFixture(root, platform = "windows") {
   await writeFixtureFile(coverageRoot, "app/gcovr-runner.pyz", "runner payload\n");
   await writeFixtureFile(coverageRoot, "manifest.json", JSON.stringify({ tool: "coverage" }, null, 2));
   await writeFixtureFile(coverageRoot, "licenses/NOTICE.txt", "coverage notice\n");
+  const testgenRoot = join(root, "inputs/testgen");
+  await writeFixtureFile(testgenRoot, "bin/clang.exe", "test-generation clang fixture\n");
+  await writeFixtureFile(testgenRoot, "manifest.json", JSON.stringify({ tool: "testgen" }, null, 2));
+  await writeFixtureFile(testgenRoot, "licenses/LLVM-LICENSE.txt", "test-generation license\n");
   return {
     codeOssRoot,
     codeOssSha256: sha256(await readFile(launcherPath)),
@@ -88,8 +92,16 @@ async function createReleaseFixture(root, platform = "windows") {
     extensionRoot,
     cmakeRoot,
     coverageRoot,
+    testgenRoot,
     outRoot: join(root, "out"),
   };
+}
+
+function stageFixtureRelease(input, options = {}) {
+  return stageRelease(input, {
+    validateTestgenBundle: async () => undefined,
+    ...options,
+  });
 }
 
 async function packageInputSnapshot(root, current = "") {
@@ -120,7 +132,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
       "grammar\n",
     );
-    const result = await stageRelease({
+    const result = await stageFixtureRelease({
       platform: "windows",
       architecture: "x64",
       version: "1.2.3",
@@ -144,8 +156,11 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "bundles/cmake/manifest.json",
       "bundles/coverage/app/gcovr-runner.pyz",
       "bundles/coverage/manifest.json",
+      "bundles/testgen/bin/clang.exe",
+      "bundles/testgen/manifest.json",
       "licenses/cmake/licenses/LICENSE.txt",
       "licenses/coverage/licenses/NOTICE.txt",
+      "licenses/testgen/licenses/LLVM-LICENSE.txt",
       ...codeOssNoticePaths.map((relativePath) => `licenses/code-oss/${relativePath}`),
       "release-manifest.json",
     ]) {
@@ -186,6 +201,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
         "licenses/code-oss/resources/app/LICENSE.txt",
         "licenses/code-oss/resources/app/ThirdPartyNotices.txt",
         "licenses/coverage/licenses/NOTICE.txt",
+        "licenses/testgen/licenses/LLVM-LICENSE.txt",
       ],
     );
     for (const relativePath of codeOssNoticePaths) {
@@ -214,7 +230,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
 linuxOnly("stageRelease preserves the complete executable Linux runtime", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root, "linux");
-    const result = await stageRelease({
+    const result = await stageFixtureRelease({
       platform: "linux",
       architecture: "x64",
       version: "1.2.3",
@@ -262,6 +278,45 @@ test("stageRelease rejects the removed single-file codeOss input", async (t) => 
   });
 });
 
+test("stageRelease requires an explicit verified test-generation bundle root", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    const { testgenRoot, ...withoutTestgen } = fixture;
+    await assert.rejects(
+      () => stageRelease({
+        platform: "windows",
+        architecture: "x64",
+        version: "1.2.3",
+        sourceCommit: "a".repeat(40),
+        sourceDateEpoch,
+        ...withoutTestgen,
+      }),
+      (error) => error?.code === "RELEASE_INPUT_MISSING" && /testgenRoot/u.test(error.message),
+    );
+  });
+});
+
+test("stageRelease rejects an unverified test-generation bundle before publication", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    await assert.rejects(
+      () => stageRelease({
+        platform: "windows",
+        architecture: "x64",
+        version: "1.2.3",
+        sourceCommit: "a".repeat(40),
+        sourceDateEpoch,
+        ...fixture,
+      }),
+      /manifest|Clang|bundle/u,
+    );
+    await assert.rejects(
+      () => lstat(join(fixture.outRoot, "staging", "1.2.3", "windows-x64")),
+      /ENOENT/u,
+    );
+  });
+});
+
 test("stage CLI rejects --code-oss and requires both runtime-root flags", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
@@ -293,6 +348,7 @@ test("stage CLI rejects --code-oss and requires both runtime-root flags", async 
         "--service", fixture.service,
         "--cmake-root", fixture.cmakeRoot,
         "--coverage-root", fixture.coverageRoot,
+        "--testgen-root", fixture.testgenRoot,
         "--out", fixture.outRoot,
       ];
       const flagIndex = argumentsList.indexOf(omittedFlag);
@@ -314,7 +370,7 @@ test("stageRelease rejects leading-space source components", async (t) => {
     await writeFixtureFile(fixture.cmakeRoot, " leading.txt", "unsafe bundle path\n");
 
     await assert.rejects(
-      () => stageRelease({
+      () => stageFixtureRelease({
         platform: "windows",
         architecture: "x64",
         version: "1.2.3",
@@ -338,7 +394,7 @@ test("stageRelease rejects source components outside the portable ASCII set", as
         await writeFixtureFile(fixture.cmakeRoot, relativePath, "unsafe bundle path\n");
 
         await assert.rejects(
-          () => stageRelease({
+          () => stageFixtureRelease({
             platform: "windows",
             architecture: "x64",
             version: "1.2.3",
@@ -381,7 +437,7 @@ test("stageRelease publishes no root after a post-copy launcher digest mismatch"
     };
 
     await assert.rejects(
-      () => stageRelease({
+      () => stageFixtureRelease({
         platform: "windows",
         architecture: "x64",
         version: "1.2.3",
@@ -401,6 +457,13 @@ test("stageRelease publishes no root after a post-copy launcher digest mismatch"
 test("stage CLI accepts a valid invocation and stages the release tree", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
+    const preparedTestgenRoot = resolve(".superpowers/cache/testgen-bundle/22.1.8/windows-x64");
+    try {
+      await stat(preparedTestgenRoot);
+    } catch (error) {
+      if (error?.code === "ENOENT") return t.skip("verified Windows Clang bundle is not prepared");
+      throw error;
+    }
     const extensionDistRoot = resolve("apps/code-oss-extension/dist");
     await rm(extensionDistRoot, { recursive: true, force: true });
     await writeFixtureFile(extensionDistRoot, "src/extension.js", "export const cli = true;\n");
@@ -417,6 +480,7 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
       "--service", fixture.service,
       "--cmake-root", fixture.cmakeRoot,
       "--coverage-root", fixture.coverageRoot,
+      "--testgen-root", preparedTestgenRoot,
       "--out", fixture.outRoot,
     ], {
       cwd: resolve("."),
@@ -435,11 +499,45 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
   });
 });
 
+test("release-staged Clang bundle opens with the real Go product consumer", async (t) => {
+  const platform = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "";
+  if (!platform) return t.skip("unsupported host platform");
+  const preparedTestgenRoot = resolve(`.superpowers/cache/testgen-bundle/22.1.8/${platform}-x64`);
+  try {
+    await stat(preparedTestgenRoot);
+  } catch (error) {
+    if (error?.code === "ENOENT") return t.skip("verified host Clang bundle is not prepared");
+    throw error;
+  }
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root, platform);
+    const staged = await stageRelease({
+      platform,
+      architecture: "x64",
+      version: "1.2.3",
+      sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
+      ...fixture,
+      testgenRoot: preparedTestgenRoot,
+    });
+    const consumer = spawnSync("go", [
+      "test", "./apps/test-service/internal/testgenbundle", "-run", "^TestOpenStagedBundleFromEnvironment$", "-count=1",
+    ], {
+      cwd: resolve("."),
+      encoding: "utf8",
+      env: { ...process.env, TESTGEN_STAGED_BUNDLE_ROOT: join(staged.stagingRoot, "bundles", "testgen") },
+      windowsHide: true,
+    });
+    assert.equal(consumer.status, 0, `${consumer.stdout}\n${consumer.stderr}`);
+    assert.match(consumer.stdout, /ok\s+unit-test-ide\.local\/test-service\/internal\/testgenbundle/u);
+  });
+});
+
 test("stageRelease fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
     await assert.rejects(
-      () => stageRelease({
+      () => stageFixtureRelease({
         platform: "windows",
         architecture: "x64",
         version: "1.2.3",
@@ -462,8 +560,8 @@ test("identical complete runtimes produce byte-identical normalized staging tree
       sourceDateEpoch,
       ...fixture,
     };
-    const first = await stageRelease({ ...common, outRoot: join(root, "first") });
-    const second = await stageRelease({ ...common, outRoot: join(root, "second") });
+    const first = await stageFixtureRelease({ ...common, outRoot: join(root, "first") });
+    const second = await stageFixtureRelease({ ...common, outRoot: join(root, "second") });
 
     assert.deepEqual(await readFile(first.manifestPath), await readFile(second.manifestPath));
     assert.deepEqual(

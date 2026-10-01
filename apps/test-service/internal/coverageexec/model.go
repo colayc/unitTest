@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
@@ -34,7 +35,7 @@ type CollectionPlan struct {
 
 type NormalizeInput struct {
 	ProcessOutput []byte
-	PinnedOutput coverageplatform.Output
+	PinnedOutput  coverageplatform.Output
 	WorkspaceRoot string
 	Matcher       *coveragenormalize.GlobMatcher
 	Toolchain     coveragedomain.ToolchainSnapshot
@@ -98,6 +99,15 @@ type PreparedAdapter interface {
 	Close() error
 }
 
+// DetailNormalizer is optional: legacy adapters keep the v1 aggregate path.
+type DetailNormalizer interface {
+	NormalizeWithDetail(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, []coveragedomain.FunctionObservation, error)
+}
+
+type DetailStore interface {
+	PutCoverageDetail(context.Context, coveragedetail.Index) error
+}
+
 type Adapter interface {
 	Prepare(context.Context, AdapterInput) (PreparedAdapter, error)
 }
@@ -107,6 +117,8 @@ type ReportRenderer func(coveragereport.Input) (coveragereport.Set, error)
 type Config struct {
 	Tasks         TaskController
 	Store         Store
+	DetailStore   DetailStore
+	DetailFailure func(error)
 	Build         BuildPreparer
 	Tests         EmbeddedTestPreparer
 	Adapter       Adapter

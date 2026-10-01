@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.6:test-generation",
+  "title": "TestGenerationContractV16",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["targetListRequest", "targetList", "startRequest", "runIdRequest", "run", "candidateListRequest", "candidatePage", "acceptRequest", "eventReplayRequest", "eventPage", "managedRecordsRequest", "reviewIdRequest", "managedRecordPage", "managedReview", "reviewApplyRequest", "reviewApplyResult"],
+  "properties": {
+    "targetListRequest": { "$ref": "#/$defs/targetListRequest" },
+    "startRequest": { "$ref": "#/$defs/startRequest" },
+    "runIdRequest": { "$ref": "#/$defs/runIdRequest" },
+    "candidateListRequest": { "$ref": "#/$defs/candidateListRequest" },
+    "targetList": { "$ref": "#/$defs/targetList" },
+    "run": { "$ref": "#/$defs/run" },
+    "candidatePage": { "$ref": "#/$defs/candidatePage" },
+    "acceptRequest": { "$ref": "#/$defs/acceptRequest" },
+    "eventReplayRequest": { "$ref": "#/$defs/eventReplayRequest" },
+    "eventPage": { "$ref": "#/$defs/eventPage" },
+    "managedRecordPage": { "$ref": "#/$defs/managedRecordPage" },
+    "managedReview": { "$ref": "#/$defs/managedReview" },
+    "reviewApplyRequest": { "$ref": "#/$defs/reviewApplyRequest" },
+    "reviewApplyResult": { "$ref": "#/$defs/reviewApplyResult" },
+    "managedRecordsRequest": { "$ref": "#/$defs/managedRecordsRequest" },
+    "reviewIdRequest": { "$ref": "#/$defs/reviewIdRequest" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "relativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$" },
+    "scope": { "title": "TestGenerationScopeV16", "enum": ["symbol", "file", "target", "workspace", "coverage-gap"] },
+    "framework": { "title": "TestGenerationFrameworkV16", "enum": ["auto", "cpputest", "unity"] },
+    "state": { "title": "TestGenerationStateV16", "enum": ["queued", "baseline", "analyzing", "solving", "rendering", "validating", "minimizing", "awaiting_confirmation", "accepted", "rejected", "cancelled", "failed"] },
+    "candidateKind": { "title": "TestGenerationCandidateKindV16", "enum": ["verified", "characterization"] },
+    "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+    "goals": {
+      "title": "TestGenerationGoalsV16", "type": "object", "additionalProperties": false,
+      "required": ["functionPercent", "linePercent", "branchPercent"],
+      "properties": { "functionPercent": { "$ref": "#/$defs/percent" }, "linePercent": { "$ref": "#/$defs/percent" }, "branchPercent": { "$ref": "#/$defs/percent" } }
+    },
+    "budgets": {
+      "title": "TestGenerationBudgetsV16", "type": "object", "additionalProperties": false,
+      "required": ["wallTimeMs", "candidateCount", "memoryMiB", "concurrency"],
+      "properties": {
+        "wallTimeMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "candidateCount": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "memoryMiB": { "type": "integer", "minimum": 64, "maximum": 1048576 },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 256 }
+      }
+    },
+    "targetListRequest": {
+      "title": "TestGenerationTargetListRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["workspaceGeneration", "projectId"],
+      "properties": {
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/projectId" },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "target": {
+      "title": "TestGenerationTargetV16", "type": "object", "additionalProperties": false,
+      "required": ["kind", "targetId", "frameworks"],
+      "properties": {
+        "kind": { "title": "TestGenerationTargetKindV16", "const": "build-target" },
+        "targetId": { "$ref": "#/$defs/digest", "description": "Stable opaque target digest; no display label or source text is carried." },
+        "frameworks": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["cpputest", "unity"] } }
+      }
+    },
+    "targetList": {
+      "title": "TestGenerationTargetListV16", "type": "object", "additionalProperties": false,
+      "required": ["items"],
+      "properties": { "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/target" } }, "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+    },
+    "startRequest": {
+      "title": "TestGenerationStartRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["idempotencyKey", "workspaceGeneration", "projectId", "scope", "framework", "goals", "budgets"],
+      "properties": {
+        "idempotencyKey": { "$ref": "#/$defs/id" }, "workspaceGeneration": { "$ref": "#/$defs/digest" },
+        "projectId": { "$ref": "#/$defs/projectId" }, "scope": { "$ref": "#/$defs/scope" },
+        "functionId": { "$ref": "#/$defs/id" }, "fileId": { "$ref": "#/$defs/id" },
+        "targetId": { "$ref": "#/$defs/digest" }, "coverageGapId": { "$ref": "#/$defs/id" }, "coverageReportId": { "$ref": "#/$defs/id" },
+        "framework": { "$ref": "#/$defs/framework" }, "goals": { "$ref": "#/$defs/goals" }, "budgets": { "$ref": "#/$defs/budgets" }
+      },
+      "oneOf": [
+        { "properties": { "scope": { "const": "symbol" } }, "required": ["functionId"], "not": { "anyOf": [{ "required": ["fileId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "file" } }, "required": ["fileId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "target" } }, "required": ["targetId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "workspace" } }, "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "coverage-gap" } }, "required": ["coverageGapId", "coverageReportId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["targetId"] }] } }
+      ]
+    },
+    "runIdRequest": {
+      "title": "TestGenerationRunIdRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["runId"], "properties": { "runId": { "$ref": "#/$defs/id" } }
+    },
+    "candidateListRequest": {
+      "title": "TestGenerationCandidateListRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["runId"], "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "coverage": {
+      "title": "TestGenerationCoverageV16", "type": "object", "additionalProperties": false,
+      "required": ["functionPercent", "linePercent", "branchPercent"],
+      "properties": { "functionPercent": { "$ref": "#/$defs/percent" }, "linePercent": { "$ref": "#/$defs/percent" }, "branchPercent": { "$ref": "#/$defs/percent" } }
+    },
+    "diagnostic": {
+      "title": "TestGenerationDiagnosticV16", "type": "object", "additionalProperties": false,
+      "required": ["code", "severity"],
+      "properties": {
+        "code": { "title": "TestGenerationDiagnosticCodeV16", "enum": ["COVERAGE_GAP", "TARGET_UNSUPPORTED", "ORACLE_UNAVAILABLE", "BUDGET_EXCEEDED", "VALIDATION_FAILED", "NO_CANDIDATE"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "reason": { "title": "TestGenerationDiagnosticReasonV16", "enum": ["uncovered-branch", "uncovered-line", "uncovered-function", "budget-limit", "unsupported-target", "oracle-unavailable", "validation-failed"] }
+      }
+    },
+    "plannedEdit": {
+      "title": "TestGenerationPlannedEditV16", "type": "object", "additionalProperties": false,
+      "required": ["path", "operation", "afterDigest"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" }, "operation": { "enum": ["create", "modify"] },
+        "beforeDigest": { "$ref": "#/$defs/digest" }, "afterDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "assertionProvenance": {
+      "title": "TestGenerationAssertionProvenanceV16", "type": "object", "additionalProperties": false,
+      "required": ["kind", "evidenceDigest"],
+      "properties": {
+        "kind": { "enum": ["independent-oracle", "observed-output"] },
+        "evidenceDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "candidate": {
+      "title": "TestGenerationCandidateV16", "type": "object", "additionalProperties": false,
+      "required": ["candidateId", "kind", "codeDigest", "artifactDigest", "assertionProvenance", "baselineCoverage", "deltaCoverage", "plannedEdits", "diagnostics", "characterizationConfirmed"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/id" }, "kind": { "$ref": "#/$defs/candidateKind" },
+        "codeDigest": { "$ref": "#/$defs/digest" }, "artifactDigest": { "$ref": "#/$defs/digest" },
+        "assertionProvenance": { "$ref": "#/$defs/assertionProvenance" },
+        "baselineCoverage": { "$ref": "#/$defs/coverage" }, "deltaCoverage": { "$ref": "#/$defs/coverage" },
+        "plannedEdits": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/plannedEdit" } },
+        "diagnostics": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/diagnostic" } },
+        "characterizationConfirmed": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "verified" } } }, "then": { "type": "object", "properties": { "assertionProvenance": { "type": "object", "properties": { "kind": { "const": "independent-oracle" } } }, "characterizationConfirmed": { "const": false } } } },
+        { "if": { "properties": { "kind": { "const": "characterization" } } }, "then": { "type": "object", "properties": { "assertionProvenance": { "type": "object", "properties": { "kind": { "const": "observed-output" } } } } } }
+      ]
+    },
+    "candidatePage": {
+      "title": "TestGenerationCandidatePageV16", "type": "object", "additionalProperties": false,
+      "required": ["items"], "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/candidate" } },
+        "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "run": {
+      "title": "TestGenerationRunV16", "type": "object", "additionalProperties": false,
+      "description": "Managed runs bind exact changes to managedTests/reviews/get; preview is optional and must never be fabricated from digests.",
+      "required": ["runId", "taskId", "workspaceGeneration", "projectId", "state", "createdAt", "lastSequence"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "taskId": { "$ref": "#/$defs/id" },
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/projectId" },
+        "state": { "$ref": "#/$defs/state" }, "createdAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "lastSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "preview": { "$ref": "#/$defs/preview" }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } }
+      ]
+    },
+    "preview": {
+      "title": "TestGenerationPreviewV16", "type": "object", "additionalProperties": false,
+      "required": ["candidateSetDigest", "diffDigest", "confirmationDigest"],
+      "properties": {
+        "candidateSetDigest": { "$ref": "#/$defs/digest" },
+        "diffDigest": { "$ref": "#/$defs/digest" },
+        "diff": { "type": "string", "minLength": 1, "maxLength": 262144 },
+        "confirmationDigest": { "$ref": "#/$defs/digest" },
+        "characterizationDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "eventReplayRequest": {
+      "title": "TestGenerationEventReplayRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["runId", "afterSequence"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" },
+        "afterSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "eventPage": {
+      "title": "TestGenerationEventPageV16", "type": "object", "additionalProperties": false,
+      "required": ["items", "nextAfterSequence"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/progressEvent" } },
+        "nextAfterSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "progressEvent": {
+      "title": "TestGenerationProgressEventV16", "type": "object", "additionalProperties": false,
+      "required": ["sequence", "state", "occurredAt"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "state": { "$ref": "#/$defs/state" },
+        "occurredAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "managedStatus": { "title": "ManagedTestStatusV16", "enum": ["current", "stale", "conflicted", "orphaned", "invalid"] },
+    "conflictChoice": { "title": "ManagedConflictChoiceV16", "enum": ["keep-current", "use-generated", "convert-to-manual"] },
+    "managedCaseId": { "type": "string", "pattern": "^utc_[0-9a-f]{32}$" },
+    "absentBlockSides": {
+      "description": "A side listed here is absent, not a real block whose SHA-256 happens to equal the empty-byte digest. Its digest field MUST carry the v1.6 absent-block sentinel (SHA-256 of empty bytes). An unlisted side, including a real empty block, is present.",
+      "type": "array", "maxItems": 3, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(accepted|current|generated)$" }
+    },
+    "managedRecordsRequest": {
+      "title": "ManagedRecordsRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["workspaceGeneration", "coverageReportId", "projectId"],
+      "properties": { "workspaceGeneration": { "$ref": "#/$defs/digest" }, "coverageReportId": { "$ref": "#/$defs/id" }, "projectId": { "$ref": "#/$defs/projectId" }, "fileId": { "$ref": "#/$defs/id" }, "status": { "$ref": "#/$defs/managedStatus" }, "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } }
+    },
+    "managedRecord": {
+      "title": "ManagedTestRecordV16", "type": "object", "additionalProperties": false,
+      "required": ["caseId", "fileId", "functionId", "status", "acceptedDigest", "currentDigest"],
+      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "fileId": { "$ref": "#/$defs/id" }, "functionId": { "$ref": "#/$defs/id" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "absentSides": { "$ref": "#/$defs/absentBlockSides" }, "reviewId": { "$ref": "#/$defs/id" } },
+      "allOf": [
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "accepted" } } } }, "then": { "type": "object", "properties": { "acceptedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "current" } } } }, "then": { "type": "object", "properties": { "currentDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "generated" } } } }, "then": { "type": "object", "required": ["generatedDigest"], "properties": { "generatedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } }
+      ]
+    },
+    "managedRecordPage": {
+      "title": "ManagedTestRecordPageV16", "type": "object", "additionalProperties": false,
+      "required": ["workspaceGeneration", "coverageReportId", "items"],
+      "properties": { "workspaceGeneration": { "$ref": "#/$defs/digest" }, "coverageReportId": { "$ref": "#/$defs/id" }, "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/managedRecord" } }, "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+    },
+    "reviewIdRequest": {
+      "title": "ManagedReviewIdRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["reviewId"],
+      "properties": {
+        "reviewId": { "$ref": "#/$defs/id" },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 32 }
+      }
+    },
+    "reviewCase": {
+      "title": "ManagedReviewCaseV16", "type": "object", "additionalProperties": false,
+      "required": ["caseId", "status", "acceptedDigest", "currentDigest", "generatedDigest"],
+      "properties": { "caseId": { "$ref": "#/$defs/managedCaseId" }, "status": { "$ref": "#/$defs/managedStatus" }, "acceptedDigest": { "$ref": "#/$defs/digest" }, "currentDigest": { "$ref": "#/$defs/digest" }, "generatedDigest": { "$ref": "#/$defs/digest" }, "absentSides": { "$ref": "#/$defs/absentBlockSides" }, "diff": { "type": "string", "maxLength": 4096 } },
+      "allOf": [
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "accepted" } } } }, "then": { "type": "object", "properties": { "acceptedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "current" } } } }, "then": { "type": "object", "properties": { "currentDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } },
+        { "if": { "type": "object", "required": ["absentSides"], "properties": { "absentSides": { "type": "array", "contains": { "const": "generated" } } } }, "then": { "type": "object", "properties": { "generatedDigest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } } } }
+      ]
+    },
+    "managedReview": {
+      "title": "ManagedReviewV16", "type": "object", "additionalProperties": false,
+      "description": "A bounded review page. The service MUST bind nextCursor to reviewId, reviewDigest and limit, and reject pages exceeding the 512 KiB serialized payload budget; callers continue with nextCursor rather than truncating cases.",
+      "required": ["reviewId", "reviewDigest", "workspaceGeneration", "coverageReportId", "cases"],
+      "properties": {
+        "reviewId": { "$ref": "#/$defs/id" },
+        "reviewDigest": { "$ref": "#/$defs/digest" },
+        "workspaceGeneration": { "$ref": "#/$defs/digest" },
+        "coverageReportId": { "$ref": "#/$defs/id" },
+        "cases": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/reviewCase" } },
+        "conflictKeys": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "oneOf": [{ "$ref": "#/$defs/managedCaseId" }, { "type": "string", "maxLength": 254, "pattern": "^(?!.*(?:/\\.{1,2}/|//))scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }] } },
+        "scaffoldPreviews": { "type": "array", "maxItems": 200, "items": { "type": "object", "additionalProperties": false, "required": ["key", "diff", "diffDigest"], "properties": { "key": { "type": "string", "maxLength": 254, "pattern": "^(?!.*(?:/\\.{1,2}/|//))scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }, "diff": { "type": "string", "maxLength": 4096 }, "diffDigest": { "$ref": "#/$defs/digest" } } } },
+        "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "reviewResolution": {
+      "title": "ManagedReviewResolutionV16", "type": "object", "additionalProperties": false,
+      "required": ["caseId", "choice"],
+      "properties": { "caseId": { "oneOf": [{ "$ref": "#/$defs/managedCaseId" }, { "type": "string", "maxLength": 254, "pattern": "^(?!.*(?:/\\.{1,2}/|//))scaffold:tests/generated/[A-Za-z0-9_./-]{1,220}_test\\.(c|cpp)$" }] }, "choice": { "$ref": "#/$defs/conflictChoice" } }
+    },
+    "reviewApplyRequest": {
+      "title": "ManagedReviewApplyRequestV16", "type": "object", "additionalProperties": false,
+      "required": ["reviewId", "reviewDigest", "resolutions"],
+      "properties": { "reviewId": { "$ref": "#/$defs/id" }, "reviewDigest": { "$ref": "#/$defs/digest" }, "resolutions": { "type": "array", "minItems": 0, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/reviewResolution" } } }
+    },
+    "reviewApplyResult": {
+      "title": "ManagedReviewApplyResultV16", "type": "object", "additionalProperties": false,
+      "required": ["reviewId", "reviewDigest", "applied"],
+      "properties": { "reviewId": { "$ref": "#/$defs/id" }, "reviewDigest": { "$ref": "#/$defs/digest" }, "applied": { "const": true } }
+    },
+    "acceptRequest": {
+      "title": "TestGenerationAcceptRequestV16", "type": "object", "additionalProperties": false,
+      "description": "The service MUST resolve the authoritative stored candidate kind from runId and candidateId, verify confirmationDigest against the current preview, and MUST reject a characterization candidate unless confirmCharacterization is true. Caller-supplied candidate classification is forbidden.",
+      "required": ["runId", "candidateId", "confirmationDigest", "confirmCharacterization"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "candidateId": { "$ref": "#/$defs/id" },
+        "confirmationDigest": { "$ref": "#/$defs/digest" },
+        "confirmCharacterization": { "type": "boolean", "description": "Explicit consent for a characterization candidate. The service checks this against the stored kind resolved by runId and candidateId." }
+      }
+    }
+  }
+}

@@ -27,8 +27,10 @@ export function createGccFaultOverlay(source: string, fault: "missing-data" | "m
     source = source.replace(needle, replacement);
   };
   if (fault === "malformed-pinned-json") {
-    const needle = "raw, err := input.PinnedOutput.ReadAll(); if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }";
-    replaceOnce(needle, `${needle}\n\traw = []byte("{") // test-only: the real bounded parser must reject this`);
+    const needle = "raw, err := input.PinnedOutput.ReadAll()";
+    const occurrences = source.split(needle).length - 1;
+    if (occurrences !== 2) throw new Error("test-only overlay seam changed or is ambiguous (malformed JSON)");
+    source = source.replaceAll(needle, `${needle}\n\traw = []byte("{") // test-only: the real bounded parser must reject this`);
   } else {
     replaceOnce("import (", 'import (\n "os"\n "strings"');
     replaceOnce("type gccPreparedCoverageAdapter struct {", "type gccPreparedCoverageAdapter struct {\n testOnlyObjectRoot string");

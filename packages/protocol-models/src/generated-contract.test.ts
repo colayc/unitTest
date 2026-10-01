@@ -82,6 +82,125 @@ import {
   TaskStatusV14,
   TestSelectionModeV14
 } from "./index.js";
+import type {
+  TestGenerationStartRequestV15,
+  TestGenerationRunV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationAcceptRequestV15,
+  TestGenerationTargetV15,
+  TestGenerationDiagnosticV15
+} from "./index.js";
+import {
+  TestGenerationFrameworkV15,
+  TestGenerationScopeV15,
+  TestGenerationStateV15,
+  TestGenerationTargetKindV15,
+  TestGenerationTargetFrameworkV15,
+  TestGenerationDiagnosticCodeV15,
+  TestGenerationDiagnosticReasonV15,
+  TestGenerationDiagnosticSeverityV15
+} from "./index.js";
+import type { CoverageFileV16, CoverageFunctionV16, CoverageLineDetailV16, ManagedReviewApplyRequestV16 } from "./index.js";
+import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16 } from "./index.js";
+import { validateManagedReviewApplyV16, validateManagedReviewPageV16, validateManagedReviewCaseDigestsV16, decodeManagedBlockDigestV16, ABSENT_BLOCK_DIGEST_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16 } from "./index.js";
+import type { ManagedReviewV16, ManagedReviewIDRequestV16 } from "./index.js";
+import { ManagedTestStatusV16 } from "./index.js";
+
+test("protocol 1.6 generated models expose bounded detail and digest-bound review contracts", () => {
+  const summary = {
+    functions: { covered: 1, total: 2, coveredDelta: 1 },
+    lines: { covered: 4, total: 5, coveredDelta: 2 },
+    branches: { covered: 2, total: 4, coveredDelta: 1 }
+  };
+  const file: CoverageFileV16 = { fileId: "a".repeat(32), relativePath: "src/math.cpp", sourceSha256: "b".repeat(64), status: CoverageDetailStatusV16.Current, reasons: [], summary, functionCount: 1 };
+  const fn: CoverageFunctionV16 = { functionId: "c".repeat(32), fileId: file.fileId, qualifiedName: "math::add", startLine: 1, endLine: 8, status: CoverageDetailStatusV16.Current, reasons: [], summary };
+  const line: CoverageLineDetailV16 = { line: 3, count: 2, baselineCount: 1, branchesCovered: 1, branchesTotal: 2, baselineBranchesCovered: 0, baselineBranchesTotal: 2 };
+  const apply: ManagedReviewApplyRequestV16 = { reviewId: "d".repeat(32), reviewDigest: "e".repeat(64), resolutions: [{ caseId: "utc_" + "f".repeat(32), choice: ManagedConflictChoiceV16.KeepCurrent }] };
+  assert.equal(file.summary.lines.coveredDelta, 2);
+  assert.equal(fn.startLine, 1);
+  assert.equal(line.branchesCovered, 1);
+  assert.equal(apply.resolutions[0]?.choice, "keep-current");
+});
+
+test("protocol 1.6 decoded coverage metrics reject covered greater than total", () => {
+  assert.equal(validateCoverageMetricV16({ covered: 4, total: 5, coveredDelta: -1 }), true);
+  for (const metric of [
+    { covered: 6, total: 5, coveredDelta: 1 },
+    { covered: -1, total: 5, coveredDelta: 0 },
+    { covered: 1, total: Number.MAX_SAFE_INTEGER + 1, coveredDelta: 0 },
+    { covered: 1, total: 5, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }
+  ]) assert.equal(validateCoverageMetricV16(metric), false);
+});
+
+test("protocol 1.6 review requests paginate and reject stale or duplicate resolutions", () => {
+  const reviewId = "a".repeat(32);
+  const currentDigest = "b".repeat(64);
+  const request: ManagedReviewIDRequestV16 = { reviewId, cursor: "opaque", limit: 32 };
+  assert.equal(request.limit, 32);
+  const caseId = "utc_" + "c".repeat(32);
+  const apply: ManagedReviewApplyRequestV16 = { reviewId, reviewDigest: currentDigest, resolutions: [{ caseId, choice: ManagedConflictChoiceV16.KeepCurrent }] };
+  assert.equal(validateManagedReviewApplyV16(apply, reviewId, currentDigest), true);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, reviewDigest: "d".repeat(64) }, reviewId, currentDigest), false);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [apply.resolutions[0]!, { caseId, choice: ManagedConflictChoiceV16.UseGenerated }] }, reviewId, currentDigest), false);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [] }, reviewId, currentDigest), true);
+  assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [{ caseId: "scaffold:tests/generated/src/a_test.cpp", choice: ManagedConflictChoiceV16.KeepCurrent }] }, reviewId, currentDigest), true);
+  for (const key of ["scaffold:tests/generated/é_test.c", "scaffold:tests/generated/a%20b_test.c", "scaffold:tests/generated/../a_test.c", "scaffold:tests/generated/./a_test.c", "scaffold:tests/generated/" + "a".repeat(221) + "_test.c"]) {
+    assert.equal(validateManagedReviewApplyV16({ ...apply, resolutions: [{ caseId: key, choice: ManagedConflictChoiceV16.KeepCurrent }] }, reviewId, currentDigest), false, key);
+  }
+});
+
+test("protocol 1.6 review pages reject an escaped-byte budget overrun", () => {
+  const id = "a".repeat(32);
+  const digest = "b".repeat(64);
+  const makeCase = (diff: string) => ({ caseId: "utc_" + id, status: ManagedTestStatusV16.Conflicted, acceptedDigest: digest, currentDigest: digest, generatedDigest: digest, diff });
+  const small: ManagedReviewV16 = { reviewId: id, reviewDigest: digest, workspaceGeneration: digest, coverageReportId: id, cases: [makeCase("small")], nextCursor: "opaque" };
+  assert.equal(validateManagedReviewPageV16(small), true);
+  const oversized = { ...small, cases: Array(32).fill(makeCase("\0".repeat(4096))) };
+  assert.ok(JSON.stringify(oversized).length > MAX_MANAGED_REVIEW_PAGE_BYTES_V16);
+  assert.equal(validateManagedReviewPageV16(oversized), false);
+  const htmlEscaped = { ...small, cases: Array(32).fill(makeCase("<".repeat(4096))) };
+  assert.ok(JSON.stringify(htmlEscaped).length < MAX_MANAGED_REVIEW_PAGE_BYTES_V16);
+  assert.equal(validateManagedReviewPageV16(htmlEscaped), false, "Go's JSON encoder escapes HTML characters before the wire-byte check");
+  assert.equal(validateManagedReviewPageV16({ ...small, cases: Array(33).fill(makeCase("small")) }), false);
+});
+
+test("protocol 1.6 absent-side sentinel round trips without confusing a real empty block", () => {
+  const digest = ABSENT_BLOCK_DIGEST_V16;
+  assert.equal(digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert.equal(decodeManagedBlockDigestV16(digest, true), undefined);
+  assert.equal(decodeManagedBlockDigestV16(digest, false), digest);
+  assert.throws(() => decodeManagedBlockDigestV16("a".repeat(64), true), /absent/i);
+  assert.throws(() => decodeManagedBlockDigestV16("INVALID", false), /digest/i);
+  const value = { caseId: "utc_" + "a".repeat(32), status: ManagedTestStatusV16.Conflicted, acceptedDigest: digest, currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), absentSides: ["accepted"] } as unknown as ManagedReviewV16["cases"][number];
+  assert.equal(validateManagedReviewCaseDigestsV16(value), true);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, absentSides: ["accepted", "accepted"] } as typeof value), false);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, acceptedDigest: "a".repeat(64) }), false);
+  assert.equal(validateManagedReviewCaseDigestsV16({ ...value, absentSides: undefined }), true);
+});
+
+test("protocol 1.5 generated models expose typed generation contracts", () => {
+  const request: TestGenerationStartRequestV15 = {
+    idempotencyKey: "a".repeat(32), workspaceGeneration: "b".repeat(64), projectId: "core",
+    scope: TestGenerationScopeV15.Symbol, symbolId: "target:foo", framework: TestGenerationFrameworkV15.Cpputest,
+    goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60_000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  const run: TestGenerationRunV15 = {
+    runId: "c".repeat(32), taskId: "d".repeat(32), workspaceGeneration: request.workspaceGeneration,
+    projectId: request.projectId, state: TestGenerationStateV15.Queued, createdAt: new Date("2026-09-27T00:00:00Z"),
+    lastSequence: 0
+  };
+  const page: TestGenerationCandidatePageV15 = { items: [] };
+  const accept: TestGenerationAcceptRequestV15 = { runId: run.runId, candidateId: "e".repeat(32), confirmationDigest: "a".repeat(64), confirmCharacterization: true };
+  const target: TestGenerationTargetV15 = { kind: TestGenerationTargetKindV15.BuildTarget, targetId: "f".repeat(64), frameworks: [TestGenerationTargetFrameworkV15.Cpputest] };
+  const diagnostic: TestGenerationDiagnosticV15 = { code: TestGenerationDiagnosticCodeV15.CoverageGap, severity: TestGenerationDiagnosticSeverityV15.Warning, reason: TestGenerationDiagnosticReasonV15.UncoveredBranch };
+  assert.equal(run.projectId, "core");
+  assert.equal(page.items.length, 0);
+  assert.equal(accept.confirmCharacterization, true);
+  assert.equal(accept.confirmationDigest.length, 64);
+  assert.equal(target.targetId.length, 64);
+  assert.equal(diagnostic.code, "COVERAGE_GAP");
+});
 
 test("generated capabilities represent an empty Windows service", () => {
   const value: Capabilities = {

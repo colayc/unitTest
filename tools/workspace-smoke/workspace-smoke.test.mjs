@@ -486,6 +486,7 @@ test("release manifest contract stays pinned to the repository product identity"
     product: "unit-test-ide",
     inputPath: "release-input.json",
     outputPath: "manifest.generated.json",
+    testgenBundlePath: "bundles/testgen",
   });
   assert.equal(schema.properties.product.const, "unit-test-ide");
   assert.equal(schema.properties.schemaVersion.const, 1);
@@ -670,6 +671,78 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   for (const retained of ["verify-windows", "verify-linux", "package-windows", "package-linux", "release-qualification"]) {
     assert.ok(jobs.includes(retained), `existing ${retained} job must remain present`);
   }
+});
+
+test("foundation Phase 10 job uploads only an explicit missing-hosted local report", async () => {
+  const source = await readFile(".github/workflows/foundation.yml", "utf8");
+  const job = workflowJob(source, "phase10-local-gate");
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /pnpm test:phase10:test-generation/u);
+  assert.match(job, /test-generation-report\.mjs --local-managed/u);
+  assert.match(job, /--candidate "\$candidate"/u);
+  assert.match(job, /--out "\$PWD\/\.native-e2e\/artifacts\/phase10\/managed-coverage-local\.json"/u);
+  assert.match(job, /name: phase10-managed-coverage-local-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(job, /if-no-files-found: error/u);
+  assert.doesNotMatch(job, /continue-on-error|external-native-receipt|releaseReady:\s*true/u);
+});
+
+test("Phase 10A publishes exact candidate-bound GCC, Clang, and clang-cl coverage backend evidence", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const clang = workflowJob(workflow, "coverage-linux-clang");
+  const windows = workflowJob(workflow, "coverage-windows-clang-cl");
+  const matrix = workflowJob(workflow, "coverage-backend-matrix");
+  const gcc = workflowJob(workflow, "coverage-linux-gcc");
+  for (const [job, backend, report] of [
+    [gcc, "linux-gcc", "linux-gcc-coverage-backend.json"],
+    [clang, "linux-clang", "linux-clang-coverage-backend.json"],
+    [windows, "windows-clang-cl", "windows-clang-cl-coverage-backend.json"],
+  ]) {
+    assert.match(job, new RegExp(`${backend}-coverage-backend-\\$\\{\\{ github\\.run_attempt \\}\\}`));
+    assert.ok(job.includes(report));
+    assert.match(job, /UTIDE_COVERAGE_RUNNER_IMAGE:/u);
+    assert.match(job, /UTIDE_CANDIDATE_SHA:\s*\$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u);
+    assert.doesNotMatch(job, /continue-on-error|if-no-files-found:\s*warn|@v[0-9]+\b/u);
+    for (const action of workflowActionUses(job)) assert.match(action, /@[0-9a-f]{40}$/u);
+  }
+  assert.match(clang, /TestNativeLinuxLLVMFixture/u);
+  assert.match(clang, /UTIDE_NATIVE_LLVM_BUNDLE/u);
+  assert.match(clang, /node tools\/linux-offline\/run\.mjs --allow-sudo-root/u);
+  const prepared = clang.indexOf("go mod download");
+  const native = clang.indexOf("TestNativeLinuxLLVMFixture");
+  assert.ok(prepared >= 0 && native > prepared);
+  assert.doesNotMatch(clang.slice(native), /go mod download|pnpm install|prepare:(?:coverage|framework)-bundle|actions\/cache@/u);
+  assert.match(matrix, /needs:\s*\n\s*- coverage-linux-gcc\s*\n\s*- coverage-linux-clang\s*\n\s*- coverage-windows-clang-cl/u);
+  assert.match(matrix, /native-report\.js --mode matrix/u);
+  assert.match(matrix, /coverage-backends-\$\{\{ github\.run_attempt \}\}/u);
+});
+
+test("Windows coverage backend row is limited to its dedicated producer without changing legacy master WFP smoke", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const source = await readFile("apps/code-oss-extension/test/coverage-service-smoke.test.ts", "utf8");
+  const legacy = workflowJob(workflow, "verify-windows");
+  const producer = workflowJob(workflow, "coverage-windows-clang-cl");
+  assert.doesNotMatch(legacy, /UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED/u);
+  assert.match(producer, /UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED:\s*['"]?1['"]?/u);
+  assert.match(source, /process\.env\.UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED/u);
+  assert.doesNotMatch(source, /if \(process\.env\.GITHUB_ACTIONS === "true"\) \{\s*const candidateCommit/u);
+  assert.match(legacy, /name: Verify Windows LLVM coverage execution/u);
+  assert.match(legacy, /name: Verify privileged Windows WFP lifecycle/u);
+});
+
+test("dedicated Windows coverage producer resolves Go dependencies before a fail-closed offline build", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const source = await readFile("apps/code-oss-extension/test/coverage-service-smoke.test.ts", "utf8");
+  const job = workflowJob(workflow, "coverage-windows-clang-cl");
+  const prepared = job.indexOf("go mod download");
+  const smoke = job.indexOf("test:coverage-service-smoke");
+  assert.ok(prepared >= 0 && smoke > prepared);
+  const smokeStep = job.slice(job.lastIndexOf("      - ", smoke), smoke);
+  for (const setting of ["GOENV: 'off'", "GOTOOLCHAIN: local", "GOPROXY: 'off'", "GOSUMDB: 'off'"]) {
+    assert.ok(smokeStep.includes(setting), `${setting} must apply to the actual smoke process`);
+  }
+  assert.match(smokeStep, /go list -deps .*unit-test-service.*coverage-toolset-preflight.*native-offline-guardian/u);
+  assert.match(source, /GOPROXY:\s*"off"/u);
+  assert.match(source, /GOSUMDB:\s*"off"/u);
 });
 
 test("dependency metadata uses the official npm registry", async () => {
@@ -983,12 +1056,12 @@ test("guardian executable registration constrains network-capable selectors to l
   );
   assert.deepEqual(
     [...source.matchAll(/\bwinio\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
-    ["ListenPipe", "PipeConfig", "DialPipeContext"],
+    ["ListenPipe", "PipeConfig", "DialPipeContext", "DialPipeContext"],
     "registration_windows.go must use go-winio only for local Named Pipe setup/dial"
   );
   assert.deepEqual(
     calledSelectors(source, "winio"),
-    ["ListenPipe", "DialPipeContext"],
+    ["ListenPipe", "DialPipeContext", "DialPipeContext"],
     "executable registration must only listen and dial on local Named Pipes"
   );
 });

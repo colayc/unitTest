@@ -13,3 +13,28 @@ export interface ExtensionState {
   trust: TrustState;
   service: ServiceStatus;
 }
+
+export const TEST_GENERATION_COMMANDS = [
+  "unitTestIde.generateTests",
+  "unitTestIde.generateTestsForSymbol",
+  "unitTestIde.generateTestsForFile",
+  "unitTestIde.generateTestsForTarget",
+  "unitTestIde.generateTestsForCoverageGap",
+  "unitTestIde.reviewGeneratedTests",
+  "unitTestIde.acceptGeneratedTests",
+  "unitTestIde.cancelTestGeneration"
+] as const;
+export type TestGenerationCommand = typeof TEST_GENERATION_COMMANDS[number];
+
+export type TestGenerationAvailability = "available" | "unavailable" | "blocked-trust" | "stale-workspace";
+
+/** v1.5 capabilities do not advertise these features; absent or false stays unavailable. */
+export function supportsDetailedCoverage(capabilities: unknown): boolean {
+  return !!capabilities && typeof capabilities === "object" &&
+    "coverageDetails" in capabilities && capabilities.coverageDetails === true;
+}
+
+export function supportsManagedTests(capabilities: unknown): boolean {
+  return !!capabilities && typeof capabilities === "object" &&
+    "managedTests" in capabilities && capabilities.managedTests === true;
+}

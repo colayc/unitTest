@@ -12,6 +12,14 @@ import (
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
+// RecoverPendingManagedAcceptance is intentionally separate from task recovery:
+// only the publisher, after comparing the actual workspace file digest with
+// its durable journal, may resolve a pending managed write. Startup must not
+// silently turn a possibly written file into an accepted registry record.
+func (s *Store) RecoverPendingManagedAcceptance(ctx context.Context, acceptanceID, observedFileDigest string) error {
+	return s.ManagedTestRegistry().ResolvePendingManagedAcceptance(ctx, acceptanceID, observedFileDigest)
+}
+
 func upsertLease(ctx context.Context, tx *sql.Tx, lease task.ProcessLease) error {
 	if !validLease(lease) {
 		return task.ErrInvalidArgument
@@ -181,6 +189,10 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 
 	events := make([]task.Event, 0, len(candidates))
 	for _, candidate := range candidates {
+		if candidate.kind == task.KindTestGeneration {
+			// Generation stages resume from their own durable checkpoints.
+			continue
+		}
 		interrupt := candidate.kind == task.KindSimulation ||
 			candidate.status == task.StatusRunning ||
 			candidate.status == task.StatusCancelling

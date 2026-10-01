@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +19,7 @@ import (
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
+	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
 	"unit-test-ide.local/test-service/internal/server"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
@@ -49,6 +52,58 @@ func TestServeConnectionHandlesHandshakeAndShutdown(t *testing.T) {
 	shutdown := exchange(t, client, protocol.Request{ProtocolVersion: "1.0", Kind: "request", MessageID: "fedcba9876543210fedcba9876543210", Method: "shutdown", SentAt: sentAt, Payload: json.RawMessage(`{}`)})
 	if shutdown.Kind != "response" {
 		t.Fatalf("shutdown failed: %#v", shutdown)
+	}
+}
+
+type largePreviewCoverage struct{ session.CoverageBackend }
+type largePreviewGeneration struct {
+	session.GenerationBackend
+	diff string
+}
+
+func (g largePreviewGeneration) TestGenerationReady() bool { return true }
+func (g largePreviewGeneration) GetTestGenerationRun(context.Context, string, string) (generationv15.TestGenerationRunV15, error) {
+	sum := sha256.Sum256([]byte(g.diff))
+	return generationv15.TestGenerationRunV15{
+		RunID: strings.Repeat("a", 32), TaskID: strings.Repeat("b", 32), ProjectID: "core",
+		WorkspaceGeneration: strings.Repeat("c", 64), State: generationv15.AwaitingConfirmation,
+		CreatedAt: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC), LastSequence: 8,
+		Preview: &generationv15.TestGenerationPreviewV15{
+			CandidateSetDigest: strings.Repeat("d", 64), DiffDigest: hex.EncodeToString(sum[:]),
+			ConfirmationDigest: strings.Repeat("e", 64), Diff: &g.diff,
+		},
+	}, nil
+}
+
+func TestServeConnectionReturnsEscapedGenerationPreviewOverOneMiB(t *testing.T) {
+	diff := "--- a/tests/generated.cpp\n+++ b/tests/generated.cpp\n@@ -0,0 +1 @@\n+" + strings.Repeat("\x00", 261000) + "\n"
+	client, service := net.Pipe()
+	active := session.NewWithGeneration("0123456789abcdef", "linux", "unix-socket", &streamBackend{}, &largePreviewCoverage{}, largePreviewGeneration{diff: diff})
+	go server.ServeConnection(service, active)
+	defer client.Close()
+	handshake, _ := json.Marshal(map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0", "supportedProtocolVersions": []string{"1.5"},
+	})
+	response := exchange(t, client, protocol.Request{ProtocolVersion: "1.5", Kind: "request", MessageID: strings.Repeat("1", 32), Method: "handshake", SentAt: sentAt, Payload: handshake})
+	if response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	get, _ := json.Marshal(map[string]string{"runId": strings.Repeat("a", 32)})
+	response = exchange(t, client, protocol.Request{ProtocolVersion: "1.5", Kind: "request", MessageID: strings.Repeat("2", 32), Method: "testGeneration/runs/get", SentAt: sentAt, Payload: get})
+	if response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	payload, ok := response.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected payload type %T", response.Payload)
+	}
+	preview, ok := payload["preview"].(map[string]any)
+	if !ok || preview["diff"] != diff {
+		t.Fatal("escaped preview did not survive the service wire")
+	}
+	raw, err := json.Marshal(response)
+	if err != nil || len(raw) <= 1<<20 || len(raw) > server.MaxMessageBytes {
+		t.Fatalf("escaped wire response size=%d err=%v", len(raw), err)
 	}
 }
 
@@ -175,7 +230,7 @@ func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
 	client, service := net.Pipe()
 	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
 	defer client.Close()
-	line := requestLineOfSize(t, server.MaxMessageBytes)
+	line := requestLineOfSize(t, server.LegacyMaxMessageBytes)
 	go func() { _, _ = client.Write(append(line, '\n')) }()
 	var response protocol.Response
 	if err := json.NewDecoder(client).Decode(&response); err != nil {
@@ -186,10 +241,79 @@ func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
 	}
 }
 
+func TestServeConnectionRejectsLegacyLineAboveOneMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSize(t, server.LegacyMaxMessageBytes+1)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "INVALID_MESSAGE" || response.Error.Message != "message exceeds the 1 MiB limit" {
+		t.Fatalf("legacy oversized response: %#v", response)
+	}
+}
+
+func TestServeConnectionAcceptsV15LineAtTwoMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSizeVersion(t, server.MaxMessageBytes, protocol.Version15)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "AUTH_REQUIRED" {
+		t.Fatalf("v1.5 at-limit response: %#v", response)
+	}
+}
+
+func TestServeConnectionAcceptsV16LineAtTwoMiB(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	line := requestLineOfSizeVersion(t, server.MaxMessageBytes, protocol.Version16)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "AUTH_REQUIRED" {
+		t.Fatalf("v1.6 at-limit response: %#v", response)
+	}
+}
+
+func TestServeConnectionLegacySessionRejectsSpoofedV15OversizeLine(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
+	defer client.Close()
+	handshake, _ := json.Marshal(map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"})
+	accepted := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version10, Kind: "request", MessageID: strings.Repeat("1", 32), Method: "handshake", SentAt: sentAt, Payload: handshake})
+	if accepted.Error != nil {
+		t.Fatal(accepted.Error)
+	}
+	line := requestLineOfSizeVersion(t, server.LegacyMaxMessageBytes+1, protocol.Version15)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ProtocolVersion != protocol.Version10 || response.Error == nil || response.Error.Code != "INVALID_MESSAGE" || response.Error.Message != "message exceeds the 1 MiB limit" {
+		t.Fatalf("spoofed v1.5 oversized response: %#v", response)
+	}
+}
+
 func requestLineOfSize(t *testing.T, size int) []byte {
+	return requestLineOfSizeVersion(t, size, protocol.Version)
+}
+
+func requestLineOfSizeVersion(t *testing.T, size int, version string) []byte {
 	t.Helper()
 	request := protocol.Request{
-		ProtocolVersion: protocol.Version,
+		ProtocolVersion: version,
 		Kind:            "request",
 		MessageID:       "0123456789abcdef0123456789abcdef",
 		Method:          "capabilities/get",

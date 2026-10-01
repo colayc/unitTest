@@ -328,6 +328,16 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			coverage = coverageSnapshot.capability
 		}
 	}
+	environment := []string{}
+	if runtime.GOOS != "windows" {
+		buildTool := candidate.Ninja
+		if len(generators) == 1 && generators[0] == "Unix Makefiles" {
+			buildTool = candidate.Make
+		}
+		if pathValue := unixToolchainPATH(candidate, cCompiler.path, cxxCompiler.path, buildTool); pathValue != "" {
+			environment = []string{"PATH=" + pathValue}
+		}
+	}
 	instance := Instance{
 		Family:             adapter.family,
 		CCompiler:          cCompiler.path,
@@ -338,7 +348,7 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		TargetArchitecture: targetArchitecture,
 		CompilerSHA256:     cCompiler.digest,
 		Sysroot:            cDescriptor.sdk,
-		Environment:        []string{},
+		Environment:        environment,
 		Generators:         generators,
 		Coverage:           coverage,
 	}
@@ -355,7 +365,119 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "construct automatic toolchain id")
 		}
 	}
+	if adapter.family == FamilyClang && runtime.GOOS == "linux" {
+		capability, coverageErr := adapter.probeLLVMCoverage(ctx, instance)
+		if isContextError(coverageErr) {
+			return Instance{}, coverageErr
+		}
+		if coverageErr == nil {
+			instance.Coverage = capability
+		}
+	}
 	return instance, nil
+}
+
+// unixToolchainPATH builds the exact PATH used for native build processes.
+// Discovery supplies canonical host PATH directories, while the executable
+// directories are included as a defensive fallback for manually configured
+// toolchains. Keeping this list explicit avoids inheriting unrelated process
+// environment entries but still lets compiler drivers resolve helpers such as
+// GNU as and the linker.
+func unixToolchainPATH(candidate Candidate, compilers ...string) string {
+	paths := make([]string, 0, len(candidate.PathDirectories)+len(compilers))
+	appendPath := func(path string) {
+		if path == "" || strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) {
+			return
+		}
+		directory := filepath.Clean(path)
+		for _, existing := range paths {
+			if identityPath(existing) == identityPath(directory) {
+				return
+			}
+		}
+		paths = append(paths, directory)
+	}
+	for _, directory := range candidate.PathDirectories {
+		appendPath(directory)
+	}
+	// Automatically discovered compilers already come from the accepted host
+	// PATH. Keep their production environment limited to the helper roots above;
+	// compiler directories are needed only for explicit/manual candidates whose
+	// executables may live outside that accepted PATH.
+	if candidate.Manual || len(candidate.PathDirectories) == 0 {
+		for _, executable := range compilers {
+			if executable != "" {
+				appendPath(filepath.Dir(executable))
+			}
+		}
+	}
+	return strings.Join(paths, string(os.PathListSeparator))
+}
+
+// probeLLVMCoverage is best-effort: an ordinary Clang remains discoverable
+// when its same-installation coverage tools cannot be verified.
+func (adapter *gnuAdapter) probeLLVMCoverage(ctx context.Context, instance Instance) (CoverageCapability, error) {
+	if adapter == nil || adapter.family != FamilyClang || runtime.GOOS != "linux" ||
+		instance.Family != FamilyClang || instance.CCompiler == "" || instance.CXXCompiler == "" {
+		return CoverageCapability{}, ErrInvalidToolchain
+	}
+	root := filepath.Dir(instance.CCompiler)
+	paths := []string{instance.CCompiler, instance.CXXCompiler, filepath.Join(root, "llvm-profdata"), filepath.Join(root, "llvm-cov")}
+	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+	snapshots := make([]*executableSnapshot, 0, len(paths))
+	defer func() {
+		for _, item := range snapshots {
+			_ = item.Close()
+		}
+	}()
+	for index, path := range paths {
+		item, err := openDirectExecutableSnapshot(ctx, path)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		snapshots = append(snapshots, item)
+		if filepath.Dir(item.path) != root || filepath.Base(item.path) != roles[index] {
+			return CoverageCapability{}, ErrInvalidToolchain
+		}
+	}
+	verify := func() error {
+		for _, item := range snapshots {
+			if err := item.Verify(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, index := range []int{2, 3} {
+		output, err := adapter.runProbe(ctx, snapshots[index].path, "--version", verify)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		version, err := LLVMVersionFromBanner(roles[index], output)
+		if err != nil || version != instance.Version {
+			return CoverageCapability{}, ErrInvalidToolchain
+		}
+	}
+	if err := verify(); err != nil {
+		return CoverageCapability{}, err
+	}
+	tools := make([]LLVMToolEvidence, len(paths))
+	for index, item := range snapshots {
+		evidence, err := unixExecutableEvidence(item)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		tools[index] = LLVMToolEvidence{Role: roles[index], Path: item.path, Evidence: evidence}
+	}
+	identity, err := LLVMToolsetIdentityForTools(instance.Version, tools)
+	if err != nil {
+		return CoverageCapability{}, err
+	}
+	return CoverageCapability{
+		LLVMProfdata: paths[2], LLVMCov: paths[3], CompilerEvidence: tools[0].Evidence,
+		CXXCompilerEvidence: tools[1].Evidence, ProfdataEvidence: tools[2].Evidence,
+		CovEvidence: tools[3].Evidence, ToolsetIdentity: identity,
+	}, nil
 }
 
 // probeGCCCoverage is deliberately best-effort. A valid ordinary GCC

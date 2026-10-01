@@ -13,7 +13,14 @@ import {
   type PreparedCMakeBundle,
 } from "./native-build.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
-import { verifyRequiredFrameworkReport } from "./native-report.js";
+import { buildCoverageBackendReport, verifyRequiredFrameworkReport } from "./native-report.js";
+
+test("Windows clang-cl coverage remains required even when Linux backend rows pass", () => {
+  assert.throws(() => buildCoverageBackendReport("a".repeat(40), [
+    { backend: "linux-gcc", status: "passed" },
+    { backend: "linux-clang", status: "passed" },
+  ]), /required coverage backend/u);
+});
 
 test("Windows framework evidence hashes the unique compiled executable from the fixed Service build root", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "native-framework-executable-win-"));
@@ -125,7 +132,12 @@ test("required Windows native run binds both real framework executables and publ
         })),
       } as never;
     },
-    executeScenarios: async ({ family }) => {
+    executeScenarios: async ({ family, taskTimeoutMs }) => {
+      assert.equal(
+        taskTimeoutMs,
+        300_000,
+        "framework native builds use the bounded 5m task timeout",
+      );
       events.push(`core:${family}`);
       return { "default-build": "passed" };
     },

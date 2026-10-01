@@ -4,10 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,9 +22,10 @@ import (
 	"unit-test-ide.local/test-service/internal/task"
 )
 
-const MaxMessageBytes = 1024 * 1024
-
-var errOutboundMessageTooLarge = errors.New("outbound message exceeds the 1 MiB limit")
+// A 262144-byte preview diff can expand sixfold when JSON-escaped. Keep the
+// complete wire envelope bounded while allowing v1.5/v1.6 previews.
+const MaxMessageBytes = 2 * 1024 * 1024
+const LegacyMaxMessageBytes = 1024 * 1024
 
 type ConnectionConfig struct {
 	HandshakeTimeout time.Duration
@@ -111,11 +117,12 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			}
 		}
 		if !scanner.Scan() {
+			debugConnection("scan ended authenticated=%t err=%v", active.Authenticated(), scanner.Err())
 			break
 		}
 		if len(scanner.Bytes()) > MaxMessageBytes {
 			request := protocol.Request{MessageID: "00000000000000000000000000000000"}
-			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 2 MiB limit", false))
 			return
 		}
 		request, err := protocol.DecodeRequest(scanner.Bytes())
@@ -124,12 +131,27 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, invalid, "INVALID_MESSAGE", "message is invalid", false))
 			return
 		}
+		debugConnection("request[%s] version[%s] auth[%t] bytes[%d]", request.Method, request.ProtocolVersion, active.Authenticated(), len(scanner.Bytes()))
+		responseVersion := request.ProtocolVersion
+		limitVersion := request.ProtocolVersion
+		if active.Authenticated() {
+			responseVersion = active.NegotiatedVersion()
+			if messageLimitForVersion(responseVersion) < messageLimitForVersion(limitVersion) {
+				limitVersion = responseVersion
+			}
+		}
+		if len(scanner.Bytes()) > messageLimitForVersion(limitVersion) {
+			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(responseVersion, request, "INVALID_MESSAGE", inboundLimitMessage(limitVersion), false))
+			return
+		}
 		if request.Method == "events/subscribe" {
 			retireActiveSubscription()
 		}
 		result := active.Handle(connectionContext, request)
+		debugConnection("handled[%s] response[%T] subscription[%t]", request.Method, result.Response, result.Subscription != nil)
 		responseWritten, err := enqueueOutbound(connectionContext, outbound, writerDone, result.Response)
 		if err != nil {
+			debugConnection("enqueue[%s] error[%v]", request.Method, err)
 			if result.Subscription != nil {
 				result.Subscription.Close()
 			}
@@ -162,6 +184,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
+			debugConnection("wait[%s] error[%v]", request.Method, err)
 			return
 		}
 		select {
@@ -171,13 +194,21 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
+		debugConnection("scan error=%v", scanErr)
 		var networkError net.Error
 		if errors.As(scanErr, &networkError) && networkError.Timeout() {
 			return
 		}
 		request := protocol.Request{MessageID: "00000000000000000000000000000000"}
-		_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+		_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, request, "INVALID_MESSAGE", "message exceeds the 2 MiB limit", false))
 	}
+}
+
+func debugConnection(format string, args ...any) {
+	if os.Getenv("UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION") != "1" {
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "service-connection-debug: "+format+"\n", args...)
 }
 
 func connectionWriter(connection net.Conn, timeout time.Duration, outbound <-chan outboundMessage, done chan<- struct{}, closeConnection func()) {
@@ -208,6 +239,7 @@ func connectionWriter(connection net.Conn, timeout time.Duration, outbound <-cha
 			close(message.done)
 		}
 		if terminal || writeErr != nil {
+			debugConnection("writer terminal=%t encode-error=%v write-error=%v", terminal, encodeErr, writeErr)
 			closeConnection()
 			return
 		}
@@ -219,10 +251,40 @@ func encodeOutboundLine(value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded) > MaxMessageBytes {
-		return nil, errOutboundMessageTooLarge
+	version := outboundVersion(value)
+	if len(encoded) > messageLimitForVersion(version) {
+		return nil, errors.New(outboundLimitMessage(version))
 	}
 	return append(encoded, '\n'), nil
+}
+
+func messageLimitForVersion(version string) int {
+	if version == protocol.Version15 || version == protocol.Version16 {
+		return MaxMessageBytes
+	}
+	return LegacyMaxMessageBytes
+}
+
+func inboundLimitMessage(version string) string {
+	if version == protocol.Version15 || version == protocol.Version16 {
+		return "message exceeds the 2 MiB limit"
+	}
+	return "message exceeds the 1 MiB limit"
+}
+
+func outboundLimitMessage(version string) string {
+	return "outbound " + inboundLimitMessage(version)
+}
+
+func outboundVersion(value any) string {
+	switch envelope := value.(type) {
+	case protocol.Response:
+		return envelope.ProtocolVersion
+	case protocol.Event:
+		return envelope.ProtocolVersion
+	default:
+		return protocol.Version10
+	}
 }
 
 func outboundLimitFailure(value any) protocol.Response {
@@ -237,7 +299,7 @@ func outboundLimitFailure(value any) protocol.Response {
 	case protocol.Event:
 		version = envelope.ProtocolVersion
 	}
-	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", "outbound message exceeds the 1 MiB limit", true)
+	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", outboundLimitMessage(version), true)
 }
 
 func writeAll(connection net.Conn, value []byte) error {
@@ -337,6 +399,15 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 }
 
 func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
+	// Pre-v1.5 generation rows retain only cursor tombstones after migration.
+	// Keep the numeric sequence for old subscribers, but do not expose the
+	// original generation task identity or occurrence time in legacy envelopes.
+	if event.Type == task.EventTaskOutput && bytes.Equal(event.Payload, []byte(`{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}`)) {
+		event.TaskID = "00000000000000000000000000000000"
+		event.At = time.Unix(0, 0).UTC()
+		synthetic := sha256.Sum256([]byte("unit-test-ide:legacy-cursor-tombstone:v1:" + strconv.FormatInt(event.Sequence, 10)))
+		event.ID = hex.EncodeToString(synthetic[:16])
+	}
 	eventType := event.Type
 	payload := event.Payload
 	if version != protocol.Version14 && coverageDomainEvent(event.Type) {

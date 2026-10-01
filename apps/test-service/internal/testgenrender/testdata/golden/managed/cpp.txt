@@ -1,0 +1,14 @@
+#include "CppUTest/TestHarness.h"
+#include "include/choose.h"
+#include <stdint.h>
+
+// unit-test-ide:managed-begin case=utc_3c8a90a79f999ca78f732c876c5997ba function=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb symbol=choose
+TEST_GROUP(test_choose_returns_7_3c8a90a79f999ca78f732c876c5997ba) {};
+TEST(test_choose_returns_7_3c8a90a79f999ca78f732c876c5997ba, Returns_7) {
+  // Arrange
+  // Act
+  const auto actual = choose(2);
+  // Assert
+  CHECK_EQUAL(7, actual);
+}
+// unit-test-ide:managed-end case=utc_3c8a90a79f999ca78f732c876c5997ba

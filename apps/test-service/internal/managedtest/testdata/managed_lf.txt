@@ -1,0 +1,5 @@
+// user header
+// unit-test-ide:managed-begin case=utc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa function=cccccccccccccccccccccccccccccccc symbol=calculateTotal
+TEST(Example, Empty) {}
+// unit-test-ide:managed-end case=utc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+// user footer

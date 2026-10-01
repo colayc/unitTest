@@ -193,6 +193,12 @@ type PreparedCompletionDiscarder interface {
 	DiscardPreparedCompletion()
 }
 
+// CompletionCommitted is optional derived-data work after the canonical
+// terminal graph is durable. Its failure must never roll back v1 completion.
+type CompletionCommitted interface {
+	CompletionCommitted(context.Context, DomainCompletion) error
+}
+
 type DomainCompletion struct {
 	TestRun  *testdomain.TestRun
 	Coverage *CoverageCompletion

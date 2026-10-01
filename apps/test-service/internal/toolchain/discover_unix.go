@@ -69,6 +69,9 @@ func discoverUnixCandidates(
 	directories := canonicalPATHDirectories(segments)
 	ninja := firstDiscoveredExecutable(directories, "ninja")
 	makeExecutable := firstDiscoveredExecutable(directories, "make")
+	toolDirectories := unixToolDirectories(directories,
+		"ninja", "make", "as", "ld", "ar", "ranlib", "strip", "objcopy",
+	)
 
 	result := map[Family][]Candidate{
 		FamilyGCC:   {},
@@ -84,19 +87,20 @@ func discoverUnixCandidates(
 			return nil, fmt.Errorf("%w: manual %s toolchain is invalid", ErrInvalidToolchain, family)
 		}
 		result[family] = append(result[family], Candidate{
-			ID:          config.ID,
-			Family:      family,
-			CCompiler:   filepath.Clean(config.CCompiler),
-			CXXCompiler: filepath.Clean(config.CPPCompiler),
-			Manual:      true,
-			Ninja:       ninja,
-			Make:        makeExecutable,
+			ID:              config.ID,
+			Family:          family,
+			CCompiler:       filepath.Clean(config.CCompiler),
+			CXXCompiler:     filepath.Clean(config.CPPCompiler),
+			Manual:          true,
+			Ninja:           ninja,
+			Make:            makeExecutable,
+			PathDirectories: append([]string(nil), toolDirectories...),
 		})
 	}
 
 	for _, directory := range directories {
-		appendDiscoveredPair(result, FamilyGCC, directory, "gcc", "g++", ninja, makeExecutable)
-		appendDiscoveredPair(result, FamilyClang, directory, "clang", "clang++", ninja, makeExecutable)
+		appendDiscoveredPair(result, FamilyGCC, directory, "gcc", "g++", ninja, makeExecutable, toolDirectories)
+		appendDiscoveredPair(result, FamilyClang, directory, "clang", "clang++", ninja, makeExecutable, toolDirectories)
 	}
 	for _, family := range []Family{FamilyGCC, FamilyClang} {
 		if len(result[family]) > maxUnixFamilyCandidates {
@@ -158,6 +162,7 @@ func appendDiscoveredPair(
 	cxxName string,
 	ninja string,
 	makeExecutable string,
+	pathDirectories []string,
 ) {
 	cCompiler := discoveredExecutable(directory, cName)
 	cxxCompiler := discoveredExecutable(directory, cxxName)
@@ -165,12 +170,32 @@ func appendDiscoveredPair(
 		return
 	}
 	result[family] = append(result[family], Candidate{
-		Family:      family,
-		CCompiler:   cCompiler,
-		CXXCompiler: cxxCompiler,
-		Ninja:       ninja,
-		Make:        makeExecutable,
+		Family:          family,
+		CCompiler:       cCompiler,
+		CXXCompiler:     cxxCompiler,
+		Ninja:           ninja,
+		Make:            makeExecutable,
+		PathDirectories: append([]string(nil), pathDirectories...),
 	})
+}
+
+// unixToolDirectories keeps only PATH directories that contain a verified
+// native build/helper executable. The complete host PATH can be very large;
+// carrying it into every toolchain snapshot both widens the build environment
+// and can exceed protocol payload bounds. Compiler directories are added later
+// by unixToolchainPATH for toolchains discovered outside these helper roots.
+func unixToolDirectories(directories []string, names ...string) []string {
+	result := make([]string, 0, len(directories))
+	for _, directory := range directories {
+		for _, name := range names {
+			if discoveredExecutable(directory, name) == "" {
+				continue
+			}
+			result = append(result, directory)
+			break
+		}
+	}
+	return result
 }
 
 func firstDiscoveredExecutable(directories []string, name string) string {

@@ -61,7 +61,11 @@ func (platform *unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.
 	}
 	cmd := exec.Command(spec.Executable, spec.Args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = targetEnvironment(spec.Env, spec.EnvUnset)
+	if spec.ClosedEnvironment {
+		cmd.Env = processcontrol.ClosedEnvironment(spec.Env)
+	} else {
+		cmd.Env = targetEnvironment(spec.Env, spec.EnvUnset)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}

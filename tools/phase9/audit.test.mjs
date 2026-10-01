@@ -7,7 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { encodeCanonicalJson, writeCanonicalJson } from "./canonical-json.mjs";
-import { auditGithubReceipt, evaluateAuditedMatrix, parseP8ReportArchive } from "./audit.mjs";
+import { auditGithubReceipt, evaluateAuditedMatrix, parseCoverageBackendReportArchive, parseP8ReportArchive } from "./audit.mjs";
 import { artifactNameForP8Gate } from "./p8-report.mjs";
 import { ALLOWED_DEFERRED_GATE_IDS, evaluateRecordedMatrix } from "./validate.mjs";
 
@@ -173,6 +173,63 @@ function p8QualificationAuditInputs({ includeReport = true, signing, mutateRepor
     reportArtifacts: new Map([[artifactId, { archiveDigest: digest, report: contentReport }]]),
   };
 }
+
+function coverageAuditInputs() {
+  const backends = ["linux-gcc", "linux-clang", "windows-clang-cl"];
+  const report = {
+    schemaVersion: 1, candidateCommit,
+    rows: backends.map((backend, index) => ({
+      schemaVersion: 1, candidateCommit, backend, status: "passed",
+      runnerImage: index === 2 ? "windows-2025-vs2026" : "ubuntu-24.04",
+      compiler: { family: ["gcc", "clang", "clang-cl"][index], version: "18.1.0", sha256: String(index + 1).repeat(64) },
+      summary: { functions: { covered: 1, total: 2 }, lines: { covered: 1, total: 2 }, branches: { covered: 1, total: 2 } },
+      sourceArtifactSha256: String(index + 4).repeat(64),
+    })),
+  };
+  const jobs = ["coverage-backend-matrix", "coverage-linux-gcc", "coverage-linux-clang", "coverage-windows-clang-cl"]
+    .map((name, index) => ({ id: String(9001 + index), name, conclusion: "success", runnerImage: index === 3 ? "windows-2025-vs2026" : "ubuntu-24.04" }));
+  const artifacts = ["linux-gcc-coverage-backend-1", "linux-clang-coverage-backend-1", "windows-clang-cl-coverage-backend-1", "coverage-backends-1"]
+    .map((name, index) => ({ id: String(10310420275 + index), name, digest: String(index + 6).repeat(64), expired: false,
+      ...(index === 3 ? { report } : {}) }));
+  return {
+    receipt: validReceipt({ gateIds: ["P5-LINUX-GCC-COVERAGE"], evidence: { jobs, artifacts } }),
+    runSnapshot: validRunSnapshot(),
+    jobSnapshot: validJobSnapshot({ total_count: 4, jobs: jobs.map((job) => ({
+      id: Number(job.id), run_id: 34731651809, name: job.name, status: "completed", conclusion: "success", labels: [job.runnerImage],
+    })) }),
+    artifactSnapshot: validArtifactSnapshot({ total_count: 4, artifacts: artifacts.map((artifact) => ({
+      id: Number(artifact.id), name: artifact.name, digest: `sha256:${artifact.digest}`, expired: false,
+      workflow_run: { id: 34731651809 },
+    })) }),
+    reportArtifacts: new Map([[artifacts[3].id, { archiveDigest: artifacts[3].digest, report: structuredClone(report) }]]),
+  };
+}
+
+test("audits a closed coverage backend receipt with authenticated report and job identities", () => {
+  assert.equal(auditGithubReceipt({ ...coverageAuditInputs(), gateId: "P5-LINUX-GCC-COVERAGE" }).status, "PASS");
+});
+
+test("coverage backend audit rejects mismatched job ID, runner label, and report archive", () => {
+  for (const mutate of [
+    (input) => { input.receipt.evidence.jobs[1].id = "9999"; },
+    (input) => { input.jobSnapshot.jobs[2].labels = ["other-runner"]; },
+    (input) => { input.reportArtifacts.get("10310420278").archiveDigest = "f".repeat(64); },
+    (input) => { input.reportArtifacts.delete("10310420278"); },
+    (input) => { input.reportArtifacts.get("10310420278").report.rows[0].summary.lines.covered = 2; },
+  ]) {
+    const input = coverageAuditInputs();
+    mutate(input);
+    assertUntrusted(() => auditGithubReceipt({ ...input, gateId: "P5-LINUX-GCC-COVERAGE" }));
+  }
+});
+
+test("parses the canonical coverage backend archive", () => {
+  const report = coverageAuditInputs().receipt.evidence.artifacts[3].report;
+  const bytes = storedZip("coverage-backends.json", Buffer.from(encodeCanonicalJson(report)));
+  assert.deepEqual(parseCoverageBackendReportArchive(bytes).report, report);
+  assert.throws(() => parseCoverageBackendReportArchive(storedZip("p8-report.json", Buffer.from(encodeCanonicalJson(report)))),
+    (error) => error?.code === "PHASE9_EVIDENCE_UNTRUSTED");
+});
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -571,6 +628,7 @@ test("Phase 9 audit workflow downloads only digest-qualified P8 report archives 
   assert.match(workflow, /actions\/artifacts\/\$artifact_id\/zip/u);
   assert.match(workflow, /\$reports_root\/\$artifact_id\.zip/u);
   assert.match(workflow, /p8-\(install-lifecycle-linux\|install-lifecycle-windows\|license-audit\|linux-appimage-package\|qualification-unsigned\|runtime-producer-provenance\|windows-msix-package\)-report-\[1-9\]\[0-9\]\*-\[0-9a-f\]\{64\}/u);
+  assert.match(workflow, /coverage-backends-\[1-9\]\[0-9\]\*/u);
   assert.doesNotMatch(workflow, /actions\/artifacts\/\$artifact_name\/zip/u);
 });
 

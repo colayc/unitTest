@@ -23,6 +23,7 @@ const timeout = 300_000;
 const projectId = "coverage-fixture";
 const coverageProfileId = "coverage-gcc";
 const evidencePath = join(root, ".native-e2e/artifacts/linux/coverage-execution-report.json");
+const backendEvidencePath = join(root, ".native-e2e/artifacts/linux/linux-gcc-coverage-backend.json");
 const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 type Framework = "cpputest" | "unity";
@@ -169,7 +170,9 @@ async function artifacts(client: ProtocolClient, run: CoverageRun, framework: Fr
 }
 
 test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault mappings", { skip: process.platform !== "linux" ? "Linux-native smoke requires Linux" : false, timeout: 30 * 60_000 }, async () => {
+  process.env.UT_DEBUG_PROCESS_HOST_FAILURES = "1";
   await rm(evidencePath, { force: true });
+  await rm(backendEvidencePath, { force: true });
   const startedAt = new Date().toISOString();
   const bundleInput = process.env.UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT;
   const lockedBundle = join(root, ".superpowers/runtime/coverage-bundle/linux-x64");
@@ -215,11 +218,13 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const faults: LinuxGccFaultEvidence[] = [];
     let unityBytes: Uint8Array | undefined;
     let toolchainDigest = "";
+    let toolchainVersion = "";
     for (const scenario of ["cpputest", "unity", "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"] as const) {
       const framework: Framework = scenario === "cpputest" ? "cpputest" : "unity";
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
       const workspace = join(scratch, scenario);
       let serviceStderr = "";
+      let serviceExit = "running";
       await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
       if (framework === "cpputest") {
         await cp(join(workspace, "CMakeLists.linux.txt"), join(workspace, "CMakeLists.txt"), { force: true });
@@ -255,11 +260,12 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       };
       manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
         spawnService(binary, args) {
-          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret } });
+          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: "1" } });
           child.stderr?.on("data", (value: Uint8Array | string) => {
             const text = Buffer.from(value).toString("utf8");
             serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
           });
+          child.once("exit", (code, signal) => { serviceExit = `code=${String(code)} signal=${String(signal)}`; });
           return child;
         },
         async connect(endpoint) {
@@ -274,19 +280,46 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           return ProtocolClient.attach(socket);
         }
       } });
-      const session = await manager.start();
+      let session: Awaited<ReturnType<ServiceManager["start"]>>;
+      try {
+        session = await manager.start();
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; service-exit=${serviceExit}; service-stderr=${serviceStderr}`);
+      }
       sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory);
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
-      const caps = await client.getCapabilities();
-      assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
-      let selected = await selectGccEventually(client);
+      let selected: Selected;
+      try {
+        const caps = await client.getCapabilities();
+        assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps);
+        selected = await selectGccEventually(client);
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; service-exit=${serviceExit}; service-stderr=${serviceStderr}`);
+      }
       await config(workspace, framework, selected.profile.buildProfileId);
       for (let attempt = 0; ; attempt++) {
         selected = await selectGccEventually(client);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
-          await taskFinished(client, build.taskId, `${scenario} build`);
+          const buildEvents = await client.subscribeEvents(0);
+          const buildOutput: string[] = [];
+          const collectBuildOutput = (async () => {
+            for await (const event of buildEvents) {
+              if (event.taskId === build.taskId && event.event === "task.output") buildOutput.push(event.payload.text);
+            }
+          })();
+          try {
+            await taskFinished(client, build.taskId, `${scenario} build`);
+          } catch (error) {
+            buildEvents.close();
+            await collectBuildOutput;
+            const output = buildOutput.join("").slice(-16_384);
+            throw new Error(`${error instanceof Error ? error.message : String(error)}${output ? `; build-output=${output}` : ""}`);
+          } finally {
+            buildEvents.close();
+            await collectBuildOutput;
+          }
           break;
         } catch (error) {
           if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error;
@@ -302,6 +335,8 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const currentDigest = digest(JSON.stringify({ toolchainId: selected.toolchain.toolchainId, version: selected.toolchain.version }));
       if (!toolchainDigest) toolchainDigest = currentDigest;
       assert.equal(currentDigest, toolchainDigest);
+      if (!toolchainVersion) toolchainVersion = selected.toolchain.version;
+      assert.equal(selected.toolchain.version, toolchainVersion);
       for (let repeat = 0; repeat < (scenario === "unity" ? 2 : 1); repeat++) {
         // A completed native coverage run may refresh the generated catalog
         // (notably for Unity). Rebind both snapshot and catalog revision before
@@ -375,7 +410,8 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           }
           assert.equal(wireOverflow, false, "bounded coverage wire capture exceeded");
           const publicWire = Buffer.concat(wire);
-          for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
+          const leakedIndex = sensitive.findIndex((value) => publicWire.includes(Buffer.from(value)));
+          assert.equal(leakedIndex, -1, `coverage Protocol exchange leaked private slot ${leakedIndex} (length=${leakedIndex < 0 ? 0 : sensitive[leakedIndex]!.length})`);
           if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -388,6 +424,24 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`);
     await rm(scratch, { recursive: true, force: true });
     await publishEvidenceAtomically(evidencePath, bytes);
+    if (process.env.GITHUB_ACTIONS === "true") {
+      const candidateCommit = process.env.UTIDE_CANDIDATE_SHA;
+      const runnerImage = process.env.UTIDE_COVERAGE_RUNNER_IMAGE;
+      assert.match(candidateCommit ?? "", /^[0-9a-f]{40}$/u);
+      assert.match(runnerImage ?? "", /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+      assert.equal(cases.length, 2);
+      const total = (name: "functions" | "lines" | "branches") => ({
+        covered: cases.reduce((sum, item) => sum + item.summary[name].covered, 0),
+        total: cases.reduce((sum, item) => sum + item.summary[name].total, 0),
+      });
+      const backend = {
+        schemaVersion: 1, candidateCommit, backend: "linux-gcc", status: "passed",
+        runnerImage, compiler: { family: "gcc", version: toolchainVersion, sha256: toolchainDigest },
+        summary: { functions: total("functions"), lines: total("lines"), branches: total("branches") },
+        sourceArtifactSha256: digest(bytes),
+      };
+      await publishEvidenceAtomically(backendEvidencePath, Buffer.from(`${JSON.stringify(backend)}\n`, "utf8"));
+    }
   } catch (error) { throw redactServiceError(error, sensitive); }
   finally { try { await manager?.stop(); } finally { await rm(scratch, { recursive: true, force: true }); } }
 });

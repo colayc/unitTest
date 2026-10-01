@@ -288,3 +288,94 @@ export {
   ArtifactKindV14,
   ArtifactMIMETypeV14
 } from "./generated/artifact-v1-4.js";
+export type { CapabilitiesV15 } from "./generated/capabilities-v1-5.js";
+export { FrameworkAdapterIDV15 } from "./generated/capabilities-v1-5.js";
+export type { DiagnosticV15 } from "./generated/diagnostic-v1-5.js";
+export type { TestContractV15 } from "./generated/test-v1-5.js";
+export type { CoverageContractV15 } from "./generated/coverage-v1-5.js";
+export type {
+  TestGenerationAcceptRequestV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationCandidateV15,
+  TestGenerationCoverageV15,
+  TestGenerationDiagnosticV15,
+  TestGenerationEventPageV15,
+  TestGenerationEventReplayRequestV15,
+  TestGenerationProgressEventV15,
+  TestGenerationPlannedEditV15,
+  TestGenerationContractV15,
+  TestGenerationRunV15,
+  TestGenerationRunIDRequestV15,
+  TestGenerationStartRequestV15,
+  TestGenerationTargetListV15,
+  TestGenerationTargetV15,
+  TestGenerationTargetListRequestV15,
+  TestGenerationCandidateListRequestV15
+} from "./generated/test-generation-v1-5.js";
+export {
+  TestGenerationCandidateKindV15,
+  TestGenerationDiagnosticCodeV15,
+  TestGenerationDiagnosticReasonV15,
+  TestGenerationFrameworkV15,
+  TestGenerationScopeV15,
+  TestGenerationStateV15,
+  Kind as TestGenerationAssertionKindV15,
+  Severity as TestGenerationDiagnosticSeverityV15,
+  Operation as TestGenerationEditOperationV15,
+  Framework as TestGenerationTargetFrameworkV15,
+  TestGenerationTargetKindV15
+} from "./generated/test-generation-v1-5.js";
+export type {
+  TaskSnapshotV15,
+  TestGenerationTaskSnapshotV15
+} from "./generated/task-v1-5.js";
+export {
+  TaskKindV15,
+  TaskStatusV15,
+  TaskOutcomeV15,
+  SimulationScenarioV15
+} from "./generated/task-v1-5.js";
+export type {
+  TaskEventV15,
+  TestGenerationStateChangedEventV15
+} from "./generated/event-v1-5.js";
+export {
+  TaskEventNameV15,
+  EventKindV15,
+  EventProtocolVersionV15
+} from "./generated/event-v1-5.js";
+export type { ArtifactMetadataV15 } from "./generated/artifact-v1-5.js";
+export {
+  ArtifactKindV15,
+  ArtifactMIMETypeV15
+} from "./generated/artifact-v1-5.js";
+export type { CapabilitiesV16, FrameworkAdapterCapabilityV16 } from "./generated/capabilities-v1-6.js";
+export { FrameworkAdapterIDV16 } from "./generated/capabilities-v1-6.js";
+export type { DiagnosticV16 } from "./generated/diagnostic-v1-6.js";
+export type { TestContractV16 } from "./generated/test-v1-6.js";
+export type {
+  CoverageContractV16, CoverageProjectV16, CoverageFileV16, CoverageFunctionV16,
+  CoverageLineDetailV16, CoverageFilePageV16, CoverageFunctionPageV16,
+  CoverageLinePageV16, CoverageMetricV16, CoverageSummaryV16,
+  CoverageRunV16, CoverageRunPageV16, CoverageReportV16
+} from "./generated/coverage-v1-6.js";
+export { CoverageDetailStatusV16, CoverageDetailReasonV16 } from "./generated/coverage-v1-6.js";
+export type {
+  TestGenerationContractV16, TestGenerationStartRequestV16,
+  TestGenerationRunV16, TestGenerationCandidatePageV16,
+  ManagedTestRecordV16, ManagedTestRecordPageV16,
+  ManagedReviewV16, ManagedReviewCaseV16, ManagedReviewIDRequestV16,
+  ManagedReviewApplyRequestV16, ManagedReviewApplyResultV16
+} from "./generated/test-generation-v1-6.js";
+export { ManagedTestStatusV16, ManagedConflictChoiceV16 } from "./generated/test-generation-v1-6.js";
+export { TestGenerationFrameworkV16, TestGenerationScopeV16, TestGenerationStateV16 } from "./generated/test-generation-v1-6.js";
+export type { TaskSnapshotV16 } from "./generated/task-v1-6.js";
+export type { TaskEventV16 } from "./generated/event-v1-6.js";
+export type { ArtifactMetadataV16 } from "./generated/artifact-v1-6.js";
+export { validateCoverageMetricV16, validateCoverageSummaryV16 } from "./coverage-v1-6-validation.js";
+export {
+  validateManagedReviewApplyV16, validateManagedReviewPageV16,
+  validateManagedReviewCaseDigestsV16, decodeManagedBlockDigestV16, ABSENT_BLOCK_DIGEST_V16,
+  MAX_MANAGED_REVIEW_PAGE_ITEMS_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16
+} from "./managed-review-v1-6-validation.js";
+export type { ManagedBlockSideV16 } from "./managed-review-v1-6-validation.js";

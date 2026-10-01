@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "projects": [{
+    "id": "classifier",
+    "sourceDir": ".",
+    "tests": { "containers": [{ "ctestName": "classifier-tests", "framework": "cpputest" }] }
+  }]
+}

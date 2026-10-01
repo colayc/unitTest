@@ -42,6 +42,39 @@ permissions:
   contents: read
 
 jobs:
+  phase10-local-gate:
+    # This is local-contract evidence only. It is never a substitute for the
+    # eight native managed-coverage receipts or release qualification.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:phase10:test-generation
+      - name: Record missing hosted managed-coverage evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          mkdir -p .native-e2e/artifacts/phase10
+          node tools/phase10/test-generation-report.mjs --local-managed --candidate "$candidate" --out "$PWD/.native-e2e/artifacts/phase10/managed-coverage-local.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: phase10-managed-coverage-local-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/phase10/managed-coverage-local.json
+          if-no-files-found: error
+          retention-days: 1
+
   verify-windows:
     # Trusted master pushes use the dedicated WFP runner; pull requests stay on
     # the public hosted runner so fork code never reaches an administrator host.
@@ -95,6 +128,8 @@ jobs:
           $cmakeBin = Split-Path -Parent $result.executable
           $cmakeBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm verify
       - id: coverage-manifest
         shell: pwsh
@@ -409,6 +444,8 @@ jobs:
           cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
           echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - id: framework-manifest
         shell: bash
         run: |
@@ -570,17 +607,22 @@ jobs:
     timeout-minutes: 60
     env:
       UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc
+      UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      UTIDE_COVERAGE_RUNNER_IMAGE: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 11.4.0
           run_install: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.18.0
           cache: pnpm
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: 1.26.6
           cache-dependency-path: apps/test-service/go.sum
@@ -590,7 +632,7 @@ jobs:
         run: |
           digest="$(sha256sum tools/cmake-bundle/manifest.json | cut -d' ' -f1)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .bundled-tools/cmake
           key: coverage-gate-cmake-linux-x64-v1-${{ steps.cmake-manifest.outputs.digest }}
@@ -607,7 +649,7 @@ jobs:
         run: |
           digest="$(sha256sum tools/framework-bundle/manifest.json | cut -d' ' -f1)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .superpowers/cache/framework-bundle
           key: coverage-gate-framework-linux-x64-v1-${{ steps.framework-manifest.outputs.digest }}
@@ -618,7 +660,7 @@ jobs:
         run: |
           digest="$(sha256sum tools/coverage-bundle/manifest.json | cut -d' ' -f1)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .superpowers/cache/coverage-bundle
           key: coverage-gate-bundle-linux-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
@@ -664,8 +706,200 @@ jobs:
           name: linux-gcc-coverage-report-${{ github.run_attempt }}
           path: .native-e2e/artifacts/linux/linux-gcc-coverage-report.json
           if-no-files-found: error
+      - name: Upload candidate-bound Linux GCC backend evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-gcc-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/linux-gcc-coverage-backend.json
+          if-no-files-found: error
       - if: always()
         run: git diff --exit-code
+
+  coverage-linux-clang:
+    name: coverage-linux-clang
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      UTIDE_COVERAGE_RUNNER_IMAGE: ubuntu-24.04
+      GOENV: 'off'
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+      GOSUMDB: 'off'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare Go modules before offline boundary
+        working-directory: apps/test-service
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org
+        run: go mod download
+      - name: Prepare approved offline LLVM bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="$GITHUB_WORKSPACE/.superpowers/cache/llvm-coverage-bundle/22.1.8/linux-x64"
+          node tools/llvm-coverage-bundle/prepare.mjs --platform linux-x64 --output-root "$bundle_root"
+          echo "UTIDE_NATIVE_LLVM_BUNDLE=$bundle_root" >> "$GITHUB_ENV"
+      - name: Check approved offline LLVM bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/llvm-coverage-bundle/check.mjs --platform linux-x64 --root "$UTIDE_NATIVE_LLVM_BUNDLE"
+      - name: Verify approved offline LLVM bundle input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${UTIDE_NATIVE_LLVM_BUNDLE:-}" == /* && -d "$UTIDE_NATIVE_LLVM_BUNDLE" && ! -L "$UTIDE_NATIVE_LLVM_BUNDLE" ]] || { echo 'approved offline LLVM bundle is missing' >&2; exit 1; }
+          for tool in clang clang++ llvm-profdata llvm-cov; do
+            [[ -f "$UTIDE_NATIVE_LLVM_BUNDLE/bin/$tool" && ! -L "$UTIDE_NATIVE_LLVM_BUNDLE/bin/$tool" ]] || { echo "approved LLVM tool $tool is missing" >&2; exit 1; }
+          done
+      - name: Verify fail-closed Linux namespace
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
+      - name: Run real Linux Clang/LLVM fixture offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .native-e2e/artifacts/linux
+          node tools/linux-offline/run.mjs --allow-sudo-root -- go test -v -tags native_llvm_fixture ./apps/test-service/internal/coveragellvm ./apps/test-service/internal/coverageexec -run '^TestNativeLinuxLLVMFixture' -count=1 | tee .native-e2e/artifacts/linux/linux-clang-native-fixture.log
+      - name: Build closed Linux Clang backend report
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe build
+          node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/service-probe/dist/native-report.js --mode fixture --log .native-e2e/artifacts/linux/linux-clang-native-fixture.log --candidate "$UTIDE_CANDIDATE_SHA" --runner-image "$UTIDE_COVERAGE_RUNNER_IMAGE" --out "$GITHUB_WORKSPACE/.native-e2e/artifacts/linux/linux-clang-coverage-backend.json"
+      - name: Upload candidate-bound Linux Clang backend evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-clang-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/linux-clang-coverage-backend.json
+          if-no-files-found: error
+      - run: git diff --exit-code
+
+  coverage-windows-clang-cl:
+    name: coverage-windows-clang-cl
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    env:
+      UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      UTIDE_COVERAGE_RUNNER_IMAGE: windows-2025-vs2026
+      UTIDE_COVERAGE_BACKEND_REPORT_REQUIRED: '1'
+      UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare Go modules before Windows coverage boundary
+        working-directory: apps/test-service
+        run: go mod download
+      - name: Prepare CMake bundle before Windows coverage boundary
+        shell: pwsh
+        run: |
+          $result = node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'CMake bundle preparation failed' }
+          Split-Path -Parent $result.executable | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - name: Run required real Windows clang-cl coverage
+        env:
+          GOENV: 'off'
+          GOTOOLCHAIN: local
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+        shell: pwsh
+        run: |
+          go list -deps ./apps/test-service/cmd/unit-test-service ./apps/test-service/cmd/coverage-toolset-preflight ./apps/test-service/cmd/native-offline-guardian | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Offline Go dependency preflight failed' }
+          pnpm --filter code-oss-extension test:coverage-service-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage smoke failed' }
+      - name: Validate refreshed Windows clang-cl evidence
+        run: pnpm --filter code-oss-extension validate:coverage-evidence:windows
+      - name: Upload refreshed Windows clang-cl backend evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-clang-cl-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/windows-clang-cl-coverage-backend.json
+          if-no-files-found: error
+      - run: git diff --exit-code
+
+  coverage-backend-matrix:
+    name: coverage-backend-matrix
+    needs:
+      - coverage-linux-gcc
+      - coverage-linux-clang
+      - coverage-windows-clang-cl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @unit-test-ide/service-probe build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-gcc-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/coverage-inputs/gcc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-clang-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/coverage-inputs/clang
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-clang-cl-coverage-backend-${{ github.run_attempt }}
+          path: .native-e2e/coverage-inputs/windows
+      - name: Validate closed three-backend coverage report
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/service-probe/dist/native-report.js --mode matrix --gcc .native-e2e/coverage-inputs/gcc/linux-gcc-coverage-backend.json --clang .native-e2e/coverage-inputs/clang/linux-clang-coverage-backend.json --windows .native-e2e/coverage-inputs/windows/windows-clang-cl-coverage-backend.json --candidate "$UTIDE_CANDIDATE_SHA" --out "$GITHUB_WORKSPACE/.native-e2e/artifacts/coverage-backends.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-backends-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/coverage-backends.json
+          if-no-files-found: error
 
   verify-release-input-run:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
@@ -901,6 +1135,8 @@ jobs:
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "cmake_root=$cmakeRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - run: pnpm prepare:coverage-bundle
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm build
       - name: Build Windows service binary
         shell: pwsh
@@ -954,8 +1190,13 @@ jobs:
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
+            --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $stagingRoot = $stagingRoot.Trim()
+          $env:TESTGEN_STAGED_BUNDLE_ROOT = Join-Path $stagingRoot 'bundles/testgen'
+          go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'staged Windows Clang bundle failed Go consumer verification' }
+          Remove-Item Env:TESTGEN_STAGED_BUNDLE_ROOT
           $packagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$version.msix"
           & 'tools/release/windows/package-msix.ps1' `
             -StagingRoot $stagingRoot `
@@ -973,8 +1214,13 @@ jobs:
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
+            --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $baselineStagingRoot = $baselineStagingRoot.Trim()
+          $env:TESTGEN_STAGED_BUNDLE_ROOT = Join-Path $baselineStagingRoot 'bundles/testgen'
+          go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'baseline staged Windows Clang bundle failed Go consumer verification' }
+          Remove-Item Env:TESTGEN_STAGED_BUNDLE_ROOT
           $baselinePackagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$baselineVersion.msix"
           & 'tools/release/windows/package-msix.ps1' `
             -StagingRoot $baselineStagingRoot `
@@ -1156,6 +1402,8 @@ jobs:
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
           echo "cmake_root=$cmake_root" >> "$GITHUB_OUTPUT"
       - run: pnpm prepare:coverage-bundle
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm build
       - name: Build Linux service binary
         shell: bash
@@ -1197,7 +1445,9 @@ jobs:
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
+          TESTGEN_STAGED_BUNDLE_ROOT="$staging_root/bundles/testgen" go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
           package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$staging_root" \
             --output ".release/linux/dist/unit-test-ide-$version.AppImage" \
@@ -1217,7 +1467,9 @@ jobs:
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
+          TESTGEN_STAGED_BUNDLE_ROOT="$baseline_staging_root/bundles/testgen" go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
           baseline_package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$baseline_staging_root" \
             --output ".release/linux/dist/unit-test-ide-$baseline_version.AppImage" \
