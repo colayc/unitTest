@@ -958,7 +958,7 @@ func createRunnerSuspendedProcess(executable string, args, environment []string,
 }
 
 func hostWindowsEnvironment(base []string, status windows.Handle) []string {
-	environment := []string{"UNIT_TEST_IDE_STATUS_HANDLE=" + strconv.FormatUint(uint64(status), 10)}
+	environment := append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.FormatUint(uint64(status), 10))
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE") ||
