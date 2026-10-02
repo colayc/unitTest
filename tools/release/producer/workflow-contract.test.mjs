@@ -624,6 +624,8 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
     assert.match(job, /install --frozen-lockfile/u);
   }
   const windows = jobBlock("build-windows");
+  assert.match(namedStep(windows, "Build fixed Windows Code-OSS target"), /env:\s*\n\s+GITHUB_TOKEN:\s+\$\{\{\s*github\.token\s*\}\}/u);
+  assert.match(namedStep(jobBlock("build-linux"), "Build fixed Linux Code-OSS target"), /env:\s*\n\s+GITHUB_TOKEN:\s+\$\{\{\s*github\.token\s*\}\}/u);
   assert.match(windows, /gulp vscode-win32-x64/u);
   assert.match(windows, /\.producer[\\/]VSCode-win32-x64/u);
   assert.match(windows, /VSCode-\*/u);

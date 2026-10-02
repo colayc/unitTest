@@ -148,6 +148,8 @@ jobs:
             throw $failure
           }
       - name: Build fixed Windows Code-OSS target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -347,6 +349,8 @@ jobs:
           [[ "$(.release/tooling/yarn/bin/yarn --version)" == '1.22.22' ]] || { echo 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' >&2; exit 1; }
           printf '%s\n' "$PWD/.release/tooling/yarn/bin" >> "$GITHUB_PATH"
       - name: Build fixed Linux Code-OSS target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
