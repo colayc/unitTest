@@ -532,6 +532,13 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.18.0
+      - name: Install repository dependencies for attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --prefix .release/tooling/pnpm --no-audit --no-fund pnpm@11.4.0
+          [[ "$(.release/tooling/pnpm/bin/pnpm --version)" == '11.4.0' ]] || { echo 'RELEASE_PRODUCER_CONFIG_INVALID: pnpm version mismatch' >&2; exit 1; }
+          .release/tooling/pnpm/bin/pnpm install --frozen-lockfile
       - name: Validate immutable artifact identities
         env:
           WINDOWS_ARTIFACT_ID: ${{ needs.build-windows.outputs.windows_artifact_id }}

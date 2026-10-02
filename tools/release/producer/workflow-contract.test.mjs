@@ -990,6 +990,19 @@ test("attestation validates immutable coordinates before ID-only downloads and i
   assert.match(job, /find \.release\/attestation -mindepth 1 -maxdepth 1 -printf '%f\\0'/u);
 });
 
+test("attestation installs repository dependencies before generating the P8 report", () => {
+  const job = jobBlock("attest");
+  const install = namedStep(job, "Install repository dependencies for attestation");
+  const report = namedStep(job, "Generate closed P8 producer report");
+  assert.ok(job.indexOf(install) < job.indexOf(report));
+  assert.equal(bashRunBody(install), [
+    "set -euo pipefail",
+    "npm install --global --prefix .release/tooling/pnpm --no-audit --no-fund pnpm@11.4.0",
+    "[[ \"$(.release/tooling/pnpm/bin/pnpm --version)\" == '11.4.0' ]] || { echo 'RELEASE_PRODUCER_CONFIG_INVALID: pnpm version mismatch' >&2; exit 1; }",
+    ".release/tooling/pnpm/bin/pnpm install --frozen-lockfile",
+  ].join("\n"));
+});
+
 test("provenance and post-validation summary bind and expose only validated immutable identities", () => {
   const job = jobBlock("attest");
   const provenance = namedStep(job, "Create and validate provenance");
