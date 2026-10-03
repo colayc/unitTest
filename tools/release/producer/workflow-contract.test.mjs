@@ -1241,3 +1241,36 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
     assert.ok(job.indexOf(after) < firstSensitiveOperation, `${name} must revalidate the attempt before staging, restoration, or execution`);
   }
 });
+
+test("foundation coverage matrix follows backend artifact IDs across partial reruns", () => {
+  const coverageJobs = [
+    "coverage-linux-gcc",
+    "coverage-linux-clang",
+    "coverage-windows-clang-cl",
+  ];
+  for (const name of coverageJobs) {
+    const job = foundationJobBlock(name);
+    assert.ok(jobOutputKeys(job).includes("backend_artifact_id"), `${name} must expose its backend artifact ID`);
+    assert.equal(
+      directMappingValue(job, 6, "backend_artifact_id"),
+      "${{ steps.upload-backend.outputs.artifact-id }}",
+      `${name} backend artifact output must come from the upload step`,
+    );
+    const upload = stepBlocks(job).find((step) => step.match(/^      - id: upload-backend$/mu));
+    assert.ok(upload, `${name} must identify its backend evidence upload step`);
+    assert.equal(directMappingValue(upload, 8, "uses"), `actions/upload-artifact@${actionPins["actions/upload-artifact"]}`);
+    assert.match(upload, /coverage-backend-\$\{\{ github\.run_attempt \}\}/u, `${name} artifact name must remain attempt-scoped`);
+  }
+
+  const matrix = foundationJobBlock("coverage-backend-matrix");
+  assert.deepEqual(directList(matrix, 4, "needs"), coverageJobs);
+  const downloads = stepBlocks(matrix).filter((step) => stepHeaderValue(step, "uses") === `actions/download-artifact@${actionPins["actions/download-artifact"]}`);
+  assert.deepEqual(downloads.map((step) => inputValue(step, "artifact-ids")), coverageJobs.map((name) => `\${{ needs.${name}.outputs.backend_artifact_id }}`));
+  assert.deepEqual(downloads.map((step) => inputValue(step, "name")), [undefined, undefined, undefined]);
+  assert.deepEqual(downloads.map((step) => inputValue(step, "merge-multiple")), ["true", "true", "true"]);
+  assert.deepEqual(downloads.map((step) => inputValue(step, "path")), [
+    ".native-e2e/coverage-inputs/gcc",
+    ".native-e2e/coverage-inputs/clang",
+    ".native-e2e/coverage-inputs/windows",
+  ]);
+});
