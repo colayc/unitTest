@@ -1242,6 +1242,37 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
   }
 });
 
+test("Windows producer smokes the current staged extension before MSIX packaging", () => {
+  const job = foundationJobBlock("package-windows");
+  const packageStep = identifiedStep(job, "package-msix");
+  assert.equal(directMappingValue(packageStep, 8, "name"), "Stage and package Windows MSIX");
+  const body = packageStep.match(/^        run: \|\n([\s\S]*)$/mu)?.[1];
+  assert.ok(body, "package step must contain a literal run block");
+  const run = body.split("\n").map((line) => {
+    assert.match(line, /^ {10}/u, "package run block line must retain workflow indentation");
+    return line.slice(10);
+  }).join("\n");
+  const baselineStart = run.indexOf("$baselineStagingRoot = node tools/release/stage.mjs");
+  assert.notEqual(baselineStart, -1, "baseline staging block must exist");
+
+  const candidateBlock = run.slice(0, baselineStart);
+  const baselineBlock = run.slice(baselineStart);
+  assertOrdered(candidateBlock, [
+    "$stagingRoot = $stagingRoot.Trim()",
+    "$env:CODE_OSS_EXECUTABLE = Join-Path $stagingRoot 'app/code-oss-runtime/Code - OSS.exe'",
+    "$env:UNIT_TEST_IDE_EXTENSION_PATH = Join-Path $stagingRoot 'app/extensions/unit-test-ide'",
+    "try {",
+    "node apps/code-oss-extension/test/extension-host-smoke.mjs",
+    "if ($LASTEXITCODE -ne 0) { throw 'staged Windows extension host smoke failed' }",
+    "} finally {",
+    "Remove-Item Env:CODE_OSS_EXECUTABLE -ErrorAction SilentlyContinue",
+    "Remove-Item Env:UNIT_TEST_IDE_EXTENSION_PATH -ErrorAction SilentlyContinue",
+    "& 'tools/release/windows/package-msix.ps1'",
+  ]);
+  assert.equal((run.match(/node apps\/code-oss-extension\/test\/extension-host-smoke\.mjs/gu) ?? []).length, 1);
+  assert.doesNotMatch(baselineBlock, /CODE_OSS_EXECUTABLE|UNIT_TEST_IDE_EXTENSION_PATH|extension-host-smoke/u);
+});
+
 test("foundation coverage matrix follows backend artifact IDs across partial reruns", () => {
   const coverageJobs = [
     "coverage-linux-gcc",

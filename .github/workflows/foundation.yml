@@ -1209,6 +1209,15 @@ jobs:
           go test ./apps/test-service/internal/testgenbundle -run '^TestOpenStagedBundleFromEnvironment$' -count=1
           if ($LASTEXITCODE -ne 0) { throw 'staged Windows Clang bundle failed Go consumer verification' }
           Remove-Item Env:TESTGEN_STAGED_BUNDLE_ROOT
+          $env:CODE_OSS_EXECUTABLE = Join-Path $stagingRoot 'app/code-oss-runtime/Code - OSS.exe'
+          $env:UNIT_TEST_IDE_EXTENSION_PATH = Join-Path $stagingRoot 'app/extensions/unit-test-ide'
+          try {
+            node apps/code-oss-extension/test/extension-host-smoke.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'staged Windows extension host smoke failed' }
+          } finally {
+            Remove-Item Env:CODE_OSS_EXECUTABLE -ErrorAction SilentlyContinue
+            Remove-Item Env:UNIT_TEST_IDE_EXTENSION_PATH -ErrorAction SilentlyContinue
+          }
           $packagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$version.msix"
           & 'tools/release/windows/package-msix.ps1' `
             -StagingRoot $stagingRoot `
