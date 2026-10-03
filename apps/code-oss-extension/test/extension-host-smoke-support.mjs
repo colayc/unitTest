@@ -1,5 +1,13 @@
 import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { EXTENSION_ACTIVATION_MARKER } from "../dist/src/extension.js";
+
+export function resolveExtensionUnderTest(repositoryRoot, configuredPath) {
+  const selectedPath = configuredPath?.trim();
+  return selectedPath
+    ? resolve(selectedPath)
+    : join(repositoryRoot, "apps", "code-oss-extension");
+}
 
 function boundedOutput(current, chunk) {
   const next = current + String(chunk);
@@ -15,8 +23,14 @@ export function waitForActivation(
   return new Promise((resolveActivation, rejectActivation) => {
     let output = "";
     let settled = false;
+    let invalidMarkerObserved = false;
     let markerPoll;
-    const timer = setTimeout(() => finish(new Error("activation marker timed out")), timeoutMs);
+    const timer = setTimeout(
+      () => finish(new Error(invalidMarkerObserved
+        ? "Code-OSS activation marker file remained invalid"
+        : "activation marker timed out")),
+      timeoutMs
+    );
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(markerPoll);
@@ -44,7 +58,8 @@ export function waitForActivation(
       try {
         const marker = await readFile(markerPath, "utf8");
         if (marker !== `${EXTENSION_ACTIVATION_MARKER}\n`) {
-          finish(new Error("Code-OSS activation marker file is invalid"));
+          invalidMarkerObserved = true;
+          markerPoll = setTimeout(() => void pollMarker(), pollIntervalMs);
           return;
         }
         finish();
