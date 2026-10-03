@@ -536,6 +536,11 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
     }
     const extensionDistRoot = resolve("apps/code-oss-extension/dist");
     await rm(extensionDistRoot, { recursive: true, force: true });
+    await writeFixtureFile(
+      extensionDistRoot,
+      "src/extension-entry.cjs",
+      "exports.activate = async () => undefined;\n",
+    );
     await writeFixtureFile(extensionDistRoot, "src/extension.js", "export const cli = true;\n");
     t.after(async () => {
       await rm(extensionDistRoot, { recursive: true, force: true });
