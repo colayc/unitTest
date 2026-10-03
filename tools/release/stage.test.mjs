@@ -65,12 +65,13 @@ async function createReleaseFixture(root, platform = "windows") {
   await writeFixtureFile(codeOssRoot, "runtime.dll", "runtime library\n");
   const service = await writeFixtureFile(root, `inputs/service/unit-test-service${platform === "windows" ? ".exe" : ""}`, "service binary\n");
   const extensionRoot = join(root, "inputs/extension");
+  await writeFixtureFile(extensionRoot, "dist/src/extension-entry.cjs", "exports.activate = async () => undefined;\n");
   await writeFixtureFile(extensionRoot, "dist/src/extension.js", "export const value = 1;\n");
   await writeFixtureFile(extensionRoot, "package.json", JSON.stringify({
     name: "code-oss-extension",
     publisher: "unit-test-ide",
     version: "0.0.0-test",
-    main: "./dist/src/extension.js",
+    main: "./dist/src/extension-entry.cjs",
   }, null, 2));
   const cmakeRoot = join(root, "inputs/cmake");
   await writeFixtureFile(cmakeRoot, "bin/cmake.exe", "cmake binary\n");
@@ -102,6 +103,24 @@ function stageFixtureRelease(input, options = {}) {
     validateTestgenBundle: async () => undefined,
     ...options,
   });
+}
+
+async function assertExtensionRejectedBeforePublication(fixture, expected) {
+  await assert.rejects(
+    () => stageFixtureRelease({
+      platform: "windows",
+      architecture: "x64",
+      version: "1.2.3",
+      sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
+      ...fixture,
+    }),
+    expected,
+  );
+  await assert.rejects(
+    () => lstat(join(fixture.outRoot, "staging", "1.2.3", "windows-x64")),
+    /ENOENT/u,
+  );
 }
 
 async function packageInputSnapshot(root, current = "") {
@@ -150,6 +169,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "app/code-oss-runtime/resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe",
       "app/code-oss-runtime/resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
       "app/extensions/unit-test-ide/package.json",
+      "app/extensions/unit-test-ide/dist/src/extension-entry.cjs",
       "app/extensions/unit-test-ide/dist/src/extension.js",
       "service/unit-test-service.exe",
       "bundles/cmake/bin/cmake.exe",
@@ -223,6 +243,56 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       const bytes = await readFile(join(result.stagingRoot, ...license.path.split("/")));
       assert.equal(license.size, bytes.length);
       assert.equal(license.sha256, sha256(bytes));
+    }
+  });
+});
+
+test("stageRelease rejects a missing extension manifest entry before publication", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    await rm(join(fixture.extensionRoot, "dist", "src", "extension-entry.cjs"));
+
+    await assertExtensionRejectedBeforePublication(fixture, /extension main.*required/u);
+  });
+});
+
+test("stageRelease rejects an extension manifest entry outside dist before publication", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    await writeFixtureFile(fixture.extensionRoot, "extension-entry.cjs", "exports.activate = async () => undefined;\n");
+    await writeFixtureFile(fixture.extensionRoot, "package.json", JSON.stringify({
+      name: "code-oss-extension",
+      publisher: "unit-test-ide",
+      version: "0.0.0-test",
+      main: "./extension-entry.cjs",
+    }, null, 2));
+
+    await assertExtensionRejectedBeforePublication(fixture, /extension main|unsafe staged path/u);
+  });
+});
+
+test("stageRelease rejects absolute and traversal extension manifest entries before publication", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [label, main] of [
+      ["absolute", join(root, "absolute-extension-entry.cjs")],
+      ["traversal", "../outside-extension-entry.cjs"],
+    ]) {
+      await t.test(label, async () => {
+        const fixture = await createReleaseFixture(join(root, label));
+        const outsideEntry = label === "absolute"
+          ? main
+          : join(dirname(fixture.extensionRoot), "outside-extension-entry.cjs");
+        await mkdir(dirname(outsideEntry), { recursive: true });
+        await writeFile(outsideEntry, "exports.activate = async () => undefined;\n");
+        await writeFixtureFile(fixture.extensionRoot, "package.json", JSON.stringify({
+          name: "code-oss-extension",
+          publisher: "unit-test-ide",
+          version: "0.0.0-test",
+          main,
+        }, null, 2));
+
+        await assertExtensionRejectedBeforePublication(fixture, /extension main|unsafe staged path/u);
+      });
     }
   });
 });
