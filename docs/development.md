@@ -66,6 +66,8 @@ pnpm --filter code-oss-extension test
 pnpm --filter code-oss-extension test:benchmark
 ```
 
+`build` 先执行 TypeScript project build，再生成自包含的 `dist/src/extension.js`。该发布实现会把 workspace Client、AJV 和所有受支持版本的 Protocol schema 一并打入 bundle；运行时只允许 Code-OSS 提供的 `vscode` 模块和 Node.js builtin 保持 external。Extension 测试包含独立发布形态校验：只复制 `package.json` 与 `dist/` 到仓库外目录，并确认没有仓库 `node_modules` 时实现仍可导入。
+
 真实 Service smoke 不下载依赖，也不通过 shell 启动子进程。先使用固定 Go runtime 按现有 `service-probe` 约定构建 `unit-test-service`、`cmake-fixture` 等本地 fixture，再运行验收：
 
 ```sh
@@ -117,7 +119,17 @@ $env:CODE_OSS_EXECUTABLE = "C:\path\to\code-oss.exe"
 pnpm --filter code-oss-extension test:host
 ```
 
-脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待生产 `activate()` 成功完成后输出的固定 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker，然后终止并等待 host process 退出。marker 不会在 activation reject 时输出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。Hosted CI 的 Windows 与 Linux job 都构建相同 Service/fixture 并运行 `test:service-smoke` 与 `test:benchmark`；只有两个平台 job 的真实 smoke 均通过，才能形成 Phase 6B 跨平台 runtime evidence。`test:host` 在没有 CI-provided `CODE_OSS_EXECUTABLE` 时仍必须诚实 SKIP。
+默认 smoke 测试源码目录 `apps/code-oss-extension`。要验证已分级或手工组装的发布形态扩展，可显式指定只含 `package.json` 与 `dist/` 的 Extension root：
+
+```powershell
+$env:CODE_OSS_EXECUTABLE = "C:\path\to\code-oss.exe"
+$env:UNIT_TEST_IDE_EXTENSION_PATH = "C:\path with spaces\staging\app\extensions\unit-test-ide"
+pnpm --filter code-oss-extension test:host
+Remove-Item Env:UNIT_TEST_IDE_EXTENSION_PATH
+Remove-Item Env:CODE_OSS_EXECUTABLE
+```
+
+`UNIT_TEST_IDE_EXTENSION_PATH` 为空或只含空白时仍使用源码目录；非空值按其绝对解析结果原样传给 `--extensionDevelopmentPath`。脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待生产 `activate()` 成功完成后写出的固定 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker，然后终止并等待 host process 退出。marker 不会在 activation reject 时产生。Windows release producer 会在 MSIX 打包前，恰好一次对当前候选 staging tree 中的 runtime 与 Extension 执行该 smoke；baseline staging tree 不重复执行。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。Hosted CI 的 Windows 与 Linux job 都构建相同 Service/fixture 并运行 `test:service-smoke` 与 `test:benchmark`；只有两个平台 job 的真实 smoke 均通过，才能形成 Phase 6B 跨平台 runtime evidence。`test:host` 在没有 CI-provided `CODE_OSS_EXECUTABLE` 时仍必须诚实 SKIP。
 
 ## Native 开发
 

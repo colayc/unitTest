@@ -94,6 +94,39 @@ async function validateRealFile(path, label) {
   };
 }
 
+async function validateExtensionPackage(extensionRoot) {
+  const dist = await validateRealDirectory(join(extensionRoot.path, "dist"), "extension dist");
+  const manifest = await validateRealFile(join(extensionRoot.path, "package.json"), "extension manifest");
+  let manifestValue;
+  try {
+    manifestValue = JSON.parse(await readFile(manifest.path, "utf8"));
+  } catch {
+    throw new Error("extension manifest must be valid JSON");
+  }
+  requirePlainObject(manifestValue, "extension manifest");
+
+  const main = manifestValue.main;
+  if (typeof main !== "string" || main.trim().length === 0) {
+    throw releaseInputMissing("extension main is required");
+  }
+  if (main.includes("\\") || !main.startsWith("./dist/")) {
+    throw new Error("extension main must be a portable path under ./dist");
+  }
+  const relativeMain = main.slice(2);
+  if (!isPortableReleasePath(relativeMain)) {
+    throw new Error(`unsafe staged path: ${relativeMain}`);
+  }
+
+  const entry = await validateRealFile(
+    join(extensionRoot.path, ...relativeMain.split("/")),
+    "extension main",
+  );
+  if (!withinRoot(dist.canonicalPath, entry.canonicalPath)) {
+    throw new Error("extension main must resolve within ./dist");
+  }
+  return { dist, manifest };
+}
+
 async function copyRegularFile(sourcePath, destinationPath) {
   await mkdir(dirname(destinationPath), { recursive: true });
   await copyFile(sourcePath, destinationPath);
@@ -324,8 +357,7 @@ export async function stageRelease(input, {
   ]);
   await validateTestgenBundle({ root: testgenRoot.path, platform: `${normalized.platform}-${normalized.architecture}` });
   const runtimeSource = { path: validated.root, canonicalPath: validated.canonicalRoot };
-  const extensionDist = await validateRealDirectory(join(extensionRoot.path, "dist"), "extension dist");
-  const extensionManifest = await validateRealFile(join(extensionRoot.path, "package.json"), "extension manifest");
+  const extensionPackage = await validateExtensionPackage(extensionRoot);
 
   const parentRoot = join(resolve(normalized.outRoot), "staging", normalized.version);
   await mkdir(parentRoot, { recursive: true });
@@ -346,8 +378,8 @@ export async function stageRelease(input, {
     const serviceName = normalized.platform === "windows" ? "unit-test-service.exe" : "unit-test-service";
     await copyTree(runtimeSource, join(temporaryRoot, "app", "code-oss-runtime"));
     await copyRegularFile(service.path, join(temporaryRoot, "service", serviceName));
-    await copyRegularFile(extensionManifest.path, join(temporaryRoot, "app", "extensions", "unit-test-ide", "package.json"));
-    await copyTree(extensionDist, join(temporaryRoot, "app", "extensions", "unit-test-ide", "dist"));
+    await copyRegularFile(extensionPackage.manifest.path, join(temporaryRoot, "app", "extensions", "unit-test-ide", "package.json"));
+    await copyTree(extensionPackage.dist, join(temporaryRoot, "app", "extensions", "unit-test-ide", "dist"));
     await copyTree(cmakeRoot, join(temporaryRoot, "bundles", "cmake"));
     await copyTree(coverageRoot, join(temporaryRoot, "bundles", "coverage"));
     const stagedTestgenRoot = join(temporaryRoot, ...releaseConfig.testgenBundlePath.split("/"));

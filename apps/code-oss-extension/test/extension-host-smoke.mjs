@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { redactServiceError } from "../dist/src/service-resources.js";
-import { waitForActivation } from "./extension-host-smoke-support.mjs";
+import { resolveExtensionUnderTest, waitForActivation } from "./extension-host-smoke-support.mjs";
 
 const executable = process.env.CODE_OSS_EXECUTABLE?.trim();
 if (!executable) {
@@ -12,7 +12,7 @@ if (!executable) {
 }
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
-const extensionPath = join(repositoryRoot, "apps", "code-oss-extension");
+const extensionPath = resolveExtensionUnderTest(repositoryRoot, process.env.UNIT_TEST_IDE_EXTENSION_PATH);
 const smokeRoot = await mkdtemp(join(tmpdir(), "unit-test-ide-extension-host-"));
 const workspace = join(smokeRoot, "workspace");
 const userDataDirectory = join(smokeRoot, "user-data");
