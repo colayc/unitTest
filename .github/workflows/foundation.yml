@@ -605,6 +605,8 @@ jobs:
     name: coverage-linux-gcc
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      backend_artifact_id: ${{ steps.upload-backend.outputs.artifact-id }}
     env:
       UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc
       UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -706,7 +708,8 @@ jobs:
           name: linux-gcc-coverage-report-${{ github.run_attempt }}
           path: .native-e2e/artifacts/linux/linux-gcc-coverage-report.json
           if-no-files-found: error
-      - name: Upload candidate-bound Linux GCC backend evidence
+      - id: upload-backend
+        name: Upload candidate-bound Linux GCC backend evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux-gcc-coverage-backend-${{ github.run_attempt }}
@@ -719,6 +722,8 @@ jobs:
     name: coverage-linux-clang
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      backend_artifact_id: ${{ steps.upload-backend.outputs.artifact-id }}
     env:
       UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       UTIDE_COVERAGE_RUNNER_IMAGE: ubuntu-24.04
@@ -784,7 +789,8 @@ jobs:
           set -euo pipefail
           node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe build
           node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/service-probe/dist/native-report.js --mode fixture --log .native-e2e/artifacts/linux/linux-clang-native-fixture.log --candidate "$UTIDE_CANDIDATE_SHA" --runner-image "$UTIDE_COVERAGE_RUNNER_IMAGE" --out "$GITHUB_WORKSPACE/.native-e2e/artifacts/linux/linux-clang-coverage-backend.json"
-      - name: Upload candidate-bound Linux Clang backend evidence
+      - id: upload-backend
+        name: Upload candidate-bound Linux Clang backend evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux-clang-coverage-backend-${{ github.run_attempt }}
@@ -796,6 +802,8 @@ jobs:
     name: coverage-windows-clang-cl
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
+    outputs:
+      backend_artifact_id: ${{ steps.upload-backend.outputs.artifact-id }}
     env:
       UTIDE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       UTIDE_COVERAGE_RUNNER_IMAGE: windows-2025-vs2026
@@ -845,7 +853,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows coverage smoke failed' }
       - name: Validate refreshed Windows clang-cl evidence
         run: pnpm --filter code-oss-extension validate:coverage-evidence:windows
-      - name: Upload refreshed Windows clang-cl backend evidence
+      - id: upload-backend
+        name: Upload refreshed Windows clang-cl backend evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-clang-cl-coverage-backend-${{ github.run_attempt }}
@@ -880,15 +889,18 @@ jobs:
       - run: pnpm --filter @unit-test-ide/service-probe build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: linux-gcc-coverage-backend-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.coverage-linux-gcc.outputs.backend_artifact_id }}
+          merge-multiple: true
           path: .native-e2e/coverage-inputs/gcc
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: linux-clang-coverage-backend-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.coverage-linux-clang.outputs.backend_artifact_id }}
+          merge-multiple: true
           path: .native-e2e/coverage-inputs/clang
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: windows-clang-cl-coverage-backend-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.coverage-windows-clang-cl.outputs.backend_artifact_id }}
+          merge-multiple: true
           path: .native-e2e/coverage-inputs/windows
       - name: Validate closed three-backend coverage report
         shell: bash
