@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist", "types": ["node"] },
+  "compilerOptions": { "rootDir": "src", "outDir": "dist", "types": ["node"], "resolveJsonModule": true },
   "references": [{ "path": "../protocol-models" }],
   "include": ["src/**/*.ts"]
 }

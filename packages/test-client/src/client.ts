@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { createRequire } from "node:module";
 import net from "node:net";
 import type { Duplex } from "node:stream";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
@@ -97,6 +96,7 @@ import {
 import type { Method, ProtocolTaskEvent, ProtocolVersion } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 import { EventSubscription } from "./subscription.js";
+import { protocolSchema } from "./schema-registry.js";
 
 export { LEGACY_MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES } from "./connection.js";
 /** Maximum artifact size materialized by readArtifact(). */
@@ -195,35 +195,34 @@ interface ArtifactChunk {
 }
 interface SubscriptionAcknowledgement { afterSequence: number }
 
-const require = createRequire(import.meta.url);
 const payloadAjv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 const addFormats = formatsModule.default as unknown as (instance: Ajv2020) => void;
 addFormats(payloadAjv);
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/task"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/artifact"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/capabilities"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/workspace"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/task"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/artifact"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/capabilities"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/diagnostic"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/test"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/task"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/artifact"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/capabilities"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/diagnostic"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/test"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/coverage"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
-payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/message"));
-for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact", "message"]) {
-  payloadAjv.addSchema(require(`@unit-test-ide/protocol-schema/v1.5/${name}`));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.1/task"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.1/artifact"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/capabilities"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/workspace"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/task"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/artifact"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/capabilities"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/diagnostic"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/test"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/task"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/artifact"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/capabilities"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/diagnostic"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/test"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/coverage"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/task"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/event"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/artifact"));
+payloadAjv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/message"));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact", "message"] as const) {
+  payloadAjv.addSchema(protocolSchema(`@unit-test-ide/protocol-schema/v1.5/${name}`));
 }
-for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact", "message"]) {
-  payloadAjv.addSchema(require(`@unit-test-ide/protocol-schema/v1.6/${name}`));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact", "message"] as const) {
+  payloadAjv.addSchema(protocolSchema(`@unit-test-ide/protocol-schema/v1.6/${name}`));
 }
 
 const validateHandshakeV10 = payloadAjv.compile({
@@ -244,8 +243,8 @@ const validateHandshakeModern = payloadAjv.compile({
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
-const validateCapabilitiesV10 = payloadAjv.compile(require("@unit-test-ide/protocol-schema/v1/capabilities"));
-const validateCapabilitiesV11 = payloadAjv.compile(require("@unit-test-ide/protocol-schema/v1.1/capabilities"));
+const validateCapabilitiesV10 = payloadAjv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1/capabilities"));
+const validateCapabilitiesV11 = payloadAjv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.1/capabilities"));
 const validateCapabilitiesV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:capabilities") as ValidateFunction;
 const validateCapabilitiesV13 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.3:capabilities") as ValidateFunction;
 const validateCapabilitiesV14 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.4:capabilities") as ValidateFunction;
