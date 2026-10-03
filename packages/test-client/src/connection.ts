@@ -1,56 +1,55 @@
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsModule from "ajv-formats";
 import { decodeTaskEvent } from "./decoders.js";
 import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
+import { protocolSchema } from "./schema-registry.js";
 
 export const LEGACY_MAX_MESSAGE_BYTES = 1024 * 1024;
 // JSON may escape every byte of a 262144-byte v1.5 preview diff sixfold.
 export const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 
-const require = createRequire(import.meta.url);
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 const addFormats = formatsModule.default as unknown as (instance: Ajv2020) => void;
 addFormats(ajv);
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/task"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/event"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/artifact"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/capabilities"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/workspace"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/task"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/event"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/artifact"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/capabilities"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/diagnostic"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/test"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/task"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/event"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/artifact"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/capabilities"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/diagnostic"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/test"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/coverage"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
-ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
-for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
-  ajv.addSchema(require(`@unit-test-ide/protocol-schema/v1.5/${name}`));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.1/task"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.1/event"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.1/artifact"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/capabilities"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/workspace"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/task"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/event"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.2/artifact"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/capabilities"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/diagnostic"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/test"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/task"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/event"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.3/artifact"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/capabilities"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/diagnostic"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/test"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/coverage"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/task"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/event"));
+ajv.addSchema(protocolSchema("@unit-test-ide/protocol-schema/v1.4/artifact"));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"] as const) {
+  ajv.addSchema(protocolSchema(`@unit-test-ide/protocol-schema/v1.5/${name}`));
 }
-for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
-  ajv.addSchema(require(`@unit-test-ide/protocol-schema/v1.6/${name}`));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"] as const) {
+  ajv.addSchema(protocolSchema(`@unit-test-ide/protocol-schema/v1.6/${name}`));
 }
 const validators: Record<ProtocolVersion, ValidateFunction> = {
-  "1.0": ajv.compile(require("@unit-test-ide/protocol-schema/v1/message")),
-  "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message")),
-  "1.2": ajv.compile(require("@unit-test-ide/protocol-schema/v1.2/message")),
-  "1.3": ajv.compile(require("@unit-test-ide/protocol-schema/v1.3/message")),
-  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message")),
-  "1.5": ajv.compile(require("@unit-test-ide/protocol-schema/v1.5/message")),
-  "1.6": ajv.compile(require("@unit-test-ide/protocol-schema/v1.6/message"))
+  "1.0": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1/message")),
+  "1.1": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.1/message")),
+  "1.2": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.2/message")),
+  "1.3": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.3/message")),
+  "1.4": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.4/message")),
+  "1.5": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.5/message")),
+  "1.6": ajv.compile(protocolSchema("@unit-test-ide/protocol-schema/v1.6/message"))
 };
 
 type Pending = {
