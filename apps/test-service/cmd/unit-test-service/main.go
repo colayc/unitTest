@@ -35,6 +35,11 @@ var listenTransport = transport.Listen
 var prepareTokenFileForRun = prepareTokenFile
 var consumeTokenFileForRun = consumeTokenFile
 
+func productionRuntimeConfig(config serviceruntime.Config) serviceruntime.Config {
+	config.ProductionGenerationFactory = serviceruntime.NewProductionGenerationConfig
+	return config
+}
+
 type explicitBool struct{ value bool }
 
 func (b *explicitBool) String() string { return strconv.FormatBool(b.value) }
@@ -192,14 +197,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "service executable is unavailable")
 		return 1
 	}
-	active, err := serviceruntime.Open(serviceruntime.Config{
+	active, err := serviceruntime.Open(productionRuntimeConfig(serviceruntime.Config{
 		DataDir: *dataDir, ServiceExecutable: executable,
 		WorkspaceRoot: *workspaceRoot, TrustedWorkspace: trustedWorkspace.value,
 		ProductBundleRoots: productBundleRoots,
 		CMakeBundleRoot:    *cmakeBundleRoot, DevCMakeExecutable: *devCMakeExecutable,
 		Platform: transport.PlatformName(),
 		Clock:    task.RealClock{}, NewID: task.NewID, TerminationGrace: 2 * time.Second,
-	})
+	}))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	serviceruntime "unit-test-ide.local/test-service/internal/runtime"
 )
 
 func TestMain(m *testing.M) {
@@ -20,6 +22,13 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
+}
+
+func TestProductionRuntimeConfigEnablesAtomicGenerationProvider(t *testing.T) {
+	config := productionRuntimeConfig(serviceruntime.Config{})
+	if config.ProductionGenerationFactory == nil {
+		t.Fatal("production generation factory is disabled")
+	}
 }
 
 func TestRunPrepareTokenFileModeCreatesEmptyFile(t *testing.T) {
