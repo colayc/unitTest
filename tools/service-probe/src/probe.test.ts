@@ -290,10 +290,12 @@ test("spawn failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
-test("service launch forwards workspace trust and CMake options as isolated arguments", async () => {
+test("service launch forwards workspace trust and all product bundles as isolated arguments", async () => {
   const directory = await mkdtemp(join(dirname(binary), "unit-test-ide-options-"));
   const workspaceRoot = join(directory, "workspace");
   const cmakeBundleRoot = join(directory, "cmake-bundle");
+  const coverageBundleRoot = join(directory, "coverage-bundle");
+  const testgenBundleRoot = join(directory, "testgen-bundle");
   const devCMakeExecutable = join(directory, "cmake-dev");
   let checked = false;
   try {
@@ -302,23 +304,29 @@ test("service launch forwards workspace trust and CMake options as isolated argu
         workspaceRoot,
         trustedWorkspace: true,
         cmakeBundleRoot,
+        coverageBundleRoot,
+        testgenBundleRoot,
         devCMakeExecutable,
         operations: {
           spawnService: (_serviceBinary, args) => {
-            assert.deepEqual(args.slice(-7), [
+            assert.deepEqual(args.slice(-11), [
               "--workspace-root", workspaceRoot,
               "--trusted-workspace=true",
               "--cmake-bundle-root", cmakeBundleRoot,
+              "--coverage-bundle-root", coverageBundleRoot,
+              "--testgen-bundle-root", testgenBundleRoot,
               "--dev-cmake-executable", devCMakeExecutable
             ]);
             checked = true;
-            throw new Error(`expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${devCMakeExecutable}`);
+            throw new Error(
+              `expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${coverageBundleRoot} ${testgenBundleRoot} ${devCMakeExecutable}`
+            );
           }
         }
       }),
       (error: unknown) => {
         const serialized = serializeErrorTree(error);
-        for (const sensitive of [workspaceRoot, cmakeBundleRoot, devCMakeExecutable]) {
+        for (const sensitive of [workspaceRoot, cmakeBundleRoot, coverageBundleRoot, testgenBundleRoot, devCMakeExecutable]) {
           assert.equal(serialized.includes(sensitive), false);
         }
         return true;

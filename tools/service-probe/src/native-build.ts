@@ -72,6 +72,15 @@ const nativeLivenessReconnectBackoffMs = 250;
 const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
+
+function productionBundleRoots(root: string, platform: NodeJS.Platform) {
+  if (platform !== "linux" && platform !== "win32") throw new Error("production bundle platform is unsupported");
+  const key = platform === "win32" ? "windows-x64" : "linux-x64";
+  return {
+    coverageBundleRoot: join(root, ".superpowers", "runtime", "coverage-bundle", key),
+    testgenBundleRoot: join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", key),
+  };
+}
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
   linux: ["gcc", "clang"],
@@ -245,6 +254,7 @@ async function runNativeMatrixWithDependencies(
         workspaceRoot: workspace.workspaceRoot,
         trustedWorkspace: true,
         cmakeBundleRoot: bundle.bundleRoot,
+        ...productionBundleRoots(dependencies.repositoryRoot, options.platform),
       });
       const snapshot = await withNamedTimeout(
         `${family} workspace inspection`,
@@ -828,6 +838,7 @@ async function runPresetBuildScenario(
       workspaceRoot,
       trustedWorkspace: true,
       cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectPresetProfile(
       fixture.client,
@@ -1032,6 +1043,7 @@ async function runWorkspaceRejectionScenario(
       workspaceRoot,
       trustedWorkspace: true,
       cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const snapshot = await withNamedTimeout(
       `${context.family} ${name} inspection`,
@@ -1076,6 +1088,7 @@ async function runFailureScenario(
       workspaceRoot,
       trustedWorkspace: true,
       cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectEstablishedFamily(
       fixture.client,

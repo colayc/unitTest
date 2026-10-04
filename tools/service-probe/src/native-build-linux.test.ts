@@ -146,6 +146,14 @@ test("native matrix uses only the verified bundle and explicit trusted workspace
   for (const launch of launches) {
     assert.equal(launch.options.trustedWorkspace, true);
     assert.equal(launch.options.cmakeBundleRoot, bundle.bundleRoot);
+    assert.equal(
+      launch.options.coverageBundleRoot,
+      join(root, ".superpowers", "runtime", "coverage-bundle", "linux-x64"),
+    );
+    assert.equal(
+      launch.options.testgenBundleRoot,
+      join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", "linux-x64"),
+    );
     assert.equal("devCMakeExecutable" in launch.options, false);
     assert.equal(launch.disposed, true);
   }

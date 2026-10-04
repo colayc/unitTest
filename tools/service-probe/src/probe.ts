@@ -94,6 +94,8 @@ export interface StartServiceOptions {
   workspaceRoot?: string;
   trustedWorkspace?: boolean;
   cmakeBundleRoot?: string;
+  coverageBundleRoot?: string;
+  testgenBundleRoot?: string;
   devCMakeExecutable?: string;
   operations?: ProbeOperations;
 }
@@ -263,6 +265,8 @@ interface ServiceInstance {
   readonly directory: string;
   readonly workspaceRoot: string;
   readonly cmakeBundleRoot?: string;
+  readonly coverageBundleRoot?: string;
+  readonly testgenBundleRoot?: string;
   readonly devCMakeExecutable?: string;
   stdout: string;
   stderr: string;
@@ -276,6 +280,8 @@ function serviceSensitive(instance: ServiceInstance): string[] {
     instance.dataDir,
     instance.workspaceRoot,
     instance.cmakeBundleRoot ?? "",
+    instance.coverageBundleRoot ?? "",
+    instance.testgenBundleRoot ?? "",
     instance.devCMakeExecutable ?? "",
     instance.serviceBinary,
     instance.directory
@@ -358,6 +364,12 @@ async function launchService(serviceBinary: string, directory: string, options: 
     if (options.cmakeBundleRoot) {
       serviceArguments.push("--cmake-bundle-root", options.cmakeBundleRoot);
     }
+    if (options.coverageBundleRoot) {
+      serviceArguments.push("--coverage-bundle-root", options.coverageBundleRoot);
+    }
+    if (options.testgenBundleRoot) {
+      serviceArguments.push("--testgen-bundle-root", options.testgenBundleRoot);
+    }
     if (options.devCMakeExecutable) {
       serviceArguments.push("--dev-cmake-executable", options.devCMakeExecutable);
     }
@@ -406,6 +418,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
       directory,
       workspaceRoot,
       ...(options.cmakeBundleRoot ? { cmakeBundleRoot: options.cmakeBundleRoot } : {}),
+      ...(options.coverageBundleRoot ? { coverageBundleRoot: options.coverageBundleRoot } : {}),
+      ...(options.testgenBundleRoot ? { testgenBundleRoot: options.testgenBundleRoot } : {}),
       ...(options.devCMakeExecutable ? { devCMakeExecutable: options.devCMakeExecutable } : {}),
       get stdout() { return stdout; },
       get stderr() { return stderr; },
@@ -426,7 +440,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
     }
     const sensitive = [
       token, endpointResource?.path ?? "", tokenFile, dataDir, workspaceRoot,
-      options.cmakeBundleRoot ?? "", options.devCMakeExecutable ?? "", serviceBinary, directory
+      options.cmakeBundleRoot ?? "", options.coverageBundleRoot ?? "", options.testgenBundleRoot ?? "",
+      options.devCMakeExecutable ?? "", serviceBinary, directory
     ];
     const details = `; stdout=${redact(stdout, sensitive)}; stderr=${redact(stderr, sensitive)}`;
     throw safeError(error, sensitive, details);
