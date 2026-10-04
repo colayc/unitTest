@@ -115,6 +115,7 @@ type generationService struct {
 	running            map[string]*generationExecution
 	cancelPending      map[string]bool
 	wg                 sync.WaitGroup
+	closeOnce          sync.Once
 }
 
 type generationExecution struct {
@@ -965,12 +966,17 @@ func (s *generationService) Close() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	for _, execution := range s.running {
-		execution.cancel()
-	}
-	s.mu.Unlock()
-	s.wg.Wait()
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		for _, execution := range s.running {
+			execution.cancel()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
+		if closer, ok := s.publisher.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	})
 }
 
 var _ session.GenerationBackend = (*generationService)(nil)

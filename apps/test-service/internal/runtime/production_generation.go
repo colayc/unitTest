@@ -20,6 +20,9 @@ func newProductionGenerationBackend(config ProductionGenerationConfig) (*Managed
 	config.Base.ManagedValidator = config.Managed.Validator
 	base, err := newGenerationService(config.Base)
 	if err != nil {
+		if closer, ok := config.Base.Publisher.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 	fail := func(cause error) (*ManagedRuntimeProvider, error) {
