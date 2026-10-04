@@ -13,6 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testgenrender"
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -38,9 +39,14 @@ func prepareProductionValidationBuild(ctx context.Context, installation cmake.In
 	if err != nil {
 		return result, err
 	}
-	testTarget, ok := productionTargetByID(targets, registration.target.testTargetID)
-	if !ok || testTarget.Type != "EXECUTABLE" || testTarget.Name != registration.target.renderTarget.TestTarget {
+	testTarget, ok := productionValidationTestTarget(registration, targets)
+	if !ok {
 		return result, errProductionValidationUnavailable
+	}
+	for index := range targets {
+		if targets[index].ID == testTarget.ID {
+			targets[index] = testTarget
+		}
 	}
 	testBinary, ok := singleProductionTargetArtifact(testTarget)
 	if !ok {
@@ -88,6 +94,51 @@ func prepareProductionValidationBuild(ctx context.Context, installation cmake.In
 		configure: configure, compile: compile, profile: profile, testBinary: testBinary,
 		environment: append([]string(nil), configure.Env...), tools: tools,
 	}, nil
+}
+
+func productionValidationTestTarget(registration productionValidationPlanRegistration, targets []cmake.Target) (cmake.Target, bool) {
+	target, ok := productionTargetByID(targets, registration.target.testTargetID)
+	if !ok || target.Type != "EXECUTABLE" || target.Name != registration.target.renderTarget.TestTarget {
+		return cmake.Target{}, false
+	}
+	if registration.target.language != testgenrender.LanguageC {
+		return target, registration.target.language == testgenrender.LanguageCPP
+	}
+	generated, ok := productionValidationExecutableName(registration)
+	if !ok {
+		return cmake.Target{}, false
+	}
+	artifacts := make([]string, len(target.Artifacts))
+	for index, artifact := range target.Artifacts {
+		if artifact == "" || !filepath.IsAbs(artifact) || filepath.Clean(artifact) != artifact {
+			return cmake.Target{}, false
+		}
+		extension := filepath.Ext(artifact)
+		if extension != "" && !strings.EqualFold(extension, ".exe") ||
+			!strings.EqualFold(strings.TrimSuffix(filepath.Base(artifact), extension), target.Name) {
+			return cmake.Target{}, false
+		}
+		artifacts[index] = filepath.Join(filepath.Dir(artifact), generated+extension)
+	}
+	if len(artifacts) != 1 {
+		return cmake.Target{}, false
+	}
+	target.Name, target.Artifacts = generated, artifacts
+	return target, true
+}
+
+func productionValidationExecutableName(registration productionValidationPlanRegistration) (string, bool) {
+	switch registration.target.language {
+	case testgenrender.LanguageCPP:
+		return registration.target.renderTarget.TestTarget, registration.target.framework == "cpputest" && registration.target.renderTarget.FrameworkTarget == "CppUTest"
+	case testgenrender.LanguageC:
+		if registration.target.framework != "unity" || registration.target.renderTarget.FrameworkTarget != "unity" || !validProductionDigest(registration.symbolID) {
+			return "", false
+		}
+		return registration.target.renderTarget.TestTarget + "_generated_" + registration.symbolID[:12], true
+	default:
+		return "", false
+	}
 }
 
 func rebaseProductionValidationTargets(values []cmake.Target, sourceFrom, sourceTo, buildFrom, buildTo string) ([]cmake.Target, error) {

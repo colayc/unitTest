@@ -137,7 +137,7 @@ func (executor *productionManagedSelectionExecutor) begin(ctx context.Context, s
 	roots.TaskID, roots.ProcessTaskID, roots.CandidateID = validationTaskID, binding.run.TaskID, selection.SelectedOutputDigest
 	registration := productionValidationPlanRegistration{
 		candidateID: selection.SelectedOutputDigest, processTaskID: binding.run.TaskID,
-		target: binding.target, build: build, baseline: baseline,
+		symbolID: selection.SymbolID, target: binding.target, build: build, baseline: baseline,
 	}
 	session := &productionManagedSelectionSession{
 		selectionDigest: selectionDigest, binding: binding, roots: roots, registration: registration,

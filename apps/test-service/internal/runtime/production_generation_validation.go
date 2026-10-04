@@ -342,7 +342,8 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 		}
 		if err := adapter.plans.RegisterValidationPlan(productionValidationPlanRegistration{
 			candidateID: binding.ValidationID, processTaskID: run.TaskID, target: target,
-			build: buildSnapshot, baseline: append([]byte(nil), input.BaselineCoverage...),
+			symbolID: pipeline.primarySymbolID(),
+			build:    buildSnapshot, baseline: append([]byte(nil), input.BaselineCoverage...),
 		}); err != nil {
 			return GenerationStageResult{}, err
 		}

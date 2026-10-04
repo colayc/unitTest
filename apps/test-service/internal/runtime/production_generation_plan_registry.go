@@ -7,12 +7,14 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testgenrender"
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 type productionValidationPlanRegistration struct {
 	candidateID, processTaskID string
+	symbolID                   string
 	target                     generationTarget
 	build                      productionBuildSnapshot
 	baseline                   []byte
@@ -42,6 +44,8 @@ func newProductionValidationPlanRegistry(compiler productionValidationStageCompi
 func (registry *productionValidationPlanRegistry) RegisterValidationPlan(registration productionValidationPlanRegistration) error {
 	if registry == nil || registry.compiler == nil || !validProductionDigest(registration.candidateID) ||
 		!validProductionObjectID(registration.processTaskID) || !registration.target.valid() ||
+		(registration.target.language == testgenrender.LanguageC && !validProductionDigest(registration.symbolID)) ||
+		(registration.target.language != testgenrender.LanguageC && registration.symbolID != "" && !validProductionDigest(registration.symbolID)) ||
 		!validProductionBuildSnapshot(registration.build, registration.target) || len(registration.baseline) == 0 || len(registration.baseline) > 32<<20 {
 		return errProductionValidationUnavailable
 	}

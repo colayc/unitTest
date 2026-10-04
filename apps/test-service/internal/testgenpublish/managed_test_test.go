@@ -611,6 +611,7 @@ func TestManagedKeepCurrentAdvancesAcceptedDigestWithoutRewritingFile(t *testing
 func TestManagedSelectedBytesBindValidationReceiptAndRegistry(t *testing.T) {
 	f := newManagedFixture(t)
 	defer f.close(t)
+	f.set.SymbolID = strings.Repeat("b", 64)
 	current := bytes.Replace(f.block, []byte("CHECK_TRUE(1)"), []byte("CHECK_TRUE(3)"), 1)
 	f.seedAccepted(t, current)
 	decision := f.decision(t)
@@ -624,7 +625,7 @@ func TestManagedSelectedBytesBindValidationReceiptAndRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observed.Files) != 2 || !bytes.Equal(observed.Files[0].Content, current) || plan.ManagedSelectedOutputDigest != observed.SelectedOutputDigest || plan.ManagedValidationReceiptDigest == f.set.Managed.ValidationReceiptDigest {
+	if observed.SymbolID != f.set.SymbolID || len(observed.Files) != 2 || !bytes.Equal(observed.Files[0].Content, current) || plan.ManagedSelectedOutputDigest != observed.SelectedOutputDigest || plan.ManagedValidationReceiptDigest == f.set.Managed.ValidationReceiptDigest {
 		t.Fatalf("resolved bytes were not validated and bound: %+v %+v", observed, plan)
 	}
 	receipt, err := f.p.PublishManaged(context.Background(), plan)

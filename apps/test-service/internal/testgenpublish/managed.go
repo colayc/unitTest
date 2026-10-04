@@ -256,7 +256,7 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 	for i, file := range selectedFiles {
 		validationFiles[i] = testgenrender.StagedFile{Path: file.Path, Content: bytes.Clone(file.Content), AfterDigest: file.AfterDigest}
 	}
-	validationReceipt, err := p.ManagedSelectionValidator(ctx, ManagedSelection{RunID: candidate.RunID, SnapshotDigest: candidate.SnapshotDigest, ToolchainID: candidate.Managed.ToolchainID, SelectedOutputDigest: selectedDigest, Files: validationFiles})
+	validationReceipt, err := p.ManagedSelectionValidator(ctx, ManagedSelection{RunID: candidate.RunID, SnapshotDigest: candidate.SnapshotDigest, ToolchainID: candidate.Managed.ToolchainID, SelectedOutputDigest: selectedDigest, SymbolID: candidate.SymbolID, Files: validationFiles})
 	if err != nil || len(validationReceipt) == 0 || len(validationReceipt) > 1<<20 {
 		return Plan{}, ErrConflict
 	}

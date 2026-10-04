@@ -121,6 +121,10 @@ func (compiler *productionValidationNativeCompiler) CompileValidationStage(ctx c
 }
 
 func (compiler *productionValidationNativeCompiler) discoveryPlan(registration productionValidationPlanRegistration, roots testgenvalidate.Roots, prepared productionValidationBuildPreparation) (productionValidationProcessPlan, error) {
+	ctestName, ok := productionValidationExecutableName(registration)
+	if !ok {
+		return productionValidationProcessPlan{}, errProductionValidationUnavailable
+	}
 	step, err := compiler.runner.ShowOnlyPlan(prepared.profile)
 	if err != nil {
 		return productionValidationProcessPlan{}, errProductionValidationUnavailable
@@ -141,7 +145,7 @@ func (compiler *productionValidationNativeCompiler) discoveryPlan(registration p
 		}
 		matches := 0
 		for _, raw := range snapshot.Tests {
-			if raw.Name == registration.target.ctestName && len(raw.Command) > 0 && sameProductionPath(raw.Command[0], prepared.testBinary) {
+			if raw.Name == ctestName && len(raw.Command) > 0 && sameProductionPath(raw.Command[0], prepared.testBinary) {
 				matches++
 			}
 		}
@@ -160,8 +164,12 @@ func (compiler *productionValidationNativeCompiler) testPlan(registration produc
 	if err := os.MkdirAll(filepath.Join(roots.Artifacts, "profiles"), 0700); err != nil {
 		return productionValidationProcessPlan{}, errProductionValidationUnavailable
 	}
+	ctestName, ok := productionValidationExecutableName(registration)
+	if !ok {
+		return productionValidationProcessPlan{}, errProductionValidationUnavailable
+	}
 	step, err := compiler.runner.OpaqueRunPlan(ctest.ExecutionDescriptor{
-		LogicalName: registration.target.ctestName, TestDirectory: roots.Build, Configuration: prepared.profile.Configuration,
+		LogicalName: ctestName, TestDirectory: roots.Build, Configuration: prepared.profile.Configuration,
 	}, registration.target.wallTime)
 	if err != nil {
 		return productionValidationProcessPlan{}, errProductionValidationUnavailable
