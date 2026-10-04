@@ -67,6 +67,12 @@ type Runtime struct {
 	manager             runtimeManager
 	runner              processcontrol.Runner
 	coordinator         runtimeCoordinator
+	probeRunner         probe.Runner
+	installation        cmake.Installation
+	serviceInstanceID   string
+	buildDataRoot       string
+	coverageDataRoot    string
+	controlDataRoot     string
 	tests               runtimeTestCoordinator
 	testResources       io.Closer
 	lock                io.Closer
@@ -403,11 +409,12 @@ func Open(config Config) (*Runtime, error) {
 	if err != nil {
 		return failArtifacts(err)
 	}
+	serviceInstanceID := newID()
 	manager, err := deps.newManager(task.ManagerConfig{
 		Store: store, Publisher: broker, Processes: processFactory{runner: runner}, Artifacts: artifacts,
 		StepObserver: observer,
 		Clock:        config.Clock, NewID: newID, ServiceExecutable: config.ServiceExecutable,
-		ServiceInstanceID: newID(), TerminationGrace: grace,
+		ServiceInstanceID: serviceInstanceID, TerminationGrace: grace,
 	})
 	if err != nil {
 		return failArtifacts(errors.Join(err, broker.Close()))
@@ -461,7 +468,9 @@ func Open(config Config) (*Runtime, error) {
 	}
 	runtimeValue := &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
-		coordinator: coordinator, tests: tests,
+		coordinator: coordinator, probeRunner: probeRunner, installation: installation,
+		serviceInstanceID: serviceInstanceID, buildDataRoot: layout.Build, coverageDataRoot: layout.Coverage, controlDataRoot: layout.Controls,
+		tests: tests,
 		coverageBackend: func() session.CoverageBackend {
 			if config.TrustedWorkspace {
 				return config.CoverageBackend

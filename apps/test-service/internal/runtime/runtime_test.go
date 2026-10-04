@@ -140,8 +140,9 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 		}
 		return &ProductBundles{roots: roots, testgen: fakeVerifiedTestgenBundle{}}, nil
 	}
+	installation := cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}
 	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
-		return cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}, nil
+		return installation, nil
 	}
 	buildCoordinator := &fakeRuntimeCoordinator{}
 	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
@@ -185,6 +186,11 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 	}
 	if active.coverageExecutor != executor {
 		t.Fatal("trusted runtime did not retain its coverage executor")
+	}
+	if active.installation != installation || active.probeRunner == nil || !validProductionObjectID(active.serviceInstanceID) ||
+		active.buildDataRoot != layout.Build || active.coverageDataRoot != layout.Coverage || active.controlDataRoot != layout.Controls {
+		t.Fatalf("trusted runtime production resources = installation=%#v probe=%T service=%q build=%q coverage=%q control=%q",
+			active.installation, active.probeRunner, active.serviceInstanceID, active.buildDataRoot, active.coverageDataRoot, active.controlDataRoot)
 	}
 	if openedProductBundles != 1 || active.productBundles == nil {
 		t.Fatalf("opened product bundles = %d, retained = %#v", openedProductBundles, active.productBundles)
