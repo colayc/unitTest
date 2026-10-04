@@ -177,6 +177,21 @@ func TestProductionManagedReviewAcceptsReportBoundFunctionRun(t *testing.T) {
 	}
 }
 
+func TestProductionManagedBaselineAcceptsExactFileFunctionAndGapTargets(t *testing.T) {
+	_, index, _, _, target, _ := productionManagedFixture(t)
+	materializer := &productionManagedMaterializer{current: productionManagedIndexFixture{index: index}}
+	gap := testgendomain.ManagedTarget{FileID: target.fileID, FunctionID: target.functionID, GapID: target.gapID, File: target.sourceRelativePath, FunctionName: "classify", SourceDigest: target.sourceDigest}
+	function := gap
+	function.GapID = ""
+	file := function
+	file.FunctionID, file.FunctionName = "", ""
+	for name, candidate := range map[string]testgendomain.ManagedTarget{"file": file, "function": function, "gap": gap} {
+		if err := materializer.ValidateManagedBaseline(context.Background(), index, candidate); err != nil {
+			t.Fatalf("%s baseline: %v", name, err)
+		}
+	}
+}
+
 func TestProductionManagedCandidateSetUsesExecutableCaseIDsAndEvidence(t *testing.T) {
 	run, index, set, generated, target, result := productionManagedFixture(t)
 	candidate := testgendomain.Candidate{CaseID: set.CaseIDs[0], Kind: testgendomain.KindVerified, StagedSourceArtifact: run.ArtifactDigests[0]}

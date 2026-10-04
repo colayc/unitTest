@@ -462,9 +462,15 @@ func (materializer *productionManagedMaterializer) ManagedBaselineReady() bool {
 }
 
 func (materializer *productionManagedMaterializer) ValidateManagedBaseline(_ context.Context, index coveragedetail.Index, target testgendomain.ManagedTarget) error {
+	scope, id := testgendomain.ScopeFile, target.FileID
+	if target.GapID != "" {
+		scope, id = testgendomain.ScopeCoverageGap, target.GapID
+	} else if target.FunctionID != "" {
+		scope, id = testgendomain.ScopeSymbol, target.FunctionID
+	}
 	resolved, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
 		ProjectID: index.ProjectID, WorkspaceGeneration: index.WorkspaceGeneration, CoverageReportID: index.ReportID,
-		Scope: testgendomain.ScopeCoverageGap, ID: target.GapID,
+		Scope: scope, ID: id,
 	}, index)
 	if err != nil || !reflect.DeepEqual(resolved, target) || index.ToolchainID == "" {
 		return testgendomain.ErrStaleSnapshot
