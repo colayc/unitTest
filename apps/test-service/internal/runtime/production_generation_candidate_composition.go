@@ -72,6 +72,7 @@ type productionGenerationCandidateComposition struct {
 	snapshots  *productionGenerationSnapshotAuthority
 	artifacts  *productionGenerationArtifactAuthority
 	processes  *productionGenerationProcessAuthority
+	selection  *productionManagedSelectionAuthority
 }
 
 func newProductionGenerationCandidateComposition(store *taskstore.Store, runtimeValue *Runtime) (*productionGenerationCandidateComposition, error) {
@@ -146,6 +147,12 @@ func newProductionGenerationCandidateComposition(store *taskstore.Store, runtime
 	if err != nil {
 		return nil, task.ErrStorageUnavailable
 	}
+	selection, err := newProductionManagedSelectionAuthority(productionManagedSelectionAuthorityConfig{
+		root: runtimeValue.workspaceRoot, store: store, resolver: resolver, current: runtimeValue,
+	})
+	if err != nil {
+		return nil, task.ErrStorageUnavailable
+	}
 
 	generationArtifacts := runtimeProductionGenerationArtifacts{metadata: store, content: content}
 	artifactAuthority, err := newProductionGenerationArtifactAuthority(generationArtifacts)
@@ -193,7 +200,7 @@ func newProductionGenerationCandidateComposition(store *taskstore.Store, runtime
 	driver := newProductionGenerationDriver(resolver, pipeline, validation)
 	return &productionGenerationCandidateComposition{
 		driver: driver, resolver: resolver, validation: validation,
-		snapshots: snapshots, artifacts: artifactAuthority, processes: processes,
+		snapshots: snapshots, artifacts: artifactAuthority, processes: processes, selection: selection,
 	}, nil
 }
 
