@@ -397,11 +397,17 @@ func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next t
 }
 
 func validGenerationArtifact(a task.Artifact) bool {
-	return validArtifact(a) && len(a.ID) == 32 && len(a.TaskID) == 32 &&
-		a.Kind == "test-generation-source" && a.MIMEType == "application/octet-stream" &&
-		a.Size >= 1 && a.Size <= 4*1024*1024 &&
-		a.RelativePath == path.Join("tasks", a.TaskID, a.ID+".source") &&
-		a.SHA256 == strings.ToLower(a.SHA256)
+	if !validArtifact(a) || len(a.ID) != 32 || len(a.TaskID) != 32 || a.MIMEType != "application/octet-stream" || a.Size < 1 || a.SHA256 != strings.ToLower(a.SHA256) {
+		return false
+	}
+	switch a.Kind {
+	case "test-generation-source":
+		return a.Size <= 4*1024*1024 && a.RelativePath == path.Join("tasks", a.TaskID, a.ID+".source")
+	case "test-generation-evidence":
+		return a.Size <= 16*1024*1024 && a.RelativePath == path.Join("tasks", a.TaskID, a.ID+".evidence")
+	default:
+		return false
+	}
 }
 
 func (s *Store) ListGenerationCandidates(ctx context.Context, runID string) ([]testgendomain.Candidate, error) {

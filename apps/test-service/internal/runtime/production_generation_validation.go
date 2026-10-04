@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -45,6 +47,11 @@ type productionValidationAuthority interface {
 type productionGenerationArtifactStore interface {
 	CommitGenerationSource(context.Context, string, string, time.Time, []byte) (task.Artifact, error)
 	VerifyGenerationSource(context.Context, task.Artifact) error
+	ReadGenerationSource(context.Context, task.Artifact) ([]byte, error)
+	CommitGenerationEvidence(context.Context, string, string, time.Time, []byte) (task.Artifact, error)
+	VerifyGenerationEvidence(context.Context, task.Artifact) error
+	ReadGenerationEvidence(context.Context, task.Artifact) ([]byte, error)
+	GetArtifact(context.Context, string) (task.Artifact, error)
 }
 
 type productionValidatedRecord struct {
@@ -52,7 +59,17 @@ type productionValidatedRecord struct {
 	receipts  []testgenvalidate.StageReceipt
 	candidate testgendomain.Candidate
 	artifact  task.Artifact
+	evidence  task.Artifact
 	set       testgenpublish.CandidateSet
+}
+
+type productionValidationEvidence struct {
+	Version        int
+	Binding        productionValidationBinding
+	Receipts       []testgenvalidate.StageReceipt
+	Candidate      testgendomain.Candidate
+	SourceArtifact task.Artifact
+	Set            testgenpublish.CandidateSet
 }
 
 func cloneProductionCandidateSet(value testgenpublish.CandidateSet) testgenpublish.CandidateSet {
@@ -92,9 +109,9 @@ func productionBytesDigest(value []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func exactGeneratedSource(set testgenrender.StagedEditSet) ([]byte, bool) {
+func exactGeneratedSource(files []testgenrender.StagedFile) ([]byte, bool) {
 	var source []byte
-	for _, file := range set.Files {
+	for _, file := range files {
 		if !strings.HasSuffix(file.Path, "_test.c") && !strings.HasSuffix(file.Path, "_test.cpp") {
 			continue
 		}
@@ -146,6 +163,20 @@ func productionPlannedEdits(files []testgenrender.StagedFile) []testgendomain.Pl
 	return result
 }
 
+func productionValidationBindingFor(run testgendomain.Run, target generationTarget, pipeline productionPipelineResult) (productionValidationBinding, error) {
+	kind, assertionDigest, err := productionAssertionBinding(pipeline)
+	if err != nil {
+		return productionValidationBinding{}, err
+	}
+	binding := productionValidationBinding{
+		RunID: run.ID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: testgendomain.NewGenerationRecord(run.Request).SnapshotDigest,
+		EditDigest: productionValidationDigest(pipeline.editSet.Files), AssertionDigest: assertionDigest,
+		TargetSymbol: "fn:" + target.gap.SymbolID, Kind: kind,
+	}
+	binding.ValidationID = productionValidationDigest(binding)
+	return binding, nil
+}
+
 func assertionEvidence(kind testgendomain.CandidateKind, digest string) (testgenvalidate.AssertionEvidence, testgendomain.Assertion, error) {
 	switch kind {
 	case testgendomain.KindVerified:
@@ -161,27 +192,19 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	if ctx == nil || !adapter.Ready() || !target.valid() || run.ID == "" || run.TaskID == "" || !reflect.DeepEqual(run.Request, target.request) {
 		return GenerationStageResult{}, errProductionValidationUnavailable
 	}
-	source, ok := exactGeneratedSource(pipeline.editSet)
+	source, ok := exactGeneratedSource(pipeline.editSet.Files)
 	if !ok {
 		return GenerationStageResult{}, errProductionValidationUnavailable
 	}
-	kind, assertionDigest, err := productionAssertionBinding(pipeline)
+	binding, err := productionValidationBindingFor(run, target, pipeline)
 	if err != nil {
 		return GenerationStageResult{}, err
 	}
-	snapshotDigest := testgendomain.NewGenerationRecord(run.Request).SnapshotDigest
-	editDigest := productionValidationDigest(pipeline.editSet.Files)
-	targetSymbol := "fn:" + target.gap.SymbolID
-	binding := productionValidationBinding{
-		RunID: run.ID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: snapshotDigest,
-		EditDigest: editDigest, AssertionDigest: assertionDigest, TargetSymbol: targetSymbol, Kind: kind,
-	}
-	binding.ValidationID = productionValidationDigest(binding)
 	input, err := adapter.authority.Prepare(ctx, binding)
 	if err != nil {
 		return GenerationStageResult{}, err
 	}
-	evidence, projectedAssertion, err := assertionEvidence(kind, assertionDigest)
+	evidence, projectedAssertion, err := assertionEvidence(binding.Kind, binding.AssertionDigest)
 	if err != nil {
 		return GenerationStageResult{}, err
 	}
@@ -209,7 +232,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 		return GenerationStageResult{}, err
 	}
 	candidate := testgendomain.Candidate{
-		CaseID: caseID, Kind: kind, TargetSymbol: targetSymbol, Assertions: []testgendomain.Assertion{projectedAssertion},
+		CaseID: caseID, Kind: binding.Kind, TargetSymbol: binding.TargetSymbol, Assertions: []testgendomain.Assertion{projectedAssertion},
 		StagedSourceArtifact: testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256}, CodeDigest: productionBytesDigest(source),
 		CoverageDelta: validated.Delta, BaselineCoverage: validated.BaselinePercent, DeltaCoveragePercent: validated.DeltaPercent,
 		PlannedEdits: productionPlannedEdits(pipeline.editSet.Files),
@@ -218,34 +241,127 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 		return GenerationStageResult{}, errProductionValidationUnavailable
 	}
 	set := testgenpublish.CandidateSet{
-		RunID: run.ID, SnapshotDigest: snapshotDigest, CaseIDs: []string{caseID},
+		RunID: run.ID, SnapshotDigest: binding.SnapshotDigest, CaseIDs: []string{caseID},
 		TestTarget: target.renderTarget.TestTarget, ProductionTarget: target.renderTarget.ProductionTarget,
 		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.gap.SymbolID,
 		Files: append([]testgenrender.StagedFile(nil), pipeline.editSet.Files...), Diff: pipeline.editSet.Diff,
 	}
-	if kind == testgendomain.KindCharacterization {
+	if binding.Kind == testgendomain.KindCharacterization {
 		set.CharacterizationIDs = []string{caseID}
 	}
-	record := productionValidatedRecord{binding: binding, receipts: append([]testgenvalidate.StageReceipt(nil), validated.Receipts...), candidate: testgendomain.CloneCandidate(candidate), artifact: artifact, set: cloneProductionCandidateSet(set)}
+	persisted := productionValidationEvidence{Version: 1, Binding: binding, Receipts: append([]testgenvalidate.StageReceipt(nil), validated.Receipts...), Candidate: testgendomain.CloneCandidate(candidate), SourceArtifact: artifact, Set: cloneProductionCandidateSet(set)}
+	encoded, err := json.Marshal(persisted)
+	if err != nil {
+		return GenerationStageResult{}, errProductionValidationUnavailable
+	}
+	evidenceArtifact, err := adapter.artifacts.CommitGenerationEvidence(ctx, run.TaskID, caseID, run.CreatedAt, encoded)
+	if err != nil {
+		return GenerationStageResult{}, err
+	}
+	if err := adapter.artifacts.VerifyGenerationEvidence(ctx, evidenceArtifact); err != nil {
+		return GenerationStageResult{}, err
+	}
+	record := productionValidatedRecord{binding: binding, receipts: persisted.Receipts, candidate: persisted.Candidate, artifact: artifact, evidence: evidenceArtifact, set: persisted.Set}
 	adapter.mu.Lock()
 	adapter.records[run.ID] = record
 	adapter.mu.Unlock()
-	return GenerationStageResult{Next: testgendomain.StateMinimizing, Candidates: []testgendomain.Candidate{candidate}, Artifacts: []task.Artifact{artifact}}, nil
+	return GenerationStageResult{Next: testgendomain.StateMinimizing, Candidates: []testgendomain.Candidate{candidate}, Artifacts: []task.Artifact{artifact, evidenceArtifact}}, nil
 }
 
-func (adapter *productionGenerationValidation) record(runID string) (productionValidatedRecord, bool) {
+func (adapter *productionGenerationValidation) cachedRecord(runID string) (productionValidatedRecord, bool) {
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
 	record, ok := adapter.records[runID]
 	return record, ok
 }
 
+func hasGenerationArtifact(run testgendomain.Run, artifact task.Artifact) bool {
+	for _, reference := range run.ArtifactDigests {
+		if reference.ID == artifact.ID && reference.Digest == artifact.SHA256 {
+			return true
+		}
+	}
+	return false
+}
+
+func validProductionReceipts(receipts []testgenvalidate.StageReceipt) bool {
+	expected := []testgenvalidate.Stage{testgenvalidate.StageConfigure, testgenvalidate.StageCompile, testgenvalidate.StageDiscover, testgenvalidate.StageCandidate, testgenvalidate.StageSuite, testgenvalidate.StageCoverage}
+	if len(receipts) != len(expected) {
+		return false
+	}
+	for index, receipt := range receipts {
+		if receipt.Stage != expected[index] || !validProductionDigest(receipt.Digest) || !validProductionDigest(receipt.OutputDigest) || !validProductionDigest(receipt.CoverageDigest) {
+			return false
+		}
+	}
+	return true
+}
+
+func (adapter *productionGenerationValidation) loadRecord(ctx context.Context, run testgendomain.Run, candidate testgendomain.Candidate) (productionValidatedRecord, error) {
+	evidenceArtifact, err := adapter.artifacts.GetArtifact(ctx, candidate.CaseID)
+	if err != nil || evidenceArtifact.TaskID != run.TaskID || evidenceArtifact.Kind != "test-generation-evidence" || !hasGenerationArtifact(run, evidenceArtifact) {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	if err := adapter.artifacts.VerifyGenerationEvidence(ctx, evidenceArtifact); err != nil {
+		return productionValidatedRecord{}, err
+	}
+	encoded, err := adapter.artifacts.ReadGenerationEvidence(ctx, evidenceArtifact)
+	if err != nil {
+		return productionValidatedRecord{}, err
+	}
+	var persisted productionValidationEvidence
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&persisted) != nil || decoder.Decode(new(any)) != io.EOF {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	canonical, err := json.Marshal(persisted)
+	if err != nil || !bytes.Equal(canonical, encoded) || persisted.Version != 1 || !reflect.DeepEqual(persisted.Candidate, candidate) ||
+		persisted.Binding.RunID != run.ID || persisted.Binding.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest ||
+		persisted.Binding.ValidationID != productionValidationDigest(productionValidationBinding{
+			RunID: persisted.Binding.RunID, TaskDigest: persisted.Binding.TaskDigest, SnapshotDigest: persisted.Binding.SnapshotDigest,
+			EditDigest: persisted.Binding.EditDigest, AssertionDigest: persisted.Binding.AssertionDigest, TargetSymbol: persisted.Binding.TargetSymbol, Kind: persisted.Binding.Kind,
+		}) || persisted.Binding.TaskDigest != productionBytesDigest([]byte(run.TaskID)) || !validProductionReceipts(persisted.Receipts) ||
+		persisted.Set.RunID != run.ID || persisted.Set.SnapshotDigest != persisted.Binding.SnapshotDigest || !reflect.DeepEqual(persisted.Set.CaseIDs, []string{candidate.CaseID}) ||
+		persisted.Binding.EditDigest != productionValidationDigest(persisted.Set.Files) || !reflect.DeepEqual(candidate.PlannedEdits, productionPlannedEdits(persisted.Set.Files)) {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	sourceArtifact, err := adapter.artifacts.GetArtifact(ctx, candidate.StagedSourceArtifact.ID)
+	if err != nil || sourceArtifact != persisted.SourceArtifact || sourceArtifact.TaskID != run.TaskID || !hasGenerationArtifact(run, sourceArtifact) ||
+		sourceArtifact.SHA256 != candidate.StagedSourceArtifact.Digest {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	source, err := adapter.artifacts.ReadGenerationSource(ctx, sourceArtifact)
+	if err != nil || productionBytesDigest(source) != candidate.CodeDigest {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	exact, ok := exactGeneratedSource(persisted.Set.Files)
+	if !ok || !bytes.Equal(exact, source) {
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	record := productionValidatedRecord{binding: persisted.Binding, receipts: append([]testgenvalidate.StageReceipt(nil), persisted.Receipts...), candidate: testgendomain.CloneCandidate(candidate), artifact: sourceArtifact, evidence: evidenceArtifact, set: cloneProductionCandidateSet(persisted.Set)}
+	adapter.mu.Lock()
+	adapter.records[run.ID] = record
+	adapter.mu.Unlock()
+	return record, nil
+}
+
+func (adapter *productionGenerationValidation) validatedRecord(ctx context.Context, run testgendomain.Run, candidate testgendomain.Candidate) (productionValidatedRecord, error) {
+	if record, ok := adapter.cachedRecord(run.ID); ok {
+		if reflect.DeepEqual(record.candidate, candidate) {
+			return record, nil
+		}
+		return productionValidatedRecord{}, errProductionValidationUnavailable
+	}
+	return adapter.loadRecord(ctx, run, candidate)
+}
+
 func (adapter *productionGenerationValidation) ValidateCandidate(ctx context.Context, run testgendomain.Run, candidate testgendomain.Candidate) error {
 	if ctx == nil || !adapter.Ready() || testgendomain.ValidateCandidate(candidate) != nil {
 		return errProductionValidationUnavailable
 	}
-	record, ok := adapter.record(run.ID)
-	if !ok || !reflect.DeepEqual(record.candidate, candidate) || record.binding.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest {
+	record, err := adapter.validatedRecord(ctx, run, candidate)
+	if err != nil || record.binding.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest {
 		return errProductionValidationUnavailable
 	}
 	if err := adapter.authority.Verify(ctx, record.binding, append([]testgenvalidate.StageReceipt(nil), record.receipts...)); err != nil {
@@ -258,16 +374,39 @@ func (adapter *productionGenerationValidation) CandidateSet(ctx context.Context,
 	if len(candidates) != 1 || adapter.ValidateCandidate(ctx, run, candidates[0]) != nil {
 		return testgenpublish.CandidateSet{}, errProductionValidationUnavailable
 	}
-	record, ok := adapter.record(run.ID)
+	record, ok := adapter.cachedRecord(run.ID)
 	if !ok {
 		return testgenpublish.CandidateSet{}, errProductionValidationUnavailable
 	}
 	return cloneProductionCandidateSet(record.set), nil
 }
 
-func (adapter *productionGenerationValidation) Minimize(ctx context.Context, run testgendomain.Run, _ generationTarget, _ productionPipelineResult) (GenerationStageResult, error) {
-	record, ok := adapter.record(run.ID)
-	if !ok || adapter.ValidateCandidate(ctx, run, record.candidate) != nil {
+func (adapter *productionGenerationValidation) Minimize(ctx context.Context, run testgendomain.Run, target generationTarget, pipeline productionPipelineResult) (GenerationStageResult, error) {
+	record, ok := adapter.cachedRecord(run.ID)
+	if !ok {
+		binding, err := productionValidationBindingFor(run, target, pipeline)
+		if err != nil {
+			return GenerationStageResult{}, err
+		}
+		caseID := productionBytesDigest([]byte("case:" + binding.ValidationID))[:32]
+		evidenceArtifact, err := adapter.artifacts.GetArtifact(ctx, caseID)
+		if err != nil {
+			return GenerationStageResult{}, errProductionValidationUnavailable
+		}
+		encoded, err := adapter.artifacts.ReadGenerationEvidence(ctx, evidenceArtifact)
+		if err != nil {
+			return GenerationStageResult{}, err
+		}
+		var persisted productionValidationEvidence
+		if json.Unmarshal(encoded, &persisted) != nil || persisted.Binding != binding {
+			return GenerationStageResult{}, errProductionValidationUnavailable
+		}
+		record, err = adapter.loadRecord(ctx, run, persisted.Candidate)
+		if err != nil {
+			return GenerationStageResult{}, err
+		}
+	}
+	if adapter.ValidateCandidate(ctx, run, record.candidate) != nil {
 		return GenerationStageResult{}, errProductionValidationUnavailable
 	}
 	set := cloneProductionCandidateSet(record.set)

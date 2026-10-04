@@ -220,19 +220,23 @@ func TestGenerationCandidatesAreOwnedBoundedAndUnique(t *testing.T) {
 		}
 	}
 	a := task.Artifact{ID: strings.Repeat("4", 32), TaskID: r.TaskID, Kind: "test-generation-source", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("4", 32) + ".source", MIMEType: "application/octet-stream", Size: 12, SHA256: strings.Repeat("e", 64), CreatedAt: r.CreatedAt}
+	evidence := task.Artifact{ID: strings.Repeat("9", 32), TaskID: r.TaskID, Kind: "test-generation-evidence", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("9", 32) + ".evidence", MIMEType: "application/octet-stream", Size: 128, SHA256: strings.Repeat("d", 64), CreatedAt: r.CreatedAt}
 	c := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: a.ID, Digest: a.SHA256}, CodeDigest: strings.Repeat("7", 64), PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/classify_test.c", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}}}
 	next := r
 	next.State = testgendomain.StateValidating
 	next.Revision++
 	next.CandidateCount = 1
-	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}}
-	r, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, []task.Artifact{a})
+	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}, {ID: evidence.ID, Digest: evidence.SHA256}}
+	r, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, []task.Artifact{a, evidence})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ListGenerationCandidates(ctx, r.ID)
 	if err != nil || len(got) != 1 || got[0].CaseID != c.CaseID {
 		t.Fatalf("candidates = %+v, %v", got, err)
+	}
+	if stored, err := s.GetArtifact(ctx, evidence.ID); err != nil || stored != evidence {
+		t.Fatalf("evidence artifact=%+v err=%v", stored, err)
 	}
 	got[0].PlannedEdits[0].Path = "tampered"
 	again, err := s.ListGenerationCandidates(ctx, r.ID)

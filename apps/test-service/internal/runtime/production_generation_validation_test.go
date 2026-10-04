@@ -85,22 +85,64 @@ func (authority *productionValidationAuthorityFixture) evidence(_ context.Contex
 }
 
 type productionGenerationArtifactFixture struct {
-	body    []byte
-	value   task.Artifact
-	corrupt bool
+	bodies  map[string][]byte
+	values  map[string]task.Artifact
+	corrupt map[string]bool
+}
+
+func (store *productionGenerationArtifactFixture) commit(taskID, artifactID, kind, suffix string, at time.Time, body []byte) (task.Artifact, error) {
+	if store.bodies == nil {
+		store.bodies, store.values, store.corrupt = map[string][]byte{}, map[string]task.Artifact{}, map[string]bool{}
+	}
+	store.bodies[artifactID] = append([]byte(nil), body...)
+	value := task.Artifact{ID: artifactID, TaskID: taskID, Kind: kind, RelativePath: "artifacts/" + artifactID + suffix, MIMEType: "application/octet-stream", SHA256: digestRuntimeValidation(body), Size: int64(len(body)), CreatedAt: at}
+	store.values[artifactID] = value
+	return value, nil
 }
 
 func (store *productionGenerationArtifactFixture) CommitGenerationSource(_ context.Context, taskID, artifactID string, at time.Time, source []byte) (task.Artifact, error) {
-	store.body = append([]byte(nil), source...)
-	store.value = task.Artifact{ID: artifactID, TaskID: taskID, Kind: "test-generation-source", RelativePath: "artifacts/" + artifactID + ".source", MIMEType: "application/octet-stream", SHA256: digestRuntimeValidation(source), Size: int64(len(source)), CreatedAt: at}
-	return store.value, nil
+	return store.commit(taskID, artifactID, "test-generation-source", ".source", at, source)
 }
 
-func (store *productionGenerationArtifactFixture) VerifyGenerationSource(_ context.Context, artifact task.Artifact) error {
-	if store.corrupt || artifact != store.value || digestRuntimeValidation(store.body) != artifact.SHA256 {
+func (store *productionGenerationArtifactFixture) CommitGenerationEvidence(_ context.Context, taskID, artifactID string, at time.Time, evidence []byte) (task.Artifact, error) {
+	return store.commit(taskID, artifactID, "test-generation-evidence", ".evidence", at, evidence)
+}
+
+func (store *productionGenerationArtifactFixture) verify(artifact task.Artifact, kind string) error {
+	if store.corrupt[artifact.ID] || artifact != store.values[artifact.ID] || artifact.Kind != kind || digestRuntimeValidation(store.bodies[artifact.ID]) != artifact.SHA256 {
 		return errors.New("artifact changed")
 	}
 	return nil
+}
+
+func (store *productionGenerationArtifactFixture) VerifyGenerationSource(_ context.Context, artifact task.Artifact) error {
+	return store.verify(artifact, "test-generation-source")
+}
+
+func (store *productionGenerationArtifactFixture) VerifyGenerationEvidence(_ context.Context, artifact task.Artifact) error {
+	return store.verify(artifact, "test-generation-evidence")
+}
+
+func (store *productionGenerationArtifactFixture) ReadGenerationSource(_ context.Context, artifact task.Artifact) ([]byte, error) {
+	if err := store.verify(artifact, "test-generation-source"); err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), store.bodies[artifact.ID]...), nil
+}
+
+func (store *productionGenerationArtifactFixture) ReadGenerationEvidence(_ context.Context, artifact task.Artifact) ([]byte, error) {
+	if err := store.verify(artifact, "test-generation-evidence"); err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), store.bodies[artifact.ID]...), nil
+}
+
+func (store *productionGenerationArtifactFixture) GetArtifact(_ context.Context, artifactID string) (task.Artifact, error) {
+	value, ok := store.values[artifactID]
+	if !ok {
+		return task.Artifact{}, task.ErrNotFound
+	}
+	return value, nil
 }
 
 func digestRuntimeValidation(data []byte) string {
@@ -172,7 +214,7 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Next != testgendomain.StateMinimizing || len(result.Candidates) != 1 || len(result.Artifacts) != 1 {
+	if result.Next != testgendomain.StateMinimizing || len(result.Candidates) != 1 || len(result.Artifacts) != 2 {
 		t.Fatalf("validation result=%+v", result)
 	}
 	candidate := result.Candidates[0]
@@ -192,8 +234,8 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	if string(cmake) != target.renderTarget.ExistingCMake {
 		t.Fatalf("workspace cmake changed: %q", cmake)
 	}
-	if len(artifacts.body) == 0 || artifacts.value.SHA256 != candidate.StagedSourceArtifact.Digest {
-		t.Fatalf("artifact not bound: %+v", artifacts.value)
+	if len(result.Artifacts) != 2 || len(artifacts.bodies[candidate.StagedSourceArtifact.ID]) == 0 || artifacts.values[candidate.StagedSourceArtifact.ID].SHA256 != candidate.StagedSourceArtifact.Digest {
+		t.Fatalf("artifacts not bound: %+v", result.Artifacts)
 	}
 	set, err := adapter.CandidateSet(context.Background(), run, result.Candidates)
 	if err != nil || !reflect.DeepEqual(set.Files, pipeline.editSet.Files) || !reflect.DeepEqual(set.CaseIDs, []string{candidate.CaseID}) {
@@ -212,9 +254,22 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	if err := adapter.ValidateCandidate(context.Background(), run, candidate); err != nil || authority.verify != 4 {
 		t.Fatalf("candidate receipt not reverified: %v count=%d", err, authority.verify)
 	}
-	artifacts.corrupt = true
+	for _, artifact := range result.Artifacts {
+		run.ArtifactDigests = append(run.ArtifactDigests, testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256})
+	}
+	adapter.mu.Lock()
+	delete(adapter.records, run.ID)
+	adapter.mu.Unlock()
+	restarted, err := adapter.CandidateSet(context.Background(), run, result.Candidates)
+	if err != nil || !reflect.DeepEqual(restarted.Files, pipeline.editSet.Files) {
+		t.Fatalf("durable validation did not survive restart: %+v %v", restarted, err)
+	}
+	artifacts.corrupt[candidate.CaseID] = true
+	adapter.mu.Lock()
+	delete(adapter.records, run.ID)
+	adapter.mu.Unlock()
 	if err := adapter.ValidateCandidate(context.Background(), run, candidate); err == nil {
-		t.Fatal("changed source artifact accepted")
+		t.Fatal("changed evidence artifact accepted")
 	}
 }
 
@@ -225,7 +280,7 @@ func TestProductionGenerationValidationFailureRetainsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Next != testgendomain.StateRejected || len(result.Candidates) != 0 || len(result.Artifacts) != 0 || len(artifacts.body) != 0 {
+	if result.Next != testgendomain.StateRejected || len(result.Candidates) != 0 || len(result.Artifacts) != 0 || len(artifacts.bodies) != 0 {
 		t.Fatalf("failed validation retained data: %+v", result)
 	}
 }
