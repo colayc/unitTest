@@ -3,9 +3,11 @@ package testgenvalidate
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"reflect"
 
 	coverage "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/testgendomain"
 )
 
 const maxStageOutput = 256 << 10
@@ -79,6 +81,13 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 				return result, nil
 			}
 			result.Delta = delta
+			result.BaselinePercent = coveragePercent(baseline.Summary)
+			candidatePercent := coveragePercent(candidate.Summary)
+			result.DeltaPercent = testgendomain.CoveragePercent{
+				FunctionPercent: boundedPercent(candidatePercent.FunctionPercent - result.BaselinePercent.FunctionPercent),
+				LinePercent:     boundedPercent(candidatePercent.LinePercent - result.BaselinePercent.LinePercent),
+				BranchPercent:   boundedPercent(candidatePercent.BranchPercent - result.BaselinePercent.BranchPercent),
+			}
 		}
 		receipt := struct {
 			Stage               Stage
@@ -98,6 +107,30 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 	}
 	result.Retained = true
 	return result, nil
+}
+
+func boundedPercent(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func coveragePercent(summary coverage.CoverageSummaryV1) testgendomain.CoveragePercent {
+	percent := func(covered, total int64) float64 {
+		if covered <= 0 || total <= 0 {
+			return 0
+		}
+		return boundedPercent(float64(covered) * 100 / float64(total))
+	}
+	return testgendomain.CoveragePercent{
+		FunctionPercent: percent(summary.Functions.Covered, summary.Functions.Total),
+		LinePercent:     percent(summary.Lines.Covered, summary.Lines.Total),
+		BranchPercent:   percent(summary.Branches.Covered, summary.Branches.Total),
+	}
 }
 
 func compareCoverage(ctx context.Context, before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate, proof *TargetCoverageProof, baselineDigest, candidateDigest string) (CoverageDelta, Diagnostic) {

@@ -72,6 +72,15 @@ type Config struct {
 
 type Validator struct{ Config Config }
 
+// Ready reports whether the validator has every authority required before it
+// may execute a generated candidate. Coverage identity resolution is optional
+// only because line-only validation does not require native function/branch
+// identities; Validate enforces it whenever those metrics are selected.
+func (v Validator) Ready() bool {
+	return v.Config.SourceRoot != "" && v.Config.TempRoot != "" && v.Config.Planner != nil &&
+		v.Config.VerifyEvidence != nil && v.Config.ResolveCandidate != nil
+}
+
 func validDigest(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -99,7 +108,7 @@ func validRequest(r ValidationRequest) bool {
 }
 
 func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result ValidationResult, err error) {
-	if ctx == nil || !validRequest(r) || v.Config.Planner == nil || v.Config.VerifyEvidence == nil || v.Config.ResolveCandidate == nil {
+	if ctx == nil || !validRequest(r) || !v.Ready() {
 		return result, ErrInvalidRequest
 	}
 	resolved, resolveErr := v.Config.ResolveCandidate(ctx, r.CandidateID)
