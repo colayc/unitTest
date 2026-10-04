@@ -46,6 +46,12 @@ func sourceFingerprint(root string) (map[string]string, string, error) {
 		if path == root {
 			return nil
 		}
+		if ignoredSnapshotEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return errIsolation
@@ -138,6 +144,12 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile, expect
 		if path == source {
 			return nil
 		}
+		if ignoredSnapshotEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		rel, err := filepath.Rel(source, path)
 		if err != nil {
 			return errIsolation
@@ -222,6 +234,10 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile, expect
 		}
 	}
 	return roots, root, nil
+}
+
+func ignoredSnapshotEntry(entry os.DirEntry) bool {
+	return entry != nil && strings.HasPrefix(entry.Name(), ".")
 }
 
 func safeEdit(root, path string, edit testgenrender.StagedFile) error {

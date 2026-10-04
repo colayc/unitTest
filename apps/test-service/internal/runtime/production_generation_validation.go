@@ -29,10 +29,13 @@ var errProductionValidationUnavailable = errors.New("production test generation 
 // bytes and closed run identities. The authority uses it to register the
 // candidate that testgenvalidate.Validator later resolves independently.
 type productionValidationBinding struct {
-	ValidationID, RunID, TaskDigest, SnapshotDigest string
-	EditDigest, AssertionDigest, TargetSymbol       string
-	TargetFunctionIDs                               []string
-	Kind                                            testgendomain.CandidateKind
+	ValidationID, RunID, TaskDigest, SnapshotDigest  string
+	EditDigest, AssertionDigest, TargetSymbol        string
+	ProjectID, WorkspaceGeneration, CoverageReportID string
+	BaselineReportDigest, SourceRelativePath         string
+	SourceDigest                                     string
+	TargetFunctionIDs, CoverageFunctionIDs           []string
+	Kind                                             testgendomain.CandidateKind
 }
 
 type productionValidationInput struct {
@@ -256,16 +259,22 @@ func productionValidationBindingFor(run testgendomain.Run, target generationTarg
 		return productionValidationBinding{}, err
 	}
 	targetFunctions := make([]string, 0, len(pipeline.functions))
+	coverageFunctions := make([]string, 0, len(pipeline.functions))
 	seen := map[string]bool{}
+	seenCoverage := map[string]bool{}
 	for _, function := range pipeline.functions {
-		if !validProductionDigest(function.symbolID) || seen[function.symbolID] {
+		if !validProductionDigest(function.symbolID) || !validProductionObjectID(function.functionID) ||
+			seen[function.symbolID] || seenCoverage[function.functionID] {
 			return productionValidationBinding{}, errProductionValidationUnavailable
 		}
 		seen[function.symbolID] = true
+		seenCoverage[function.functionID] = true
 		targetFunctions = append(targetFunctions, function.symbolID)
+		coverageFunctions = append(coverageFunctions, function.functionID)
 	}
 	sort.Strings(targetFunctions)
-	if len(targetFunctions) == 0 {
+	sort.Strings(coverageFunctions)
+	if len(targetFunctions) == 0 || len(targetFunctions) != len(coverageFunctions) {
 		return productionValidationBinding{}, errProductionValidationUnavailable
 	}
 	targetSymbol := "fn:" + pipeline.primarySymbolID()
@@ -275,7 +284,9 @@ func productionValidationBindingFor(run testgendomain.Run, target generationTarg
 	binding := productionValidationBinding{
 		RunID: run.ID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: testgendomain.NewGenerationRecord(run.Request).SnapshotDigest,
 		EditDigest: productionValidationDigest(pipeline.editSet.Files), AssertionDigest: assertionDigest,
-		TargetSymbol: targetSymbol, TargetFunctionIDs: targetFunctions, Kind: kind,
+		ProjectID: target.projectID, WorkspaceGeneration: target.workspaceGeneration, CoverageReportID: target.coverageReportID,
+		BaselineReportDigest: target.request.BaselineReportDigest, SourceRelativePath: target.sourceRelativePath, SourceDigest: target.sourceDigest,
+		TargetSymbol: targetSymbol, TargetFunctionIDs: targetFunctions, CoverageFunctionIDs: coverageFunctions, Kind: kind,
 	}
 	binding.ValidationID = productionValidationDigest(binding)
 	return binding, nil
@@ -429,7 +440,9 @@ func (adapter *productionGenerationValidation) loadRecord(ctx context.Context, r
 		persisted.Binding.ValidationID != productionValidationDigest(productionValidationBinding{
 			RunID: persisted.Binding.RunID, TaskDigest: persisted.Binding.TaskDigest, SnapshotDigest: persisted.Binding.SnapshotDigest,
 			EditDigest: persisted.Binding.EditDigest, AssertionDigest: persisted.Binding.AssertionDigest, TargetSymbol: persisted.Binding.TargetSymbol,
-			TargetFunctionIDs: append([]string(nil), persisted.Binding.TargetFunctionIDs...), Kind: persisted.Binding.Kind,
+			ProjectID: persisted.Binding.ProjectID, WorkspaceGeneration: persisted.Binding.WorkspaceGeneration, CoverageReportID: persisted.Binding.CoverageReportID,
+			BaselineReportDigest: persisted.Binding.BaselineReportDigest, SourceRelativePath: persisted.Binding.SourceRelativePath, SourceDigest: persisted.Binding.SourceDigest,
+			TargetFunctionIDs: append([]string(nil), persisted.Binding.TargetFunctionIDs...), CoverageFunctionIDs: append([]string(nil), persisted.Binding.CoverageFunctionIDs...), Kind: persisted.Binding.Kind,
 		}) || persisted.Binding.TaskDigest != productionBytesDigest([]byte(run.TaskID)) || !validProductionReceipts(persisted.Receipts) ||
 		persisted.Set.RunID != run.ID || persisted.Set.SnapshotDigest != persisted.Binding.SnapshotDigest || !reflect.DeepEqual(persisted.Set.CaseIDs, []string{candidate.CaseID}) ||
 		persisted.Binding.EditDigest != productionValidationDigest(persisted.Set.Files) || !reflect.DeepEqual(candidate.PlannedEdits, productionPlannedEdits(persisted.Set.Files)) {
