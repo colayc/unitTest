@@ -32,6 +32,8 @@ type PreparedProcessExecutor struct {
 	Interpret                 StageInterpreter
 	TaskID, ServiceInstanceID string
 	ToolSHA256                map[string]string
+	AllowedEnvironment        []string
+	AllowedEnvUnset           []string
 	RecordLease, ReleaseLease LeaseWriter
 }
 
@@ -182,18 +184,89 @@ func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Root
 			return false
 		}
 	}
-	for _, entry := range spec.Env {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) || !within(roots.Artifacts, value) || !safeEnvironmentDestination(key, value) {
+	if e.AllowedEnvironment != nil || e.AllowedEnvUnset != nil {
+		if !exactTrustedEnvironment(spec.Env, spec.EnvUnset, e.AllowedEnvironment, e.AllowedEnvUnset) {
 			return false
 		}
+	} else {
+		for _, entry := range spec.Env {
+			key, value, ok := strings.Cut(entry, "=")
+			if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) || !within(roots.Artifacts, value) || !safeEnvironmentDestination(key, value) {
+				return false
+			}
+		}
+		for _, key := range spec.EnvUnset {
+			if key != "LLVM_PROFILE_FILE" && key != "GCOV_PREFIX" && key != "GCOV_PREFIX_STRIP" {
+				return false
+			}
+		}
 	}
-	for _, key := range spec.EnvUnset {
-		if key != "LLVM_PROFILE_FILE" && key != "GCOV_PREFIX" && key != "GCOV_PREFIX_STRIP" {
+	return true
+}
+
+func exactTrustedEnvironment(actual, actualUnset, allowed, allowedUnset []string) bool {
+	actualValues, ok := canonicalEnvironmentSnapshot(actual, actualUnset)
+	if !ok {
+		return false
+	}
+	allowedValues, ok := canonicalEnvironmentSnapshot(allowed, allowedUnset)
+	if !ok || len(actualValues) != len(allowedValues) {
+		return false
+	}
+	for key, value := range allowedValues {
+		if actualValues[key] != value {
 			return false
 		}
 	}
 	return true
+}
+
+func canonicalEnvironmentSnapshot(environment, unset []string) (map[string]string, bool) {
+	if len(environment)+len(unset) > 256 {
+		return nil, false
+	}
+	result := make(map[string]string, len(environment)+len(unset))
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		canonical := strings.ToUpper(key)
+		if !ok || !validEnvironmentKey(key) || len(entry) > 32767 || strings.ContainsRune(entry, '\x00') || forbiddenValidationEnvironment(canonical) {
+			return nil, false
+		}
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, false
+		}
+		result[canonical] = "set=" + value
+	}
+	for _, key := range unset {
+		canonical := strings.ToUpper(key)
+		if !validEnvironmentKey(key) || strings.ContainsRune(key, '\x00') || forbiddenValidationEnvironment(canonical) {
+			return nil, false
+		}
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, false
+		}
+		result[canonical] = "unset"
+	}
+	return result, true
+}
+
+func validEnvironmentKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character == '_' || character >= '0' && character <= '9' && index > 0 {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func forbiddenValidationEnvironment(key string) bool {
+	return key == "UNIT_TEST_SERVICE_TOKEN" || key == "UNIT_TEST_IDE_TOKEN" || key == "UNIT_TEST_IDE_STATUS_HANDLE" ||
+		key == "LD_PRELOAD" || strings.HasPrefix(key, "DYLD_")
 }
 
 func verifiedPinnedTool(path string, tools map[string]string) bool {

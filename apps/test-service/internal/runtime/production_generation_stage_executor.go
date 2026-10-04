@@ -12,6 +12,8 @@ import (
 type productionValidationProcessPlan struct {
 	taskID, serviceInstanceID string
 	tools                     map[string]string
+	allowedEnvironment        []string
+	allowedEnvUnset           []string
 	specs                     map[testgenvalidate.Stage]processcontrol.Spec
 	interpret                 testgenvalidate.StageInterpreter
 	recordLease, releaseLease testgenvalidate.LeaseWriter
@@ -54,7 +56,9 @@ func (executor *productionValidationStageExecutor) Execute(ctx context.Context, 
 	spec = cloneProductionValidationProcessSpec(spec)
 	prepared := testgenvalidate.PreparedProcessExecutor{
 		Runner: executor.runner, TaskID: plan.taskID, ServiceInstanceID: plan.serviceInstanceID,
-		ToolSHA256: tools, RecordLease: plan.recordLease, ReleaseLease: plan.releaseLease, Interpret: plan.interpret,
+		ToolSHA256: tools, AllowedEnvironment: append([]string(nil), plan.allowedEnvironment...),
+		AllowedEnvUnset: append([]string(nil), plan.allowedEnvUnset...),
+		RecordLease:     plan.recordLease, ReleaseLease: plan.releaseLease, Interpret: plan.interpret,
 		Plan: func(context.Context, testgenvalidate.Stage, testgenvalidate.Roots) (processcontrol.Spec, error) {
 			return spec, nil
 		},

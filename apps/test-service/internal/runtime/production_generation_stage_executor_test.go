@@ -83,8 +83,12 @@ func TestProductionValidationStageExecutorUsesCandidateBoundPlan(t *testing.T) {
 	runner := &productionValidationRunnerFixture{process: process}
 	provider := &productionValidationPlanProviderFixture{candidateID: roots.CandidateID, plan: productionValidationProcessPlan{
 		taskID: roots.ProcessTaskID, serviceInstanceID: serviceID,
-		tools:       map[string]string{tool: productionBytesDigest([]byte("fixed-cmake"))},
-		specs:       map[testgenvalidate.Stage]processcontrol.Spec{testgenvalidate.StageConfigure: {Executable: tool, Dir: roots.Build}},
+		tools:              map[string]string{tool: productionBytesDigest([]byte("fixed-cmake"))},
+		allowedEnvironment: []string{"PATH=C:\\toolchain\\bin"},
+		allowedEnvUnset:    []string{"CL"},
+		specs: map[testgenvalidate.Stage]processcontrol.Spec{testgenvalidate.StageConfigure: {
+			Executable: tool, Dir: roots.Build, Env: []string{"PATH=C:\\toolchain\\bin"}, EnvUnset: []string{"CL"},
+		}},
 		recordLease: func(context.Context, task.ProcessLease) error { return nil }, releaseLease: func(context.Context, task.ProcessLease) error { return nil },
 	}}
 	executor, err := newProductionValidationStageExecutor(runner, provider)

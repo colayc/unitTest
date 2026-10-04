@@ -65,6 +65,80 @@ func TestPreparedExecutorRejectsInjectedEnvironmentBeforePrepare(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutorAcceptsOnlyExactTrustedEnvironment(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "cmake.exe")
+	if err := os.WriteFile(executable, []byte("fixed-tool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"source", "build", "artifacts"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	process := &fakeProcess{output: make(chan processcontrol.Output), done: make(chan processcontrol.Result, 1)}
+	process.done <- processcontrol.Result{}
+	close(process.done)
+	close(process.output)
+	runner := &fakeRunner{process: process}
+	roots := Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")}
+	trusted := []string{"INCLUDE=C:\\toolchain\\include", "PATH=C:\\toolchain\\bin"}
+	spec := processcontrol.Spec{Executable: executable, Dir: roots.Build, Env: []string{trusted[1], trusted[0]}, EnvUnset: []string{"CL"}}
+	executor := PreparedProcessExecutor{
+		Runner: runner, TaskID: testID, ServiceInstanceID: testID,
+		ToolSHA256:         map[string]string{executable: digestTest([]byte("fixed-tool"))},
+		AllowedEnvironment: trusted,
+		AllowedEnvUnset:    []string{"CL"},
+		Plan:               func(context.Context, Stage, Roots) (processcontrol.Spec, error) { return spec, nil },
+		RecordLease:        func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil },
+	}
+	if _, err := executor.Execute(context.Background(), StageConfigure, roots); err != nil || runner.prepared != 1 {
+		t.Fatalf("trusted environment rejected: %v prepared=%d", err, runner.prepared)
+	}
+}
+
+func TestPreparedExecutorRejectsEnvironmentOutsideTrustedSnapshot(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "cmake.exe")
+	if err := os.WriteFile(executable, []byte("fixed-tool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"source", "build", "artifacts"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trusted := []string{"PATH=C:\\toolchain\\bin"}
+	for _, test := range []struct {
+		name  string
+		env   []string
+		unset []string
+	}{
+		{name: "changed value", env: []string{"PATH=C:\\attacker"}},
+		{name: "extra variable", env: []string{trusted[0], "INCLUDE=C:\\attacker"}},
+		{name: "duplicate key", env: []string{trusted[0], "PATH=C:\\toolchain\\bin"}},
+		{name: "missing unset", env: trusted},
+		{name: "extra unset", env: trusted, unset: []string{"CL", "LINK"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{}
+			executor := PreparedProcessExecutor{
+				Runner: runner, TaskID: testID, ServiceInstanceID: testID,
+				ToolSHA256:         map[string]string{executable: digestTest([]byte("fixed-tool"))},
+				AllowedEnvironment: trusted,
+				AllowedEnvUnset:    []string{"CL"},
+				Plan: func(context.Context, Stage, Roots) (processcontrol.Spec, error) {
+					return processcontrol.Spec{Executable: executable, Dir: filepath.Join(root, "build"), Env: test.env, EnvUnset: test.unset}, nil
+				},
+				RecordLease: func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil },
+			}
+			if _, err := executor.Execute(context.Background(), StageConfigure, Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")}); err == nil || runner.prepared != 0 {
+				t.Fatalf("untrusted environment accepted: %v prepared=%d", err, runner.prepared)
+			}
+		})
+	}
+}
+
 func TestPreparedExecutorPersistsLeaseBeforeStartAndCloses(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "cmake.exe")
