@@ -61,7 +61,7 @@ func TestGenerationServiceDoesNotAdvertiseManagedTestsWithoutSelectedOutputValid
 	}
 }
 
-func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
+func TestBaseGenerationFactoryRunsOnlyForTrustedReadyRuntimeButStaysHidden(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
 	if err := os.MkdirAll(workspaceRoot, 0700); err != nil {
@@ -98,8 +98,8 @@ func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer trusted.Close()
-	if trusted.GenerationBackend() == nil || !trusted.GenerationBackend().TestGenerationReady() || called != 1 {
-		t.Fatal("trusted runtime did not wire ready generation provider")
+	if trusted.GenerationBackend() != nil || called != 1 {
+		t.Fatal("base-only generation provider escaped the atomic production gate")
 	}
 }
 

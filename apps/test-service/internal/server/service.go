@@ -18,6 +18,8 @@ type Service struct {
 	backend                    session.Backend
 	coverageBackend            session.CoverageBackend
 	generationBackend          session.GenerationBackend
+	coverageDetails            session.CoverageDetailsProvider
+	managedTests               session.ManagedTestsProvider
 	config                     ServiceConfig
 	stop                       chan struct{}
 	stopOnce                   sync.Once
@@ -40,6 +42,13 @@ func NewServiceWithCoverage(listener net.Listener, token, platform, transport st
 // NewServiceWithGeneration opts into v1.5 only with a ready, product-owned
 // generation provider. Nil preserves the existing v1.4 service behavior.
 func NewServiceWithGeneration(listener net.Listener, token, platform, transport string, backend session.Backend, coverage session.CoverageBackend, generation session.GenerationBackend, config ServiceConfig) *Service {
+	return NewServiceWithManagedDetails(listener, token, platform, transport, backend, coverage, generation, nil, nil, config)
+}
+
+// NewServiceWithManagedDetails is the sole server constructor that can expose
+// Protocol v1.6. Session negotiation still requires every provider to report
+// ready, so partial composition falls back without acquiring write routes.
+func NewServiceWithManagedDetails(listener net.Listener, token, platform, transport string, backend session.Backend, coverage session.CoverageBackend, generation session.GenerationBackend, details session.CoverageDetailsProvider, managed session.ManagedTestsProvider, config ServiceConfig) *Service {
 	if config.MaxConnections <= 0 {
 		config.MaxConnections = 64
 	}
@@ -48,7 +57,9 @@ func NewServiceWithGeneration(listener net.Listener, token, platform, transport 
 	}
 	return &Service{
 		listener: listener, token: token, platform: platform, transport: transport,
-		backend: backend, coverageBackend: coverage, generationBackend: generation, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		backend: backend, coverageBackend: coverage, generationBackend: generation,
+		coverageDetails: details, managedTests: managed,
+		config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -82,7 +93,7 @@ func (s *Service) Serve() error {
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
-			active := session.NewWithGeneration(s.token, s.platform, s.transport, s.backend, s.coverageBackend, s.generationBackend)
+			active := session.NewWithManagedDetails(s.token, s.platform, s.transport, s.backend, s.coverageBackend, s.generationBackend, s.coverageDetails, s.managedTests)
 			ServeConnectionWithConfig(connection, active, s.config.Connection)
 			s.mu.Lock()
 			delete(s.connections, connection)

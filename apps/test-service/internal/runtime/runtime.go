@@ -45,18 +45,19 @@ type Config struct {
 	WorkspaceRoot     string
 	TrustedWorkspace  bool
 	CoverageBackend   session.CoverageBackend
-	// GenerationFactory is supplied only by a deployment that has verified
-	// product-owned bundles, coverage evidence and process ownership.
-	// Nil (the production default today) never advertises Protocol v1.5.
-	GenerationFactory  func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
-	ProductBundleRoots ProductBundleRoots
-	CMakeBundleRoot    string
-	DevCMakeExecutable string
-	Platform           string
-	Clock              task.Clock
-	NewID              task.IDGenerator
-	TerminationGrace   time.Duration
-	dependencies       *dependencies
+	// GenerationFactory remains a base-only test seam and is never exposed as
+	// a production capability without the complete managed provider.
+	GenerationFactory func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
+	// ProductionGenerationFactory must construct the atomic v1.5/v1.6 unit.
+	ProductionGenerationFactory func(*taskstore.Store, *Runtime) (ProductionGenerationConfig, error)
+	ProductBundleRoots          ProductBundleRoots
+	CMakeBundleRoot             string
+	DevCMakeExecutable          string
+	Platform                    string
+	Clock                       task.Clock
+	NewID                       task.IDGenerator
+	TerminationGrace            time.Duration
+	dependencies                *dependencies
 }
 
 type Runtime struct {
@@ -77,7 +78,7 @@ type Runtime struct {
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
 	coverageBackend     session.CoverageBackend
-	generationBackend   *generationService
+	generationBackend   runtimeGenerationBackend
 	coverageExecutor    coverageExecutor
 	productBundleRoots  ProductBundleRoots
 	productBundles      *ProductBundles
@@ -101,6 +102,12 @@ type runtimeStore interface {
 	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	FailQueuedTask(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	GetRunForTask(context.Context, string) (testdomain.TestRun, error)
+}
+
+type runtimeGenerationBackend interface {
+	session.GenerationBackend
+	ResumeAll(context.Context) error
+	Close()
 }
 
 type runtimeArtifacts interface {
@@ -503,22 +510,39 @@ func Open(config Config) (*Runtime, error) {
 		}
 		runtimeValue.coverageBackend = coverageBackend
 	}
-	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend != nil && config.GenerationFactory != nil {
+	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend != nil &&
+		(config.ProductionGenerationFactory != nil || config.GenerationFactory != nil) {
 		concrete, ok := store.(*taskstore.Store)
 		if !ok {
 			return runtimeValue.failOpen(task.ErrStorageUnavailable)
 		}
-		generationConfig, generationErr := config.GenerationFactory(concrete, runtimeValue)
-		if generationErr != nil {
-			return runtimeValue.failOpen(generationErr)
+		var generationErr error
+		if config.ProductionGenerationFactory != nil {
+			if runtimeValue.productBundles == nil || runtimeValue.productBundles.Verify() != nil {
+				return runtimeValue.failOpen(ErrProductBundlesUnavailable)
+			}
+			productionConfig, err := config.ProductionGenerationFactory(concrete, runtimeValue)
+			if err != nil {
+				return runtimeValue.failOpen(err)
+			}
+			productionConfig.Base.Store = concrete
+			productionConfig.Base.Trusted = true
+			productionConfig.Base.CoverageReady = true
+			productionConfig.Base.PublishEvent = nil
+			runtimeValue.generationBackend, generationErr = newProductionGenerationBackend(productionConfig)
+		} else {
+			generationConfig, err := config.GenerationFactory(concrete, runtimeValue)
+			if err != nil {
+				return runtimeValue.failOpen(err)
+			}
+			generationConfig.Store = concrete
+			generationConfig.Trusted = true
+			generationConfig.CoverageReady = true
+			// The legacy broker has no owner filter. Generation events remain in
+			// the dedicated durable replay until a scoped stream exists.
+			generationConfig.PublishEvent = nil
+			runtimeValue.generationBackend, generationErr = newGenerationService(generationConfig)
 		}
-		generationConfig.Store = concrete
-		generationConfig.Trusted = true
-		generationConfig.CoverageReady = true
-		// The legacy broker has no owner filter. Generation events remain in
-		// the dedicated durable replay until a scoped stream exists.
-		generationConfig.PublishEvent = nil
-		runtimeValue.generationBackend, generationErr = newGenerationService(generationConfig)
 		if generationErr != nil {
 			return runtimeValue.failOpen(generationErr)
 		}
@@ -571,6 +595,10 @@ func (r *Runtime) CoverageBackend() session.CoverageBackend {
 
 func (r *Runtime) GenerationBackend() session.GenerationBackend {
 	if r == nil || !r.trustedWorkspace || r.coverageBackend == nil || r.generationBackend == nil || !r.generationBackend.TestGenerationReady() {
+		return nil
+	}
+	managed, ok := r.generationBackend.(session.ManagedTestsProvider)
+	if !ok || !managed.ManagedTestsReady() {
 		return nil
 	}
 	return r.generationBackend

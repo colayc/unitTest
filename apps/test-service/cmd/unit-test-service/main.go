@@ -13,6 +13,7 @@ import (
 
 	serviceruntime "unit-test-ide.local/test-service/internal/runtime"
 	"unit-test-ide.local/test-service/internal/server"
+	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskfixture"
 	"unit-test-ide.local/test-service/internal/transport"
@@ -213,7 +214,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	service := server.NewServiceWithGeneration(listener, token, transport.PlatformName(), transport.TransportName(), active, active.CoverageBackend(), active.GenerationBackend(), server.ServiceConfig{MaxConnections: 64})
+	generation := active.GenerationBackend()
+	var managed session.ManagedTestsProvider
+	if provider, ok := generation.(session.ManagedTestsProvider); ok {
+		managed = provider
+	}
+	service := server.NewServiceWithManagedDetails(
+		listener, token, transport.PlatformName(), transport.TransportName(), active,
+		active.CoverageBackend(), generation, active.CoverageDetailsProvider(), managed,
+		server.ServiceConfig{MaxConnections: 64},
+	)
 	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
 	if err := service.Serve(); err != nil {
