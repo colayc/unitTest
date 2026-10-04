@@ -10,9 +10,11 @@ import (
 
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/managedtest"
+	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenpublish"
+	"unit-test-ide.local/test-service/internal/testgenvalidate"
 )
 
 var errProductionManagedUnavailable = errors.New("production managed test generation is unavailable")
@@ -37,6 +39,7 @@ type productionManagedCandidateReader interface {
 type productionManagedEvidenceProvider interface {
 	Ready() bool
 	CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error)
+	ManagedEvidence(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, []productionManagedCaseEvidence, []byte, string, error)
 }
 
 type productionManagedIndexReader interface {
@@ -67,6 +70,7 @@ type productionManagedMaterializer struct {
 	preimages  productionManagedPreimageReader
 	registry   productionManagedRegistry
 	reviews    productionManagedReviewWriter
+	prepare    func(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (testgendomain.Request, error)
 }
 
 func productionManagedSource(set testgenpublish.CandidateSet) (string, []byte, bool) {
@@ -324,3 +328,176 @@ func (materializer *productionManagedMaterializer) FinalizeManagedReview(ctx con
 	}
 	return nil
 }
+
+func (materializer *productionManagedMaterializer) ManagedDriverReady() bool {
+	return materializer.ready() && materializer.prepare != nil
+}
+
+func (materializer *productionManagedMaterializer) PrepareManaged(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
+	if !materializer.ManagedDriverReady() || ctx == nil {
+		return testgendomain.Request{}, task.ErrStorageUnavailable
+	}
+	request, err := materializer.prepare(ctx, owner, input, target)
+	if err != nil {
+		return testgendomain.Request{}, err
+	}
+	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner || request.SourceDigest != target.SourceDigest || request.ManagedGapID != target.GapID {
+		return testgendomain.Request{}, errProductionManagedUnavailable
+	}
+	return request, nil
+}
+
+func managedCMakePath(set testgenpublish.CandidateSet) (string, bool) {
+	result := ""
+	for _, file := range set.Files {
+		if strings.HasSuffix(file.Path, "CMakeLists.txt") {
+			if result != "" {
+				return "", false
+			}
+			result = file.Path
+		}
+	}
+	return result, result != ""
+}
+
+func (materializer *productionManagedMaterializer) ManagedCandidateSet(ctx context.Context, run testgendomain.Run, draft managedtest.ReviewDraft) (testgenpublish.CandidateSet, error) {
+	if ctx == nil || !materializer.ready() || !managedtest.ValidReviewDraft(draft) || draft.Manifest.RunID != run.ID || draft.Manifest.RunRevision != run.Revision {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	candidates, err := materializer.candidates.ListGenerationCandidates(ctx, run.ID)
+	if err != nil || len(candidates) != 1 {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	set, cases, receipt, receiptDigest, err := materializer.evidence.ManagedEvidence(ctx, run, candidates)
+	if err != nil || len(cases) == 0 || len(receipt) == 0 || productionBytesDigest(receipt) != receiptDigest {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	path, generated, ok := productionManagedSource(set)
+	if !ok {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	index, err := materializer.current.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{
+		ProjectID: run.Request.ProjectID, ReportID: run.Request.CoverageReportID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
+	})
+	if err != nil || index.ToolchainID != draft.Manifest.ToolchainID {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
+		ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
+		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedGapID,
+	}, index)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, err
+	}
+	current, err := materializer.preimages.ReadManagedPreimage(ctx, path)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, err
+	}
+	accepted, err := materializer.listAccepted(ctx, run.Request.ProjectID, target.FileID)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, err
+	}
+	ancestors, err := materializer.acceptedAncestors(ctx, current, accepted)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, err
+	}
+	rebuilt, inputs, err := buildProductionManagedReview(productionManagedReviewInput{
+		Run: run, Index: index, Set: set, SourceArtifactID: candidates[0].StagedSourceArtifact.ID,
+		Current: current, Accepted: accepted, AcceptedBlocks: ancestors,
+	})
+	if err != nil || !reflect.DeepEqual(rebuilt, draft) || len(inputs) != 1 {
+		return testgenpublish.CandidateSet{}, task.ErrConflict
+	}
+	document, err := managedtest.ParseDocument(generated, managedtest.MaxReviewBytes, 200)
+	if err != nil || len(document.Blocks) != len(cases) {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	evidenceByID := make(map[string]productionManagedCaseEvidence, len(cases))
+	for _, item := range cases {
+		evidenceByID[item.CaseID] = item
+	}
+	records := make([]managedtest.Record, 0, len(document.Blocks))
+	caseIDs := make([]string, 0, len(document.Blocks))
+	for _, block := range document.Blocks {
+		item, exists := evidenceByID[block.CaseID]
+		if !exists || item.FunctionID != block.FunctionID || item.SourceFileID != target.FileID || item.SourceDigest != target.SourceDigest || item.ToolchainID != index.ToolchainID {
+			return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+		}
+		record := managedtest.Record{
+			CaseID: item.CaseID, ProjectID: item.ProjectID, SourceFileID: item.SourceFileID, FunctionID: item.FunctionID,
+			SourceRelativePath: item.SourceRelativePath, ScenarioID: item.ScenarioID, TestRelativePath: item.TestRelativePath,
+			AcceptedBlockDigest: block.Digest, GeneratorVersion: item.GeneratorVersion, Framework: item.Framework,
+			ToolchainID: item.ToolchainID, SourceDigest: item.SourceDigest, ValidationReceiptDigest: receiptDigest,
+			Status: managedtest.StatusCurrent, LastVerifiedAt: run.CreatedAt,
+		}
+		if !managedtest.ValidRecord(record) {
+			return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+		}
+		records = append(records, record)
+		caseIDs = append(caseIDs, strings.TrimPrefix(block.CaseID, "utc_"))
+	}
+	cmake, ok := managedCMakePath(set)
+	if !ok {
+		return testgenpublish.CandidateSet{}, errProductionManagedUnavailable
+	}
+	review, err := managedtest.Reconcile(inputs[0])
+	if err != nil {
+		return testgenpublish.CandidateSet{}, err
+	}
+	set.CaseIDs = caseIDs
+	set.CharacterizationIDs = nil
+	if candidates[0].Kind == testgendomain.KindCharacterization {
+		set.CharacterizationIDs = append([]string(nil), caseIDs...)
+	}
+	set.Managed = &testgenpublish.ManagedCandidateSet{
+		ReviewID: draft.Manifest.ReviewID, ReviewArtifactDigest: review.Digest(), ToolchainID: index.ToolchainID,
+		ValidationReceipt: cloneProductionBytes(receipt), ValidationReceiptDigest: receiptDigest,
+		CMakePath: cmake, Inputs: inputs, Records: records,
+	}
+	return set, nil
+}
+
+func (materializer *productionManagedMaterializer) ManagedBaselineReady() bool {
+	return materializer != nil && materializer.current != nil && materializer.current.CurrentCoverageReady()
+}
+
+func (materializer *productionManagedMaterializer) ValidateManagedBaseline(_ context.Context, index coveragedetail.Index, target testgendomain.ManagedTarget) error {
+	resolved, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
+		ProjectID: index.ProjectID, WorkspaceGeneration: index.WorkspaceGeneration, CoverageReportID: index.ReportID,
+		Scope: testgendomain.ScopeCoverageGap, ID: target.GapID,
+	}, index)
+	if err != nil || !reflect.DeepEqual(resolved, target) || index.ToolchainID == "" {
+		return testgendomain.ErrStaleSnapshot
+	}
+	return nil
+}
+
+func (materializer *productionManagedMaterializer) ManagedReceiptReady() bool {
+	return materializer.ready()
+}
+
+func (materializer *productionManagedMaterializer) ValidateManagedEvidence(ctx context.Context, run testgendomain.Run, draft managedtest.ReviewDraft) error {
+	_, err := materializer.ManagedCandidateSet(ctx, run, draft)
+	return err
+}
+
+var _ ManagedRuntimeDriver = (*productionManagedMaterializer)(nil)
+var _ managedBaselineProvider = (*productionManagedMaterializer)(nil)
+var _ managedReceiptProvider = (*productionManagedMaterializer)(nil)
+
+type productionManagedSelectionValidator struct {
+	validator *testgenvalidate.SelectedValidator
+}
+
+func (adapter productionManagedSelectionValidator) ManagedValidationReady() bool {
+	return adapter.validator != nil
+}
+
+func (adapter productionManagedSelectionValidator) ValidateManagedSelection(ctx context.Context, selection testgenpublish.ManagedSelection) ([]byte, error) {
+	if adapter.validator == nil || ctx == nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	return adapter.validator.Validate(ctx, selection)
+}
+
+var _ managedValidationProvider = productionManagedSelectionValidator{}

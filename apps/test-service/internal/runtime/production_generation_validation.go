@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/task"
 	assertion "unit-test-ide.local/test-service/internal/testgenassert"
 	"unit-test-ide.local/test-service/internal/testgendomain"
@@ -61,6 +62,14 @@ type productionValidatedRecord struct {
 	artifact  task.Artifact
 	evidence  task.Artifact
 	set       testgenpublish.CandidateSet
+	managed   []productionManagedCaseEvidence
+}
+
+type productionManagedCaseEvidence struct {
+	CaseID, FunctionID, ScenarioID                string
+	ProjectID, SourceFileID, SourceRelativePath   string
+	TestRelativePath, GeneratorVersion, Framework string
+	ToolchainID, SourceDigest                     string
 }
 
 type productionValidationEvidence struct {
@@ -70,6 +79,14 @@ type productionValidationEvidence struct {
 	Candidate      testgendomain.Candidate
 	SourceArtifact task.Artifact
 	Set            testgenpublish.CandidateSet
+	ManagedCases   []productionManagedCaseEvidence `json:",omitempty"`
+}
+
+type productionManagedValidationReceipt struct {
+	Version        int
+	Binding        productionValidationBinding
+	Receipts       []testgenvalidate.StageReceipt
+	SourceArtifact task.Artifact
 }
 
 func cloneProductionCandidateSet(value testgenpublish.CandidateSet) testgenpublish.CandidateSet {
@@ -121,6 +138,73 @@ func exactGeneratedSource(files []testgenrender.StagedFile) ([]byte, bool) {
 		source = append([]byte(nil), file.Content...)
 	}
 	return source, len(source) > 0
+}
+
+func productionManagedCases(target generationTarget, pipeline productionPipelineResult, source []byte) ([]productionManagedCaseEvidence, error) {
+	if !target.managed {
+		return nil, nil
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 200)
+	if err != nil || len(document.Blocks) != len(pipeline.vectors) || len(document.Blocks) == 0 {
+		return nil, errProductionValidationUnavailable
+	}
+	byID := make(map[string]productionManagedCaseEvidence, len(pipeline.vectors))
+	for _, vector := range pipeline.vectors {
+		caseID, err := managedtest.StableCaseID(target.projectID, target.sourceRelativePath, target.functionID, vector.ID)
+		if err != nil {
+			return nil, errProductionValidationUnavailable
+		}
+		byID[caseID] = productionManagedCaseEvidence{
+			CaseID: caseID, FunctionID: target.functionID, ScenarioID: vector.ID,
+			ProjectID: target.projectID, SourceFileID: target.fileID, SourceRelativePath: target.sourceRelativePath,
+			TestRelativePath: target.renderTarget.TestPath, GeneratorVersion: "unit-test-service-v1", Framework: target.framework,
+			ToolchainID: target.toolchainID, SourceDigest: target.sourceDigest,
+		}
+	}
+	result := make([]productionManagedCaseEvidence, 0, len(document.Blocks))
+	for _, block := range document.Blocks {
+		item, ok := byID[block.CaseID]
+		if !ok || block.FunctionID != item.FunctionID {
+			return nil, errProductionValidationUnavailable
+		}
+		result = append(result, item)
+		delete(byID, block.CaseID)
+	}
+	if len(byID) != 0 {
+		return nil, errProductionValidationUnavailable
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].CaseID < result[right].CaseID })
+	return result, nil
+}
+
+func validProductionManagedCases(cases []productionManagedCaseEvidence, set testgenpublish.CandidateSet, source []byte) bool {
+	if len(cases) == 0 {
+		return bytes.Index(source, []byte("unit-test-ide:managed-begin")) < 0
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 200)
+	if err != nil || len(document.Blocks) != len(cases) {
+		return false
+	}
+	path, _, ok := productionManagedSource(set)
+	if !ok {
+		return false
+	}
+	seen := map[string]bool{}
+	for index, item := range cases {
+		if index > 0 && cases[index-1].CaseID >= item.CaseID || !managedtest.ValidTestPath(item.TestRelativePath) ||
+			item.TestRelativePath != path || item.GeneratorVersion != "unit-test-service-v1" ||
+			item.CaseID != document.Blocks[index].CaseID || item.FunctionID != document.Blocks[index].FunctionID ||
+			item.ProjectID == "" || item.SourceFileID == "" || item.SourceRelativePath == "" || item.ScenarioID == "" ||
+			item.Framework != "cpputest" && item.Framework != "unity" || !validProductionDigest(item.ToolchainID) || !validProductionDigest(item.SourceDigest) || seen[item.CaseID] {
+			return false
+		}
+		stable, err := managedtest.StableCaseID(item.ProjectID, item.SourceRelativePath, item.FunctionID, item.ScenarioID)
+		if err != nil || stable != item.CaseID {
+			return false
+		}
+		seen[item.CaseID] = true
+	}
+	return true
 }
 
 func productionAssertionBinding(pipeline productionPipelineResult) (testgendomain.CandidateKind, string, error) {
@@ -196,6 +280,10 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	if !ok {
 		return GenerationStageResult{}, errProductionValidationUnavailable
 	}
+	managedCases, err := productionManagedCases(target, pipeline, source)
+	if err != nil {
+		return GenerationStageResult{}, err
+	}
 	binding, err := productionValidationBindingFor(run, target, pipeline)
 	if err != nil {
 		return GenerationStageResult{}, err
@@ -249,7 +337,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	if binding.Kind == testgendomain.KindCharacterization {
 		set.CharacterizationIDs = []string{caseID}
 	}
-	persisted := productionValidationEvidence{Version: 1, Binding: binding, Receipts: append([]testgenvalidate.StageReceipt(nil), validated.Receipts...), Candidate: testgendomain.CloneCandidate(candidate), SourceArtifact: artifact, Set: cloneProductionCandidateSet(set)}
+	persisted := productionValidationEvidence{Version: 1, Binding: binding, Receipts: append([]testgenvalidate.StageReceipt(nil), validated.Receipts...), Candidate: testgendomain.CloneCandidate(candidate), SourceArtifact: artifact, Set: cloneProductionCandidateSet(set), ManagedCases: append([]productionManagedCaseEvidence(nil), managedCases...)}
 	encoded, err := json.Marshal(persisted)
 	if err != nil {
 		return GenerationStageResult{}, errProductionValidationUnavailable
@@ -261,7 +349,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	if err := adapter.artifacts.VerifyGenerationEvidence(ctx, evidenceArtifact); err != nil {
 		return GenerationStageResult{}, err
 	}
-	record := productionValidatedRecord{binding: binding, receipts: persisted.Receipts, candidate: persisted.Candidate, artifact: artifact, evidence: evidenceArtifact, set: persisted.Set}
+	record := productionValidatedRecord{binding: binding, receipts: persisted.Receipts, candidate: persisted.Candidate, artifact: artifact, evidence: evidenceArtifact, set: persisted.Set, managed: append([]productionManagedCaseEvidence(nil), persisted.ManagedCases...)}
 	adapter.mu.Lock()
 	adapter.records[run.ID] = record
 	adapter.mu.Unlock()
@@ -336,10 +424,10 @@ func (adapter *productionGenerationValidation) loadRecord(ctx context.Context, r
 		return productionValidatedRecord{}, errProductionValidationUnavailable
 	}
 	exact, ok := exactGeneratedSource(persisted.Set.Files)
-	if !ok || !bytes.Equal(exact, source) {
+	if !ok || !bytes.Equal(exact, source) || !validProductionManagedCases(persisted.ManagedCases, persisted.Set, source) {
 		return productionValidatedRecord{}, errProductionValidationUnavailable
 	}
-	record := productionValidatedRecord{binding: persisted.Binding, receipts: append([]testgenvalidate.StageReceipt(nil), persisted.Receipts...), candidate: testgendomain.CloneCandidate(candidate), artifact: sourceArtifact, evidence: evidenceArtifact, set: cloneProductionCandidateSet(persisted.Set)}
+	record := productionValidatedRecord{binding: persisted.Binding, receipts: append([]testgenvalidate.StageReceipt(nil), persisted.Receipts...), candidate: testgendomain.CloneCandidate(candidate), artifact: sourceArtifact, evidence: evidenceArtifact, set: cloneProductionCandidateSet(persisted.Set), managed: append([]productionManagedCaseEvidence(nil), persisted.ManagedCases...)}
 	adapter.mu.Lock()
 	adapter.records[run.ID] = record
 	adapter.mu.Unlock()
@@ -379,6 +467,26 @@ func (adapter *productionGenerationValidation) CandidateSet(ctx context.Context,
 		return testgenpublish.CandidateSet{}, errProductionValidationUnavailable
 	}
 	return cloneProductionCandidateSet(record.set), nil
+}
+
+func (adapter *productionGenerationValidation) ManagedEvidence(ctx context.Context, run testgendomain.Run, candidates []testgendomain.Candidate) (testgenpublish.CandidateSet, []productionManagedCaseEvidence, []byte, string, error) {
+	set, err := adapter.CandidateSet(ctx, run, candidates)
+	if err != nil {
+		return testgenpublish.CandidateSet{}, nil, nil, "", err
+	}
+	record, ok := adapter.cachedRecord(run.ID)
+	source, sourceOK := exactGeneratedSource(record.set.Files)
+	if !ok || !sourceOK || len(record.managed) == 0 || !validProductionManagedCases(record.managed, record.set, source) {
+		return testgenpublish.CandidateSet{}, nil, nil, "", errProductionValidationUnavailable
+	}
+	receipt := productionManagedValidationReceipt{
+		Version: 1, Binding: record.binding, Receipts: append([]testgenvalidate.StageReceipt(nil), record.receipts...), SourceArtifact: record.artifact,
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil || len(encoded) == 0 || len(encoded) > 1<<20 {
+		return testgenpublish.CandidateSet{}, nil, nil, "", errProductionValidationUnavailable
+	}
+	return set, append([]productionManagedCaseEvidence(nil), record.managed...), encoded, productionBytesDigest(encoded), nil
 }
 
 func (adapter *productionGenerationValidation) Minimize(ctx context.Context, run testgendomain.Run, target generationTarget, pipeline productionPipelineResult) (GenerationStageResult, error) {

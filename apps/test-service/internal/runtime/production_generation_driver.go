@@ -21,6 +21,10 @@ type productionTargetResolver interface {
 	ResolveRequest(context.Context, testgendomain.Request) (generationTarget, error)
 }
 
+type productionManagedTargetResolver interface {
+	ResolveManagedStart(context.Context, string, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) (generationTarget, error)
+}
+
 type productionGenerationValidator interface {
 	Ready() bool
 	Validate(context.Context, testgendomain.Run, generationTarget, productionPipelineResult) (GenerationStageResult, error)
@@ -39,6 +43,7 @@ type productionGenerationDriver struct {
 	pipeline  *productionGenerationPipeline
 	validator productionGenerationValidator
 	finalizer managedReviewFinalizer
+	managed   ManagedRuntimeDriver
 	mu        sync.Mutex
 	cache     map[string]cachedProductionPipeline
 }
@@ -51,6 +56,38 @@ func (driver *productionGenerationDriver) setManagedReviewFinalizer(finalizer ma
 	if driver != nil {
 		driver.finalizer = finalizer
 	}
+}
+
+func (driver *productionGenerationDriver) setManagedRuntime(managed ManagedRuntimeDriver) {
+	if driver == nil {
+		return
+	}
+	driver.managed = managed
+	if finalizer, ok := managed.(managedReviewFinalizer); ok {
+		driver.finalizer = finalizer
+	}
+}
+
+func (driver *productionGenerationDriver) bindManagedMaterializer(materializer *productionManagedMaterializer) error {
+	if driver == nil || materializer == nil {
+		return task.ErrStorageUnavailable
+	}
+	resolver, ok := driver.resolver.(productionManagedTargetResolver)
+	if !ok {
+		return task.ErrStorageUnavailable
+	}
+	materializer.prepare = func(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
+		resolved, err := resolver.ResolveManagedStart(ctx, owner, input, target)
+		if err != nil {
+			return testgendomain.Request{}, err
+		}
+		if !resolved.valid() || !resolved.managed || resolved.fileID != target.FileID || resolved.functionID != target.FunctionID || resolved.gapID != target.GapID || resolved.sourceDigest != target.SourceDigest {
+			return testgendomain.Request{}, errProductionGenerationUnavailable
+		}
+		return resolved.request, nil
+	}
+	driver.setManagedRuntime(materializer)
+	return nil
 }
 
 func (driver *productionGenerationDriver) FinalizeManagedReview(ctx context.Context, run testgendomain.Run) error {
@@ -228,7 +265,13 @@ func (driver *productionGenerationDriver) ProjectCandidate(_ context.Context, _ 
 }
 
 func (driver *productionGenerationDriver) managedDelegate() (ManagedRuntimeDriver, bool) {
-	if driver == nil || driver.validator == nil {
+	if driver == nil {
+		return nil, false
+	}
+	if driver.managed != nil {
+		return driver.managed, true
+	}
+	if driver.validator == nil {
 		return nil, false
 	}
 	delegate, ok := driver.validator.(ManagedRuntimeDriver)
@@ -237,7 +280,7 @@ func (driver *productionGenerationDriver) managedDelegate() (ManagedRuntimeDrive
 
 func (driver *productionGenerationDriver) ManagedDriverReady() bool {
 	delegate, ok := driver.managedDelegate()
-	return ok && driver.validator.Ready() && delegate.ManagedDriverReady()
+	return ok && driver.validator != nil && driver.validator.Ready() && delegate.ManagedDriverReady()
 }
 
 func (driver *productionGenerationDriver) PrepareManaged(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {

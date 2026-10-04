@@ -151,6 +151,10 @@ func (p *Publisher) PlanManaged(ctx context.Context, candidate CandidateSet, dec
 			}
 			seenCases[block.CaseID] = true
 			record, ok := records[block.CaseID]
+			if ok && record.AcceptedBlockDigest != block.Digest && required[block.CaseID] && decision.Resolutions[block.CaseID] == managedtest.KeepCurrent {
+				record.AcceptedBlockDigest = block.Digest
+				records[block.CaseID] = record
+			}
 			if !ok || record.TestRelativePath != generated.Path || record.FunctionID != block.FunctionID || record.AcceptedBlockDigest != block.Digest {
 				return Plan{}, ErrConflict
 			}

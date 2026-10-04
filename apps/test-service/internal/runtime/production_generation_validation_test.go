@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
@@ -270,6 +272,57 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	adapter.mu.Unlock()
 	if err := adapter.ValidateCandidate(context.Background(), run, candidate); err == nil {
 		t.Fatal("changed evidence artifact accepted")
+	}
+}
+
+func TestProductionValidationPersistsManagedCaseAndReceiptEvidence(t *testing.T) {
+	adapter, run, _, _, _, artifacts := productionValidationFixture(t)
+	pipeline, target, _, _ := productionPipelineFixture(t)
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Request = target.request
+	validated, err := adapter.Validate(context.Background(), run, target, result)
+	if err != nil || len(validated.Candidates) != 1 {
+		t.Fatalf("managed validation=%+v err=%v", validated, err)
+	}
+	for _, artifact := range validated.Artifacts {
+		run.ArtifactDigests = append(run.ArtifactDigests, testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256})
+	}
+	set, cases, receipt, digest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
+	if err != nil || len(cases) != len(result.vectors) || productionBytesDigest(receipt) != digest || len(receipt) == 0 {
+		t.Fatalf("managed evidence cases=%+v receipt=%d digest=%s err=%v", cases, len(receipt), digest, err)
+	}
+	source, ok := exactGeneratedSource(set.Files)
+	if !ok {
+		t.Fatal("managed source missing from durable set")
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range cases {
+		if item.CaseID != document.Blocks[index].CaseID || item.FunctionID != document.Blocks[index].FunctionID || item.ScenarioID == "" || item.TestRelativePath != set.Files[0].Path {
+			t.Fatalf("managed case %d = %+v block=%+v", index, item, document.Blocks[index])
+		}
+	}
+	var persisted productionValidationEvidence
+	if err := json.Unmarshal(artifacts.bodies[validated.Candidates[0].CaseID], &persisted); err != nil || !validProductionManagedCases(persisted.ManagedCases, persisted.Set, source) {
+		t.Fatalf("invalid persisted managed evidence: %+v err=%v", persisted.ManagedCases, err)
+	}
+	if _, err := adapter.loadRecord(context.Background(), run, validated.Candidates[0]); err != nil {
+		t.Fatalf("direct managed evidence reload: %v", err)
+	}
+	adapter.mu.Lock()
+	adapter.records = make(map[string]productionValidatedRecord)
+	adapter.mu.Unlock()
+	_, replayed, replayReceipt, replayDigest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
+	if err != nil || !reflect.DeepEqual(replayed, cases) || !bytes.Equal(replayReceipt, receipt) || replayDigest != digest {
+		t.Fatalf("replayed managed evidence cases=%+v digest=%s err=%v", replayed, replayDigest, err)
 	}
 }
 

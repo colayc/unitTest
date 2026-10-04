@@ -73,11 +73,18 @@ func productionManagedFixture(t *testing.T) (testgendomain.Run, coveragedetail.I
 	return run, index, set, generated, target, result
 }
 
-type productionManagedEvidenceFixture struct{ set testgenpublish.CandidateSet }
+type productionManagedEvidenceFixture struct {
+	set     testgenpublish.CandidateSet
+	cases   []productionManagedCaseEvidence
+	receipt []byte
+}
 
 func (fixture productionManagedEvidenceFixture) Ready() bool { return true }
 func (fixture productionManagedEvidenceFixture) CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error) {
 	return cloneProductionCandidateSet(fixture.set), nil
+}
+func (fixture productionManagedEvidenceFixture) ManagedEvidence(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, []productionManagedCaseEvidence, []byte, string, error) {
+	return cloneProductionCandidateSet(fixture.set), append([]productionManagedCaseEvidence(nil), fixture.cases...), cloneProductionBytes(fixture.receipt), productionBytesDigest(fixture.receipt), nil
 }
 
 type productionManagedCandidateFixture struct{ values []testgendomain.Candidate }
@@ -151,6 +158,54 @@ func TestProductionManagedMaterializerPersistsReviewIdempotently(t *testing.T) {
 	}
 	if reviews.write != 2 {
 		t.Fatalf("idempotent retry did not verify existing review: %d", reviews.write)
+	}
+}
+
+func TestProductionManagedCandidateSetUsesExecutableCaseIDsAndEvidence(t *testing.T) {
+	run, index, set, generated, target, result := productionManagedFixture(t)
+	candidate := testgendomain.Candidate{CaseID: set.CaseIDs[0], Kind: testgendomain.KindVerified, StagedSourceArtifact: run.ArtifactDigests[0]}
+	document, err := managedtest.ParseDocument(generated, int64(len(generated)), 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := make([]productionManagedCaseEvidence, 0, len(document.Blocks))
+	for _, block := range document.Blocks {
+		for _, vector := range result.vectors {
+			caseID, caseErr := managedtest.StableCaseID(index.ProjectID, target.sourceRelativePath, target.functionID, vector.ID)
+			if caseErr == nil && caseID == block.CaseID {
+				cases = append(cases, productionManagedCaseEvidence{
+					CaseID: caseID, FunctionID: target.functionID, ScenarioID: vector.ID, ProjectID: index.ProjectID,
+					SourceFileID: target.fileID, SourceRelativePath: target.sourceRelativePath, TestRelativePath: set.Files[0].Path,
+					GeneratorVersion: "unit-test-service-v1", Framework: target.framework, ToolchainID: index.ToolchainID, SourceDigest: target.sourceDigest,
+				})
+			}
+		}
+	}
+	draft, _, err := buildProductionManagedReview(productionManagedReviewInput{
+		Run: run, Index: index, Set: set, SourceArtifactID: candidate.StagedSourceArtifact.ID, Current: []byte{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := []byte(`{"version":1,"validated":true}`)
+	materializer := &productionManagedMaterializer{
+		candidates: productionManagedCandidateFixture{values: []testgendomain.Candidate{candidate}},
+		evidence:   productionManagedEvidenceFixture{set: set, cases: cases, receipt: receipt}, current: productionManagedIndexFixture{index: index},
+		preimages: &managedPublisherFixture{ready: true, preimages: map[string][]byte{set.Files[0].Path: []byte{}}},
+		registry:  productionManagedRegistryFixture{}, reviews: &productionManagedReviewFixture{},
+	}
+	managed, err := materializer.ManagedCandidateSet(context.Background(), run, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed.Managed == nil || len(managed.CaseIDs) != len(document.Blocks) || len(managed.Managed.Records) != len(document.Blocks) ||
+		managed.Managed.ValidationReceiptDigest != productionBytesDigest(receipt) || !bytes.Equal(managed.Managed.ValidationReceipt, receipt) {
+		t.Fatalf("invalid managed candidate set: %+v", managed)
+	}
+	for position, record := range managed.Managed.Records {
+		if !managedtest.ValidRecord(record) || managed.CaseIDs[position] != strings.TrimPrefix(record.CaseID, "utc_") || record.AcceptedBlockDigest != document.Blocks[position].Digest {
+			t.Fatalf("record %d = %+v", position, record)
+		}
 	}
 }
 

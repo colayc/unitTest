@@ -581,7 +581,6 @@ func TestManagedKeepCurrentAdvancesAcceptedDigestWithoutRewritingFile(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.set.Managed.Records[0].AcceptedBlockDigest = currentDoc.Blocks[0].Digest
 	decision := f.decision(t)
 	decision.Resolutions[f.record.CaseID] = managedtest.KeepCurrent
 	plan, err := f.p.PlanManaged(context.Background(), f.set, decision)
@@ -614,11 +613,6 @@ func TestManagedSelectedBytesBindValidationReceiptAndRegistry(t *testing.T) {
 	defer f.close(t)
 	current := bytes.Replace(f.block, []byte("CHECK_TRUE(1)"), []byte("CHECK_TRUE(3)"), 1)
 	f.seedAccepted(t, current)
-	currentDoc, err := managedtest.ParseDocument(current, maxEditBytes, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.set.Managed.Records[0].AcceptedBlockDigest = currentDoc.Blocks[0].Digest
 	decision := f.decision(t)
 	decision.Resolutions[f.record.CaseID] = managedtest.KeepCurrent
 	var observed ManagedSelection
