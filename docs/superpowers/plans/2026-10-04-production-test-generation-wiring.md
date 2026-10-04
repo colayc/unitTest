@@ -15,7 +15,7 @@
 - The product remains Code-OSS plus the built-in extension, the existing local `unit-test-service`, fixed tool bundles, and license files; do not add another service process.
 - Generation is completely offline after bundle preparation. Do not add a cloud API, local LLM, telemetry payload, or network fallback.
 - Do not generate or use Mock, Stub, CMock, or CppUMock.
-- Production mode may execute only manifest-verified product tools and trusted workspace compiler/test targets; never search `PATH` for a replacement.
+- Production mode may execute only manifest-verified product tools and trusted workspace compiler/test/framework targets; never search `PATH` for a replacement.
 - The extension submits only service-issued IDs and explicit user decisions; the Go service remains authoritative for paths, snapshots, coverage, candidates, and writes.
 - Production source is read-only. Before explicit acceptance, all generated source and CMake edits remain in a service-owned staging root.
 - Generation capability is atomic: advertise compatible v1.5 and full v1.6 together only when every production and managed dependency is ready.
@@ -24,57 +24,15 @@
 
 ## Review Focus
 
-- A packaged extension installed under an unexpected, symlinked, or escaped layout must fail before spawning the service; Task 2 pins this with layout tests.
-- A bundle file replaced between startup verification and execution must invalidate readiness or the run; Tasks 3 and 6 pin identity revalidation.
-- Workspace generation, compile inputs, or coverage report changing during generation must make the preview stale and write zero bytes; Tasks 5 and 6 test every boundary.
-- A user-edited managed block must produce a three-way conflict while bytes outside managed blocks remain exact; Task 7 tests this end to end.
-- An unsupported compiler/framework or missing product bundle must return a bounded stable unavailable reason and must never fall back to `PATH`; Tasks 3, 5, and 8 test this behavior.
+- A packaged extension installed under an unexpected, symlinked, or escaped layout must fail before spawning the service; Task 1 pins this with layout tests.
+- A bundle file replaced between startup verification and execution must invalidate readiness or the run; Tasks 2 and 5 pin identity revalidation.
+- Workspace generation, compile inputs, or coverage report changing during generation must make the preview stale and write zero bytes; Tasks 4 and 5 test every boundary.
+- A user-edited managed block must produce a three-way conflict while bytes outside managed blocks remain exact; Task 6 tests this end to end.
+- An unsupported compiler/framework or missing product bundle must return a bounded stable unavailable reason and must never fall back to `PATH`; Tasks 2, 4, and 7 test this behavior.
 
 ---
 
-### Task 1: Close the release-root resource inventory
-
-**Files:**
-- Modify: `tools/release/release-config.json`
-- Modify: `tools/release/stage.mjs`
-- Test: `tools/release/stage.test.mjs`
-- Modify: `tools/release/producer/source-manifest.mjs`
-- Test: `tools/release/producer/source-manifest.test.mjs`
-- Test: `tools/release/producer/workflow-contract.test.mjs`
-- Modify: `.github/workflows/release-inputs.yml`
-
-**Interfaces:**
-- Consumes: existing prepared CMake, coverage, testgen, and reviewed framework inputs.
-- Produces: one release root containing `service/unit-test-service[.exe]`, `bundles/cmake`, `bundles/coverage`, `bundles/testgen`, and `bundles/framework`; all entries are bound by `release-manifest.json`.
-
-- [ ] **Step 1: Write failing staging tests**
-
-Add tests named `stageRelease binds every production generation resource under one root` and `stageRelease rejects a missing or extra generation resource before publication`. Assert the exact relative paths, license inventory, artifact kinds, and manifest digests; assert staging publishes no final root on failure.
-
-- [ ] **Step 2: Run the release tests and verify the new assertions fail**
-
-Run: `node --test tools/release/stage.test.mjs tools/release/producer/source-manifest.test.mjs tools/release/producer/workflow-contract.test.mjs`
-
-Expected: FAIL because the release contract does not yet bind every production generation resource.
-
-- [ ] **Step 3: Implement the closed resource inventory**
-
-Add `frameworkBundlePath: "bundles/framework"`, required `frameworkRoot`, and CLI option `--framework-root`. Update `stageRelease(input)` to validate, copy, license-audit, classify, and manifest the reviewed Unity/CppUTest inputs without changing the existing `app/`, `service/`, or `bundles/` root relationship. Update producer source and workflow contracts to transport the same bytes.
-
-- [ ] **Step 4: Run focused release tests**
-
-Run: `node --test tools/release/stage.test.mjs tools/release/producer/source-manifest.test.mjs tools/release/producer/workflow-contract.test.mjs`
-
-Expected: PASS with no signing or Release publication.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add tools/release .github/workflows/release-inputs.yml
-git commit -m "build: bind generation resources into release root"
-```
-
-### Task 2: Resolve the installed product layout in the built-in extension
+### Task 1: Resolve the installed product layout in the built-in extension
 
 **Files:**
 - Create: `apps/code-oss-extension/src/service-layout.ts`
@@ -87,8 +45,8 @@ git commit -m "build: bind generation resources into release root"
 
 **Interfaces:**
 - Produces: `resolveProductLayout(extensionPath: string, platform: NodeJS.Platform, developmentMode: boolean): ProductLayout`.
-- Produces: `ProductLayout` with absolute `serviceExecutable`, `cmakeBundleRoot`, `coverageBundleRoot`, `testgenBundleRoot`, and `frameworkBundleRoot`.
-- Consumes in `ServiceManagerOptions`: `layout: ProductLayout`; service launch emits explicit `--cmake-bundle-root`, `--coverage-bundle-root`, `--testgen-bundle-root`, and `--framework-bundle-root` arguments.
+- Produces: `ProductLayout` with absolute `serviceExecutable`, `cmakeBundleRoot`, `coverageBundleRoot`, and `testgenBundleRoot`.
+- Consumes in `ServiceManagerOptions`: `layout: ProductLayout`; service launch emits explicit `--cmake-bundle-root`, `--coverage-bundle-root`, and `--testgen-bundle-root` arguments.
 
 - [ ] **Step 1: Write failing layout and launch tests**
 
@@ -117,7 +75,7 @@ git add apps/code-oss-extension
 git commit -m "fix: resolve packaged generation service resources"
 ```
 
-### Task 3: Verify explicit bundle roots in the service runtime
+### Task 2: Verify explicit bundle roots in the service runtime
 
 **Files:**
 - Modify: `apps/test-service/cmd/unit-test-service/main.go`
@@ -130,8 +88,8 @@ git commit -m "fix: resolve packaged generation service resources"
 - Test: `apps/test-service/internal/runtime/coverage_execution_test.go`
 
 **Interfaces:**
-- Produces CLI flags: `--coverage-bundle-root <absolute>`, `--testgen-bundle-root <absolute>`, and `--framework-bundle-root <absolute>`, alongside the existing `--cmake-bundle-root`.
-- Produces: `ProductBundleRoots{CMake, Coverage, Testgen, Framework string}` in `runtime.Config`.
+- Produces CLI flags: `--coverage-bundle-root <absolute>` and `--testgen-bundle-root <absolute>`, alongside the existing `--cmake-bundle-root`.
+- Produces: `ProductBundleRoots{CMake, Coverage, Testgen string}` in `runtime.Config`.
 - Produces: `openProductBundles(ProductBundleRoots, platform string) (*ProductBundles, error)`; `ProductBundles` exposes only verified/pinned handles, never raw fallback commands.
 
 - [ ] **Step 1: Write failing CLI and bundle-boundary tests**
@@ -161,7 +119,7 @@ git add apps/test-service/cmd/unit-test-service apps/test-service/internal/runti
 git commit -m "feat: verify explicit production generation bundles"
 ```
 
-### Task 4: Add an atomic production generation composition
+### Task 3: Add an atomic production generation composition
 
 **Files:**
 - Create: `apps/test-service/internal/runtime/production_generation.go`
@@ -204,7 +162,7 @@ git add apps/test-service/internal/runtime apps/test-service/internal/session ap
 git commit -m "feat: compose atomic production generation backend"
 ```
 
-### Task 5: Implement deterministic production target resolution and candidate generation
+### Task 4: Compose existing generation modules behind a production adapter
 
 **Files:**
 - Create: `apps/test-service/internal/runtime/production_generation_driver.go`
@@ -216,7 +174,7 @@ git commit -m "feat: compose atomic production generation backend"
 **Interfaces:**
 - Produces: `productionGenerationDriver`, implementing `GenerationDriver` and `ManagedRuntimeDriver`.
 - Produces internal immutable `generationTarget` bound to project ID, workspace generation, source digest, compile-input digest, target/toolchain/framework identity, coverage report ID, file/function/gap IDs, and language.
-- Uses existing `testgenanalysis.Analyzer`, `testgensolver.Solver`, `testgenassert.Derive`, and `testgenrender.Render`/`RenderManagedFile`.
+- Reuses existing `testgenanalysis.Analyzer`, `testgensolver.Solver`, `testgenassert.Derive`, and `testgenrender.Render`/`RenderManagedFile` without duplicating their algorithms.
 
 - [ ] **Step 1: Write failing target-resolution tests**
 
@@ -249,7 +207,7 @@ git add apps/test-service/internal/runtime
 git commit -m "feat: generate deterministic production test candidates"
 ```
 
-### Task 6: Execute real isolated validation and close v1.5 publication
+### Task 5: Adapt existing isolated validation and close v1.5 publication
 
 **Files:**
 - Create: `apps/test-service/internal/runtime/production_generation_validation.go`
@@ -260,7 +218,7 @@ git commit -m "feat: generate deterministic production test candidates"
 - Test: `apps/test-service/internal/testgenvalidate/validator_test.go`
 
 **Interfaces:**
-- Produces: a trusted `testgenvalidate.StageExecutor` that prepares only fixed configure, compile/link, candidate-test, regression-test, and coverage plans.
+- Produces: a trusted `testgenvalidate.StageExecutor` adapter over the existing build/test/coverage planners that prepares only fixed configure, compile/link, candidate-test, regression-test, and coverage plans.
 - Produces: durable candidate evidence binding assertion proof, source snapshot, compile inputs, product bundles, process owner, baseline coverage, after coverage, and per-target delta.
 - `ValidateCandidate` replays evidence checks; `CandidateSet` returns only retained candidates to the existing atomic `testgenpublish.Publisher`.
 
@@ -291,7 +249,7 @@ git add apps/test-service/internal/runtime apps/test-service/internal/testgenval
 git commit -m "feat: validate and publish generated tests offline"
 ```
 
-### Task 7: Complete managed v1.6 generation and maintenance
+### Task 6: Construct the existing managed v1.6 provider for production
 
 **Files:**
 - Create: `apps/test-service/internal/runtime/production_managed_generation.go`
@@ -307,10 +265,10 @@ git commit -m "feat: validate and publish generated tests offline"
 - Test: `apps/test-service/internal/testgenpublish/managed_test_test.go`
 
 **Interfaces:**
-- `productionGenerationDriver` implements `PrepareManaged` and `ManagedCandidateSet` from Task 5.
-- Produces production implementations of `managedBaselineProvider`, `managedReceiptProvider`, and `managedValidationProvider` using the current coverage index and Task 6 evidence.
+- `productionGenerationDriver` implements `PrepareManaged` and `ManagedCandidateSet` from Task 4.
+- Produces production implementations of `managedBaselineProvider`, `managedReceiptProvider`, and `managedValidationProvider` using the current coverage index and Task 5 evidence.
 - Uses the existing store as `managedReviewStore`; uses the existing publisher for three-way plan, publication, receipts, and recovery.
-- Extends `ResolveManagedStart` and `ListManagedTargets` to resolve service-issued file IDs and function IDs as well as coverage-gap IDs from the same current `CoverageDetailIndex`; no client path or symbol text becomes authoritative.
+- Reuses `ManagedRuntimeProvider`, managed registry/review store, reconciler, selected validator, and managed publisher. Extend only the missing `ResolveManagedStart`/`ListManagedTargets` resolution for service-issued file and function IDs alongside coverage-gap IDs; no client path or symbol text becomes authoritative.
 
 - [ ] **Step 1: Write failing managed lifecycle tests**
 
@@ -324,7 +282,7 @@ Expected: FAIL because production does not build a ready managed provider.
 
 - [ ] **Step 3: Implement managed adapters and evidence checks**
 
-Bind every review to owner, project, workspace generation, report, toolchain, source, accepted/current/generated block digests, and Task 6 selected-output receipt. Keep `ManagedTestsReady()` false until recovery and all providers succeed.
+Bind every review to owner, project, workspace generation, report, toolchain, source, accepted/current/generated block digests, and Task 5 selected-output receipt. Keep `ManagedTestsReady()` false until recovery and all providers succeed.
 
 - [ ] **Step 4: Run managed race and protocol suites**
 
@@ -339,7 +297,7 @@ git add apps/test-service/internal/runtime apps/test-service/internal/taskstore 
 git commit -m "feat: enable managed test generation in production"
 ```
 
-### Task 8: Prove the release-shaped Code-OSS workflow
+### Task 7: Prove the release-shaped Code-OSS workflow
 
 **Files:**
 - Modify: `apps/code-oss-extension/test/extension-host-smoke.mjs`
@@ -350,7 +308,7 @@ git commit -m "feat: enable managed test generation in production"
 - Modify: `tools/workspace-smoke/workspace-smoke.test.mjs`
 
 **Interfaces:**
-- Consumes: the exact staged root from Task 1, extension product layout from Task 2, and production backend from Tasks 3-7.
+- Consumes: the existing manifest-bound staged root, extension product layout from Task 1, and production backend from Tasks 2-6.
 - Produces: one release-shaped smoke receipt proving startup, v1.6 negotiation, file/function/gap generation, preview, explicit accept, one-click run, and updated file/function coverage.
 
 - [ ] **Step 1: Write failing packaged smoke tests**
@@ -384,10 +342,10 @@ git add apps/code-oss-extension tools/release/stage.test.mjs tools/workspace-smo
 git commit -m "test: prove packaged test generation workflow"
 ```
 
-### Task 9: Close native matrix, evidence, and Phase 10 status
+### Task 8: Close native matrix, evidence, and Phase 10 status
 
 **Files:**
-- Create: `tools/service-probe/src/test-generation-e2e.ts`
+- Modify: `tools/service-probe/src/test-generation-e2e.ts`
 - Test: `tools/service-probe/src/test-generation-e2e.test.ts`
 - Modify: `tools/service-probe/src/native-run.ts`
 - Modify: `tools/service-probe/src/native-report.ts`

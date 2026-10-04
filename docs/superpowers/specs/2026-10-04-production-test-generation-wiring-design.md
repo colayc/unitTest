@@ -57,7 +57,7 @@ Phase 10 已经具备 Protocol v1.5/v1.6、覆盖率明细、离线 Clang 分析
 - `bundles/cmake`；
 - `bundles/coverage`；
 - `bundles/testgen`；
-- 现有 framework bundle 或 runtime 所需的产品固定目录。
+- 产品自带的 framework adapters/templates；实际 Unity/CppUTest target 必须来自受信任 workspace metadata 并绑定身份。
 
 扩展把这些目录作为专用启动参数传给 `unit-test-service`。服务不得通过 `PATH`、环境变量、当前工作目录或用户配置寻找替代工具。
 
@@ -88,7 +88,7 @@ runtime 新增产品自有的 production composition。它只接收经过验证�
 
 - task store 与 workspace snapshot authority；
 - coverage backend、CoverageDetailIndex 和 source-attested baseline；
-- 固定 testgen、coverage、CMake 和 framework bundle；
+- 固定 testgen、coverage、CMake bundle，以及产品自带的 framework adapters/templates；
 - process owner、budget、artifact 和 snapshot verifier；
 - 原子 publisher 与 managed registry/review store。
 
@@ -132,7 +132,7 @@ production factory 在基础 generation service 上构造 `ManagedRuntimeProvide
 
 - workspace 为受信任的单根目录；
 - coverage backend 和当前 CoverageDetailIndex 可用；
-- testgen、coverage、CMake 和 framework bundle 均验证通过；
+- testgen、coverage、CMake bundle 均验证通过，workspace framework target 已由受信任 metadata 解析并绑定；
 - production driver、validator、publisher 和 verifier 均 ready；
 - managed registry、review store、baseline、receipt 和 managed publisher 均 ready；
 - SQLite 迁移和恢复完成。
