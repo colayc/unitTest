@@ -24,7 +24,8 @@ type generationTarget struct {
 	projectID, workspaceGeneration              string
 	fileID, functionID, gapID, coverageReportID string
 	sourceDigest, compileSnapshotDigest         string
-	toolchainID, framework, frameworkDigest     string
+	cmakeTargetDigest, toolchainID              string
+	framework, frameworkDigest                  string
 	analyzerBundleDigest                        string
 	language                                    render.Language
 	headerPath                                  string
@@ -199,12 +200,12 @@ func (target generationTarget) valid() bool {
 	if testgendomain.ValidateRequest(target.request) != nil ||
 		target.request.ProjectID != target.projectID || target.request.WorkspaceGeneration != target.workspaceGeneration ||
 		target.request.SourceDigest != target.sourceDigest || target.request.CompileSnapshotDigest != target.compileSnapshotDigest ||
-		target.request.CMakeTargetDigest != target.toolchainID || target.request.FrameworkBundleDigest != target.frameworkDigest ||
+		target.request.CMakeTargetDigest != target.cmakeTargetDigest || target.request.FrameworkBundleDigest != target.frameworkDigest ||
 		target.request.AnalyzerBundleDigest != target.analyzerBundleDigest ||
 		target.projectID == "" || len(target.projectID) > 128 ||
 		!validProductionDigest(target.workspaceGeneration) || !validProductionObjectID(target.fileID) || !target.validResolvedScope() ||
 		!validProductionObjectID(target.coverageReportID) || !validProductionDigest(target.sourceDigest) ||
-		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.toolchainID) ||
+		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.cmakeTargetDigest) || !validProductionDigest(target.toolchainID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||
 		target.managed && target.sourceRelativePath == "" ||

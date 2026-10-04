@@ -75,7 +75,7 @@ func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, gen
 		projectID: "core", workspaceGeneration: strings.Repeat("1", 64),
 		fileID: strings.Repeat("2", 32), functionID: strings.Repeat("3", 32), gapID: strings.Repeat("4", 32),
 		coverageReportID: strings.Repeat("5", 32), sourceDigest: strings.Repeat("d", 64),
-		compileSnapshotDigest: strings.Repeat("a", 64), toolchainID: strings.Repeat("6", 64),
+		compileSnapshotDigest: strings.Repeat("a", 64), cmakeTargetDigest: strings.Repeat("6", 64), toolchainID: strings.Repeat("6", 64),
 		framework: "cpputest", frameworkDigest: strings.Repeat("7", 64), analyzerBundleDigest: strings.Repeat("8", 64),
 		language: render.LanguageCPP, headerPath: "include/classify.h",
 		analysis:     analysis.AnalysisRequest{WorkspaceRoot: t.TempDir(), SourceRelative: "src/classify.cpp", SourceDigest: strings.Repeat("d", 64), CompileSnapshotDigest: strings.Repeat("a", 64), Timeout: time.Second},
@@ -91,7 +91,7 @@ func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, gen
 		Goals:                 testgendomain.Goals{FunctionPercent: 100, LinePercent: 100, BranchPercent: 100},
 		Budgets:               testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: int64(target.candidateLimit), MemoryMiB: 64, Concurrency: int64(target.concurrency)},
 		CompileSnapshotDigest: target.compileSnapshotDigest, CoverageSnapshotDigest: strings.Repeat("e", 64),
-		SourceDigest: target.sourceDigest, CMakeTargetDigest: target.toolchainID,
+		SourceDigest: target.sourceDigest, CMakeTargetDigest: target.cmakeTargetDigest,
 		FrameworkBundleDigest: target.frameworkDigest, AnalyzerBundleDigest: target.analyzerBundleDigest,
 		BaselineReportDigest: strings.Repeat("f", 64), ProcessOwnerDigest: strings.Repeat("0", 64),
 	}
