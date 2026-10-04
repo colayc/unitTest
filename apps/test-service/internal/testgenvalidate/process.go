@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
 )
@@ -151,22 +152,26 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 }
 
 func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Roots) bool {
-	if spec.Executable == "" || !filepath.IsAbs(spec.Executable) || filepath.Clean(spec.Executable) != spec.Executable || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) != 0 || len(spec.LaunchInputs) != 0 || !pathWithinRoots(spec.Dir, roots) || !directDirectory(spec.Dir) || !scanStageRoots(roots) {
+	if spec.Executable == "" || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) > 64 || len(spec.LaunchInputs) > 128 || !pathWithinRoots(spec.Dir, roots) || !directDirectory(spec.Dir) || !scanStageRoots(roots) {
 		return false
 	}
-	expected, ok := e.ToolSHA256[spec.Executable]
-	if !ok || !validDigest(expected) || !directRegularPath(spec.Executable) {
+	if !verifiedPinnedTool(spec.Executable, e.ToolSHA256) {
 		return false
 	}
-	file, err := os.Open(spec.Executable)
-	if err != nil {
-		return false
+	seenLaunch := make(map[string]struct{}, len(spec.LaunchPlan))
+	for _, path := range spec.LaunchPlan {
+		if _, duplicate := seenLaunch[path]; duplicate || !verifiedPinnedTool(path, e.ToolSHA256) {
+			return false
+		}
+		seenLaunch[path] = struct{}{}
 	}
-	hash := sha256.New()
-	n, err := io.Copy(hash, io.LimitReader(file, (256<<20)+1))
-	_ = file.Close()
-	if err != nil || n > 256<<20 || hex.EncodeToString(hash.Sum(nil)) != expected {
-		return false
+	seenInputs := make(map[string]struct{}, len(spec.LaunchInputs))
+	for _, state := range spec.LaunchInputs {
+		if _, duplicate := seenInputs[state.Path]; duplicate || !verifiedPinnedTool(state.Path, e.ToolSHA256) ||
+			state.SHA256 != e.ToolSHA256[state.Path] || cmake.VerifyLaunchInput(state, 256<<20) != nil {
+			return false
+		}
+		seenInputs[state.Path] = struct{}{}
 	}
 	for _, arg := range spec.Args {
 		if len(arg) > 4096 || strings.ContainsRune(arg, '\x00') {
@@ -185,6 +190,24 @@ func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Root
 		}
 	}
 	return true
+}
+
+func verifiedPinnedTool(path string, tools map[string]string) bool {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || !directRegularPath(path) {
+		return false
+	}
+	expected, ok := tools[path]
+	if !ok || !validDigest(expected) {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, (256<<20)+1))
+	_ = file.Close()
+	return err == nil && n <= 256<<20 && hex.EncodeToString(hash.Sum(nil)) == expected
 }
 
 func scanStageRoots(roots Roots) bool {

@@ -96,6 +96,51 @@ func TestPreparedExecutorPersistsLeaseBeforeStartAndCloses(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutorAcceptsOnlyPinnedLaunchPlanTools(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "cmake.exe")
+	compiler := filepath.Join(root, "clang.exe")
+	for path, content := range map[string]string{executable: "fixed-cmake", compiler: "fixed-compiler"} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{"source", "build", "artifacts"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newExecutor := func(spec processcontrol.Spec) (*fakeRunner, PreparedProcessExecutor) {
+		process := &fakeProcess{output: make(chan processcontrol.Output), done: make(chan processcontrol.Result, 1)}
+		process.done <- processcontrol.Result{}
+		close(process.done)
+		close(process.output)
+		runner := &fakeRunner{process: process}
+		return runner, PreparedProcessExecutor{
+			Runner: runner, TaskID: testID, ServiceInstanceID: testID,
+			ToolSHA256:  map[string]string{executable: digestTest([]byte("fixed-cmake")), compiler: digestTest([]byte("fixed-compiler"))},
+			Plan:        func(context.Context, Stage, Roots) (processcontrol.Spec, error) { return spec, nil },
+			RecordLease: func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil },
+		}
+	}
+	roots := Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")}
+	spec := processcontrol.Spec{Executable: executable, LaunchPlan: []string{compiler}, Dir: roots.Build}
+	runner, executor := newExecutor(spec)
+	if _, err := executor.Execute(context.Background(), StageCompile, roots); err != nil || runner.prepared != 1 {
+		t.Fatalf("pinned launch plan rejected: %v prepared=%d", err, runner.prepared)
+	}
+
+	unpinned := filepath.Join(root, "unknown.exe")
+	if err := os.WriteFile(unpinned, []byte("unknown"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec.LaunchPlan = []string{unpinned}
+	runner, executor = newExecutor(spec)
+	if _, err := executor.Execute(context.Background(), StageCompile, roots); err == nil || runner.prepared != 0 {
+		t.Fatalf("unpinned launch plan accepted: %v prepared=%d", err, runner.prepared)
+	}
+}
+
 func TestPreparedExecutorStopsOutputFlood(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "cmake.exe")
