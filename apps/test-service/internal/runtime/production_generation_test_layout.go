@@ -92,6 +92,7 @@ func (authority *ctestProductionTestLayoutAuthority) ResolveProductionTestLayout
 		return productionTestLayout{}, err
 	}
 	var descriptor *ctest.ExecutionDescriptor
+	ctestName := ""
 	for _, mapping := range resolved.project.Tests.Containers {
 		if testgendomain.Framework(mapping.Framework) != wantFramework {
 			continue
@@ -108,6 +109,7 @@ func (authority *ctestProductionTestLayoutAuthority) ResolveProductionTestLayout
 				return productionTestLayout{}, errProductionGenerationUnavailable
 			}
 			descriptor = &candidate
+			ctestName = mapping.CTestName
 		}
 	}
 	if descriptor == nil {
@@ -140,7 +142,7 @@ func (authority *ctestProductionTestLayoutAuthority) ResolveProductionTestLayout
 		return productionTestLayout{}, errProductionGenerationUnavailable
 	}
 	return productionTestLayout{
-		framework: wantFramework, frameworkDigest: authority.config.frameworkDigests[wantFramework],
+		framework: wantFramework, frameworkDigest: authority.config.frameworkDigests[wantFramework], ctestName: ctestName,
 		renderTarget: testgenrender.TargetMetadata{
 			TestTarget: testTarget.Name, ProductionTarget: binding.target.Name, FrameworkTarget: frameworkTarget,
 			CMakePath: cmakeRelative, TestPath: testPath, ExistingCMake: string(existing),

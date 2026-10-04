@@ -50,7 +50,7 @@ func TestProductionGenerationResolverBuildsReportBoundFileTarget(t *testing.T) {
 	if !target.valid() || target.request.Scope != testgendomain.ScopeFile || target.request.ManagedTargetID != selected.FileID ||
 		target.cmakeTargetDigest == target.toolchainID || target.cmakeTargetDigest != strings.Repeat("c", 64) ||
 		target.toolchainID != authority.context.index.ToolchainID || target.headerPath != "include/choose.h" ||
-		target.renderTarget.TestPath != "tests/generated/src/choose.c_test.c" || len(target.functions) != 2 {
+		target.ctestName != "unit" || target.renderTarget.TestPath != "tests/generated/src/choose.c_test.c" || len(target.functions) != 2 {
 		t.Fatalf("resolved target = %+v", target)
 	}
 	if got, want := target.analysis.Arguments, []string{"-std=c17", "-DFEATURE=1", "-Iinclude"}; !reflect.DeepEqual(got, want) {
@@ -92,6 +92,14 @@ func TestProductionGenerationResolverRejectsChangedOrUnsupportedAuthority(t *tes
 	authority.context.index.Files[0].Functions[0].LinkageName = ""
 	if _, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected); err == nil {
 		t.Fatal("ResolveManagedStart(missing linkage) error = nil")
+	}
+
+	resolver, _, input, selected = productionResolverFixture(t)
+	layout := resolver.config.layout.(productionLayoutAuthorityFixture)
+	layout.layout.ctestName = ""
+	resolver.config.layout = layout
+	if _, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected); err == nil {
+		t.Fatal("ResolveManagedStart(missing CTest identity) error = nil")
 	}
 
 	resolver, _, input, selected = productionResolverFixture(t)
@@ -157,7 +165,7 @@ func productionResolverFixture(t *testing.T) (*productionGenerationTargetResolve
 		baselineReportDigest: strings.Repeat("6", 64),
 	}}
 	layout := productionTestLayout{
-		framework: testgendomain.FrameworkUnity, frameworkDigest: strings.Repeat("7", 64),
+		framework: testgendomain.FrameworkUnity, frameworkDigest: strings.Repeat("7", 64), ctestName: "unit",
 		renderTarget: testgenrender.TargetMetadata{
 			TestTarget: "unit_tests", ProductionTarget: "core", FrameworkTarget: "unity",
 			CMakePath: "tests/CMakeLists.txt", TestPath: "tests/generated/src/choose.c_test.c",

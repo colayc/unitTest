@@ -38,6 +38,7 @@ type productionResolverAuthority interface {
 type productionTestLayout struct {
 	framework       testgendomain.Framework
 	frameworkDigest string
+	ctestName       string
 	renderTarget    testgenrender.TargetMetadata
 }
 
@@ -156,7 +157,7 @@ func (resolver *productionGenerationTargetResolver) resolveContext(ctx context.C
 		return generationTarget{}, err
 	}
 	layout, err := resolver.config.layout.ResolveProductionTestLayout(ctx, contextValue, binding, request.Framework)
-	if err != nil || layout.framework == testgendomain.FrameworkAuto || !validProductionDigest(layout.frameworkDigest) {
+	if err != nil || layout.framework == testgendomain.FrameworkAuto || !validProductionDigest(layout.frameworkDigest) || !validProductionCTestName(layout.ctestName) {
 		return generationTarget{}, errProductionGenerationUnavailable
 	}
 	if request.Framework != testgendomain.FrameworkAuto && request.Framework != layout.framework {
@@ -191,7 +192,7 @@ func (resolver *productionGenerationTargetResolver) resolveContext(ctx context.C
 		fileID: selected.FileID, coverageReportID: request.CoverageReportID, sourceDigest: selected.SourceDigest,
 		compileSnapshotDigest: binding.compileSnapshotDigest, cmakeTargetDigest: binding.cmakeTargetDigest,
 		toolchainID: contextValue.index.ToolchainID, framework: string(layout.framework), frameworkDigest: layout.frameworkDigest,
-		analyzerBundleDigest: resolver.config.analyzerBundleDigest, language: binding.language, headerPath: binding.headerRelative,
+		ctestName: layout.ctestName, analyzerBundleDigest: resolver.config.analyzerBundleDigest, language: binding.language, headerPath: binding.headerRelative,
 		managed: true, sourceRelativePath: selected.File,
 		analysis: testgenanalysis.AnalysisRequest{
 			WorkspaceRoot: resolver.config.root.NativePath, SourceRelative: selected.File, SourceDigest: selected.SourceDigest,

@@ -26,6 +26,7 @@ type generationTarget struct {
 	sourceDigest, compileSnapshotDigest         string
 	cmakeTargetDigest, toolchainID              string
 	framework, frameworkDigest                  string
+	ctestName                                   string
 	analyzerBundleDigest                        string
 	language                                    render.Language
 	headerPath                                  string
@@ -121,6 +122,10 @@ func validProductionLinkage(value string) bool {
 	return true
 }
 
+func validProductionCTestName(value string) bool {
+	return len(value) >= 1 && len(value) <= 128 && !strings.ContainsRune(value, '\x00')
+}
+
 func (target generationTarget) validResolvedScope() bool {
 	if !target.managed {
 		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) && validProductionGap(target.gap, target.linkageName, target.compileSnapshotDigest)
@@ -207,6 +212,7 @@ func (target generationTarget) valid() bool {
 		!validProductionObjectID(target.coverageReportID) || !validProductionDigest(target.sourceDigest) ||
 		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.cmakeTargetDigest) || !validProductionDigest(target.toolchainID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
+		!validProductionCTestName(target.ctestName) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||
 		target.managed && target.sourceRelativePath == "" ||
 		target.wallTime <= 0 || target.wallTime > 24*time.Hour || target.candidateLimit < 1 || target.candidateLimit > 1000 ||
