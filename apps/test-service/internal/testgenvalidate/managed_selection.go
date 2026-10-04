@@ -80,6 +80,7 @@ type SelectedToolchainRunner interface {
 type SelectedStageExecutor interface {
 	Execute(context.Context, testgenpublish.ManagedSelection, SelectedPhase, Roots) (SelectedStageResult, string, error)
 	VerifyPlan(context.Context, testgenpublish.ManagedSelection, []SelectedPhaseReceipt, string) error
+	Release(testgenpublish.ManagedSelection, Roots)
 }
 
 type SelectedFileCoverage struct {
@@ -379,6 +380,9 @@ func (v *SelectedValidator) Validate(ctx context.Context, selection testgenpubli
 	}
 	if err != nil {
 		return nil, ErrSelectedValidation
+	}
+	if v.config.Executor != nil {
+		defer v.config.Executor.Release(selection, roots)
 	}
 	staged, _, err := sourceFingerprint(roots.Source)
 	if err != nil {

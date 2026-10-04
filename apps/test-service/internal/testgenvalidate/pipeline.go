@@ -44,7 +44,9 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 			result.Diagnostic = DiagnosticStageFailed
 			return result, nil
 		}
-		if stage != StageDiscover && len(evidence.DiscoveredCaseIDs) != 0 || stage != StageCoverage && len(evidence.CoverageJSON) != 0 {
+		if stage != StageDiscover && len(evidence.DiscoveredCaseIDs) != 0 ||
+			stage != StageCoverage && (len(evidence.CoverageJSON) != 0 || len(evidence.CoverageDetailJSON) != 0) ||
+			len(evidence.CoverageDetailJSON) > 16<<20 {
 			result.Diagnostic = DiagnosticStageFailed
 			return result, nil
 		}
@@ -90,18 +92,19 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 			}
 		}
 		receipt := struct {
-			Stage               Stage
-			CandidateID         string
-			TargetSymbol        string
-			TargetFileURI       string
-			TargetLines         []int64
-			BaselineDigest      string
-			SnapshotDigest      string
-			OutputDigest        string
-			CoverageDigest      string
-			IdentityProofDigest string
-			Discovery           []string
-		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.TargetLines, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), proofDigest, evidence.DiscoveredCaseIDs}
+			Stage                Stage
+			CandidateID          string
+			TargetSymbol         string
+			TargetFileURI        string
+			TargetLines          []int64
+			BaselineDigest       string
+			SnapshotDigest       string
+			OutputDigest         string
+			CoverageDigest       string
+			CoverageDetailDigest string
+			IdentityProofDigest  string
+			Discovery            []string
+		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.TargetLines, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), digestBytes(evidence.CoverageDetailJSON), proofDigest, evidence.DiscoveredCaseIDs}
 		encoded, _ := json.Marshal(receipt)
 		result.Receipts = append(result.Receipts, StageReceipt{Stage: stage, Digest: digestBytes(encoded), OutputDigest: receipt.OutputDigest, CoverageDigest: receipt.CoverageDigest})
 	}

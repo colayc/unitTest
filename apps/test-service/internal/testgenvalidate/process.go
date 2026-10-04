@@ -158,6 +158,10 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		}
 		evidence.DiscoveredCaseIDs = interpreted.DiscoveredCaseIDs
 		evidence.CoverageJSON = interpreted.CoverageJSON
+		if len(interpreted.CoverageDetailJSON) > 16<<20 {
+			return StageEvidence{}, ErrProcessRejected
+		}
+		evidence.CoverageDetailJSON = append([]byte(nil), interpreted.CoverageDetailJSON...)
 	}
 	return evidence, nil
 }

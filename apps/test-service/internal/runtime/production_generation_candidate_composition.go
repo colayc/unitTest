@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"time"
@@ -66,13 +67,15 @@ func (artifacts runtimeProductionGenerationArtifacts) GetArtifact(ctx context.Co
 // runtime provider: selected-output revalidation and publication must be bound
 // before the product capability gate may expose the driver.
 type productionGenerationCandidateComposition struct {
-	driver     *productionGenerationDriver
-	resolver   *productionGenerationTargetResolver
-	validation *productionGenerationValidation
-	snapshots  *productionGenerationSnapshotAuthority
-	artifacts  *productionGenerationArtifactAuthority
-	processes  *productionGenerationProcessAuthority
-	selection  *productionManagedSelectionAuthority
+	driver           *productionGenerationDriver
+	resolver         *productionGenerationTargetResolver
+	validation       *productionGenerationValidation
+	snapshots        *productionGenerationSnapshotAuthority
+	artifacts        *productionGenerationArtifactAuthority
+	processes        *productionGenerationProcessAuthority
+	selection        *productionManagedSelectionAuthority
+	selected         productionManagedSelectionValidator
+	selectedExecutor *productionManagedSelectionExecutor
 }
 
 func newProductionGenerationCandidateComposition(store *taskstore.Store, runtimeValue *Runtime) (*productionGenerationCandidateComposition, error) {
@@ -195,12 +198,27 @@ func newProductionGenerationCandidateComposition(store *taskstore.Store, runtime
 	if err := validation.bindProductionPlans(builds, plans); err != nil || !validation.Ready() {
 		return nil, task.ErrStorageUnavailable
 	}
+	selectedExecutor, err := newProductionManagedSelectionExecutor(productionManagedSelectionExecutorConfig{
+		authority: selection, baseline: baseline, builds: builds, plans: plans, stages: executor,
+	})
+	if err != nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	macKey := sha256.Sum256([]byte("managed-selection-receipt-v1\x00" + runtimeValue.serviceInstanceID))
+	selectedValidator, err := testgenvalidate.NewSelectedValidator(testgenvalidate.SelectedConfig{
+		SourceRoot: runtimeValue.workspaceRoot.NativePath, TempRoot: validationRoot,
+		Resolve: selection.Resolve, Executor: selectedExecutor, MACKey: macKey[:], PhaseTimeout: 5 * time.Minute,
+	})
+	if err != nil {
+		return nil, task.ErrStorageUnavailable
+	}
 
 	pipeline := newProductionGenerationPipeline(analyzer, productionStaticOracle{})
 	driver := newProductionGenerationDriver(resolver, pipeline, validation)
 	return &productionGenerationCandidateComposition{
 		driver: driver, resolver: resolver, validation: validation,
 		snapshots: snapshots, artifacts: artifactAuthority, processes: processes, selection: selection,
+		selected: productionManagedSelectionValidator{validator: selectedValidator}, selectedExecutor: selectedExecutor,
 	}, nil
 }
 

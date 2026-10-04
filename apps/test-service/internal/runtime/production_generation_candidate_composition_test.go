@@ -30,6 +30,7 @@ func TestProductionGenerationCandidateCompositionBindsRealClosedComponents(t *te
 	}
 	if composition.driver == nil || composition.resolver == nil || composition.validation == nil || !composition.validation.Ready() ||
 		composition.snapshots == nil || composition.artifacts == nil || composition.processes == nil || composition.selection == nil ||
+		composition.selectedExecutor == nil || !composition.selected.ManagedValidationReady() ||
 		composition.processes.OwnerDigest() != productionBytesDigest([]byte(runtimeValue.serviceInstanceID)) {
 		t.Fatalf("composition=%+v", composition)
 	}

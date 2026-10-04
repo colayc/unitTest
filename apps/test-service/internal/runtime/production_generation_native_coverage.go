@@ -21,6 +21,11 @@ import (
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
 )
 
+type productionCoverageDetailEvidence struct {
+	Version      int                                  `json:"version"`
+	Observations []coveragedomain.FunctionObservation `json:"observations"`
+}
+
 func productionValidationCoverageFactory(platform string) productionValidationCoveragePrepareFunc {
 	return func(ctx context.Context, registration productionValidationPlanRegistration, build productionValidationBuildPreparation, roots testgenvalidate.Roots) (productionValidationCoveragePreparation, error) {
 		return prepareProductionValidationCoverage(ctx, platform, registration, build, roots)
@@ -179,7 +184,7 @@ func productionValidationCoverageInterpreter(platform string, registration produ
 		if err != nil {
 			return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 		}
-		document, _, _, err := coveragenormalize.NormalizeLLVMWithDetail(coveragenormalize.LLVMInput{
+		document, _, observations, err := coveragenormalize.NormalizeLLVMWithDetail(coveragenormalize.LLVMInput{
 			Export: parsed, WorkspaceRoot: roots.Source, Matcher: matcher, Toolchain: toolchainSnapshot,
 			Completeness: coveragedomain.Completeness{Outcome: coveragedomain.OutcomeAvailable}, Limits: coveragenormalize.DefaultLimits(),
 		})
@@ -190,7 +195,14 @@ func productionValidationCoverageInterpreter(platform string, registration produ
 		if err != nil || len(encoded) == 0 || len(encoded) > 32<<20 {
 			return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 		}
-		return testgenvalidate.StageEvidence{Output: []byte("coverage:" + productionBytesDigest(encoded)), CoverageJSON: encoded}, nil
+		detail, err := json.Marshal(productionCoverageDetailEvidence{Version: 1, Observations: observations})
+		if err != nil || len(detail) == 0 || len(detail) > 16<<20 {
+			return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
+		}
+		return testgenvalidate.StageEvidence{
+			Output:       []byte("coverage:" + productionBytesDigest(encoded) + ":" + productionBytesDigest(detail)),
+			CoverageJSON: encoded, CoverageDetailJSON: detail,
+		}, nil
 	}
 }
 

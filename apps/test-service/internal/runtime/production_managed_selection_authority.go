@@ -36,6 +36,13 @@ type productionManagedSelectionAuthority struct {
 	config productionManagedSelectionAuthorityConfig
 }
 
+type productionManagedSelectionBinding struct {
+	run     testgendomain.Run
+	target  generationTarget
+	index   coveragedetail.Index
+	context testgenvalidate.SelectionContext
+}
+
 func newProductionManagedSelectionAuthority(config productionManagedSelectionAuthorityConfig) (*productionManagedSelectionAuthority, error) {
 	if config.root.NativePath == "" || config.root.ID == "" || config.store == nil || config.resolver == nil || config.current == nil {
 		return nil, task.ErrStorageUnavailable
@@ -44,45 +51,51 @@ func newProductionManagedSelectionAuthority(config productionManagedSelectionAut
 }
 
 func (authority *productionManagedSelectionAuthority) Resolve(ctx context.Context, runID string) (testgenvalidate.SelectionContext, error) {
+	binding, err := authority.resolveBinding(ctx, runID)
+	return binding.context, err
+}
+
+func (authority *productionManagedSelectionAuthority) resolveBinding(ctx context.Context, runID string) (productionManagedSelectionBinding, error) {
 	if authority == nil || ctx == nil || ctx.Err() != nil || !validProductionObjectID(runID) {
-		return testgenvalidate.SelectionContext{}, errProductionManagedUnavailable
+		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
 	run, err := authority.config.store.GetGeneration(ctx, runID)
 	if err != nil {
-		return testgenvalidate.SelectionContext{}, err
+		return productionManagedSelectionBinding{}, err
 	}
 	if testgendomain.ValidateRun(run) != nil || run.ID != runID || run.State != testgendomain.StateAwaitingConfirmation ||
 		run.Request.ManagedSelectionID() == "" || run.Record.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest {
-		return testgenvalidate.SelectionContext{}, errProductionManagedUnavailable
+		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
 	target, err := authority.config.resolver.ResolveRequest(ctx, run.Request)
 	if err != nil || !target.valid() || !target.managed || !reflect.DeepEqual(target.request, run.Request) {
-		return testgenvalidate.SelectionContext{}, errProductionManagedUnavailable
+		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
 	index, err := authority.config.current.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{
 		ProjectID: run.Request.ProjectID, ReportID: run.Request.CoverageReportID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
 	})
 	if err != nil {
-		return testgenvalidate.SelectionContext{}, err
+		return productionManagedSelectionBinding{}, err
 	}
 	if index.ProjectID != run.Request.ProjectID || index.ReportID != run.Request.CoverageReportID ||
 		index.WorkspaceGeneration != run.Request.WorkspaceGeneration || !validProductionDigest(index.ToolchainID) {
-		return testgenvalidate.SelectionContext{}, errProductionManagedUnavailable
+		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
 	selected, err := productionSelectedCoverage(index)
 	if err != nil {
-		return testgenvalidate.SelectionContext{}, err
+		return productionManagedSelectionBinding{}, err
 	}
 	sourceDigest, err := testgenvalidate.WorkspaceSnapshotDigest(authority.config.root.NativePath)
 	if err != nil || !validProductionDigest(sourceDigest) {
-		return testgenvalidate.SelectionContext{}, errProductionManagedUnavailable
+		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
-	return testgenvalidate.SelectionContext{
+	resolved := testgenvalidate.SelectionContext{
 		SnapshotDigest: run.Record.SnapshotDigest,
 		ToolchainID:    index.ToolchainID,
 		SourceDigest:   sourceDigest,
 		Baseline:       selected,
-	}, nil
+	}
+	return productionManagedSelectionBinding{run: run, target: target, index: index, context: resolved}, nil
 }
 
 func productionSelectedCoverage(index coveragedetail.Index) (testgenvalidate.SelectedCoverage, error) {

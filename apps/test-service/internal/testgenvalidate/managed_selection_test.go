@@ -55,6 +55,8 @@ func (executor *selectedFixtureExecutor) VerifyPlan(_ context.Context, _ testgen
 	return nil
 }
 
+func (executor *selectedFixtureExecutor) Release(testgenpublish.ManagedSelection, Roots) {}
+
 func (r *selectedFixtureRunner) Run(ctx context.Context, phase SelectedPhase, roots Roots, command SelectedCommand) (SelectedStageResult, error) {
 	r.called = append(r.called, phase)
 	if r.wait {

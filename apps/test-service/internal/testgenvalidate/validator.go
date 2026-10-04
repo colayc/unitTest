@@ -36,6 +36,10 @@ type StageEvidence struct {
 	Output            []byte
 	DiscoveredCaseIDs []string
 	CoverageJSON      []byte
+	// CoverageDetailJSON is bounded, service-normalized function evidence for
+	// managed selected-output validation. It is never accepted from IPC or a
+	// child process directly.
+	CoverageDetailJSON []byte
 }
 
 // EvidenceVerifier checks product-owned oracle proof or repeated-output
