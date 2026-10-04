@@ -72,6 +72,16 @@ type SelectedToolchainRunner interface {
 	Run(context.Context, SelectedPhase, Roots, SelectedCommand) (SelectedStageResult, error)
 }
 
+// SelectedStageExecutor is the production path for projects whose trusted
+// build/test/coverage plans are resolved per run. It returns the digest of the
+// exact service-owned phase plan that produced the result. VerifyPlan must
+// re-attest the complete ordered plan before a receipt is accepted or reused.
+// Static SelectedCommand remains available only for the closed legacy seam.
+type SelectedStageExecutor interface {
+	Execute(context.Context, testgenpublish.ManagedSelection, SelectedPhase, Roots) (SelectedStageResult, string, error)
+	VerifyPlan(context.Context, testgenpublish.ManagedSelection, []SelectedPhaseReceipt, string) error
+}
+
 type SelectedFileCoverage struct {
 	ID      string                 `json:"id"`
 	Summary coveragedomain.Summary `json:"summary"`
@@ -100,6 +110,7 @@ type SelectedConfig struct {
 	SourceRoot, TempRoot string
 	Resolve              SelectionResolver
 	Runner               SelectedToolchainRunner
+	Executor             SelectedStageExecutor
 	Commands             map[SelectedPhase]SelectedCommand
 	ToolSHA256           map[string]string
 	MACKey               []byte
@@ -132,7 +143,12 @@ type SelectedReceipt struct {
 }
 
 func NewSelectedValidator(config SelectedConfig) (*SelectedValidator, error) {
-	if config.Runner == nil || config.Resolve == nil || !directDirectory(config.SourceRoot) || !directDirectory(config.TempRoot) || config.SourceRoot == config.TempRoot || within(config.SourceRoot, config.TempRoot) || within(config.TempRoot, config.SourceRoot) || len(config.MACKey) < 32 || config.PhaseTimeout <= 0 || config.PhaseTimeout > 5*time.Minute || len(config.Commands) != len(selectedPhases) || len(config.ToolSHA256) == 0 {
+	if config.Resolve == nil || !directDirectory(config.SourceRoot) || !directDirectory(config.TempRoot) || config.SourceRoot == config.TempRoot || within(config.SourceRoot, config.TempRoot) || within(config.TempRoot, config.SourceRoot) || len(config.MACKey) < 32 || config.PhaseTimeout <= 0 || config.PhaseTimeout > 5*time.Minute {
+		return nil, ErrSelectedValidation
+	}
+	dynamic := config.Executor != nil
+	if dynamic && (config.Runner != nil || len(config.Commands) != 0 || len(config.ToolSHA256) != 0) ||
+		!dynamic && (config.Runner == nil || len(config.Commands) != len(selectedPhases) || len(config.ToolSHA256) == 0) {
 		return nil, ErrSelectedValidation
 	}
 	commands := make(map[SelectedPhase]SelectedCommand, len(config.Commands))
@@ -143,13 +159,15 @@ func NewSelectedValidator(config SelectedConfig) (*SelectedValidator, error) {
 		}
 		tools[path] = digest
 	}
-	for _, phase := range selectedPhases {
-		command, ok := config.Commands[phase]
-		if !ok || !validSelectedCommand(command, tools) {
-			return nil, ErrSelectedValidation
+	if !dynamic {
+		for _, phase := range selectedPhases {
+			command, ok := config.Commands[phase]
+			if !ok || !validSelectedCommand(command, tools) {
+				return nil, ErrSelectedValidation
+			}
+			command.Args = append([]string(nil), command.Args...)
+			commands[phase] = command
 		}
-		command.Args = append([]string(nil), command.Args...)
-		commands[phase] = command
 	}
 	config.Commands = commands
 	config.ToolSHA256 = tools
@@ -307,6 +325,19 @@ func (v *SelectedValidator) commandSetDigest() string {
 	return digestBytes(append([]byte("managed-command-set-v1\x00"), encoded...))
 }
 
+func selectedDynamicPlanDigest(phases []SelectedPhaseReceipt) string {
+	type phasePlan struct {
+		Phase  SelectedPhase `json:"phase"`
+		Digest string        `json:"digest"`
+	}
+	values := make([]phasePlan, len(phases))
+	for index, phase := range phases {
+		values[index] = phasePlan{Phase: phase.Phase, Digest: phase.CommandDigest}
+	}
+	encoded, _ := json.Marshal(values)
+	return digestBytes(append([]byte("managed-dynamic-plan-v1\x00"), encoded...))
+}
+
 func coverageDigest(value SelectedCoverage) string {
 	encoded, _ := json.Marshal(value)
 	return digestBytes(append([]byte("managed-baseline-v1\x00"), encoded...))
@@ -353,7 +384,10 @@ func (v *SelectedValidator) Validate(ctx context.Context, selection testgenpubli
 	if err != nil {
 		return nil, ErrSelectedValidation
 	}
-	result := SelectedReceipt{Version: "1", RunID: selection.RunID, SelectedOutputDigest: selection.SelectedOutputDigest, SnapshotDigest: current.SnapshotDigest, ToolchainID: current.ToolchainID, SourceDigest: current.SourceDigest, BaselineDigest: coverageDigest(current.Baseline), CommandSetDigest: v.commandSetDigest(), Phases: make([]SelectedPhaseReceipt, 0, len(selectedPhases))}
+	result := SelectedReceipt{Version: "1", RunID: selection.RunID, SelectedOutputDigest: selection.SelectedOutputDigest, SnapshotDigest: current.SnapshotDigest, ToolchainID: current.ToolchainID, SourceDigest: current.SourceDigest, BaselineDigest: coverageDigest(current.Baseline), Phases: make([]SelectedPhaseReceipt, 0, len(selectedPhases))}
+	if v.config.Executor == nil {
+		result.CommandSetDigest = v.commandSetDigest()
+	}
 	for _, phase := range selectedPhases {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -361,14 +395,23 @@ func (v *SelectedValidator) Validate(ctx context.Context, selection testgenpubli
 		if !v.unchanged(ctx, selection, current, original, staged, roots) {
 			return nil, ErrSelectedValidation
 		}
-		command := v.config.Commands[phase]
 		phaseCtx, cancel := context.WithTimeout(ctx, v.config.PhaseTimeout)
 		started := time.Now().UTC().Truncate(time.Millisecond)
-		outcome, runErr := v.config.Runner.Run(phaseCtx, phase, roots, command)
+		var (
+			outcome       SelectedStageResult
+			phasePlanHash string
+			runErr        error
+		)
+		if v.config.Executor != nil {
+			outcome, phasePlanHash, runErr = v.config.Executor.Execute(phaseCtx, selection, phase, roots)
+		} else {
+			outcome, runErr = v.config.Runner.Run(phaseCtx, phase, roots, v.config.Commands[phase])
+			phasePlanHash = v.commandDigest(phase)
+		}
 		phaseErr := phaseCtx.Err()
 		cancel()
 		finished := time.Now().UTC().Truncate(time.Millisecond)
-		if runErr != nil || phaseErr != nil || outcome.ExitCode != 0 || len(outcome.Output) > maxSelectedOutput || !v.unchanged(ctx, selection, current, original, staged, roots) {
+		if runErr != nil || phaseErr != nil || outcome.ExitCode != 0 || !validDigest(phasePlanHash) || len(outcome.Output) > maxSelectedOutput || !v.unchanged(ctx, selection, current, original, staged, roots) {
 			return nil, ErrSelectedValidation
 		}
 		if phase != SelectedDiscover && len(outcome.DiscoveredCaseIDs) != 0 || phase != SelectedRun && (outcome.TestsRun != 0 || outcome.TestsPassed != 0 || len(outcome.ExecutedCaseIDs) != 0) || phase != SelectedCoveragePhase && outcome.CollectorRelativePath != "" {
@@ -394,7 +437,13 @@ func (v *SelectedValidator) Validate(ctx context.Context, selection testgenpubli
 			TestsRun, TestsPassed int
 			CollectorDigest       string
 		}{digestBytes(outcome.Output), outcome.DiscoveredCaseIDs, outcome.ExecutedCaseIDs, outcome.TestsRun, outcome.TestsPassed, coverageDigest(result.Coverage)})
-		result.Phases = append(result.Phases, SelectedPhaseReceipt{Phase: phase, Status: "passed", StartedAt: started, FinishedAt: finished, CommandDigest: v.commandDigest(phase), EvidenceDigest: digestBytes(evidence)})
+		result.Phases = append(result.Phases, SelectedPhaseReceipt{Phase: phase, Status: "passed", StartedAt: started, FinishedAt: finished, CommandDigest: phasePlanHash, EvidenceDigest: digestBytes(evidence)})
+	}
+	if v.config.Executor != nil {
+		result.CommandSetDigest = selectedDynamicPlanDigest(result.Phases)
+		if v.config.Executor.VerifyPlan(ctx, selection, append([]SelectedPhaseReceipt(nil), result.Phases...), result.CommandSetDigest) != nil {
+			return nil, ErrSelectedValidation
+		}
 	}
 	if !v.unchanged(ctx, selection, current, original, staged, roots) {
 		return nil, ErrSelectedValidation
@@ -607,13 +656,21 @@ func (v *SelectedValidator) Verify(ctx context.Context, selection testgenpublish
 	}
 	want, _ := hex.DecodeString(v.sign(receipt))
 	got, _ := hex.DecodeString(receipt.MAC)
-	if !hmac.Equal(got, want) || receipt.Version != "1" || receipt.RunID != selection.RunID || receipt.SelectedOutputDigest != selection.SelectedOutputDigest || receipt.SnapshotDigest != current.SnapshotDigest || receipt.ToolchainID != current.ToolchainID || receipt.SourceDigest != current.SourceDigest || receipt.BaselineDigest != coverageDigest(current.Baseline) || receipt.CommandSetDigest != v.commandSetDigest() || !coverageNotRegressed(current.Baseline, receipt.Coverage) || len(receipt.Phases) != len(selectedPhases) {
+	expectedPlanDigest := v.commandSetDigest()
+	if v.config.Executor != nil {
+		expectedPlanDigest = selectedDynamicPlanDigest(receipt.Phases)
+	}
+	if !hmac.Equal(got, want) || receipt.Version != "1" || receipt.RunID != selection.RunID || receipt.SelectedOutputDigest != selection.SelectedOutputDigest || receipt.SnapshotDigest != current.SnapshotDigest || receipt.ToolchainID != current.ToolchainID || receipt.SourceDigest != current.SourceDigest || receipt.BaselineDigest != coverageDigest(current.Baseline) || receipt.CommandSetDigest != expectedPlanDigest || !coverageNotRegressed(current.Baseline, receipt.Coverage) || len(receipt.Phases) != len(selectedPhases) {
 		return ErrSelectedValidation
 	}
 	for i, phase := range receipt.Phases {
-		if phase.Phase != selectedPhases[i] || phase.Status != "passed" || phase.StartedAt.IsZero() || phase.FinishedAt.Before(phase.StartedAt) || phase.CommandDigest != v.commandDigest(phase.Phase) || !validDigest(phase.EvidenceDigest) {
+		if phase.Phase != selectedPhases[i] || phase.Status != "passed" || phase.StartedAt.IsZero() || phase.FinishedAt.Before(phase.StartedAt) || !validDigest(phase.CommandDigest) || !validDigest(phase.EvidenceDigest) ||
+			v.config.Executor == nil && phase.CommandDigest != v.commandDigest(phase.Phase) {
 			return ErrSelectedValidation
 		}
+	}
+	if v.config.Executor != nil && v.config.Executor.VerifyPlan(ctx, selection, append([]SelectedPhaseReceipt(nil), receipt.Phases...), receipt.CommandSetDigest) != nil {
+		return ErrSelectedValidation
 	}
 	return nil
 }
