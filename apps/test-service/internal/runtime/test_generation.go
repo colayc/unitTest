@@ -46,6 +46,13 @@ type ManagedValidationDriver interface {
 	ValidateManagedSelection(context.Context, testgenpublish.ManagedSelection) ([]byte, error)
 }
 
+// managedReviewFinalizer is an internal post-checkpoint hook. A durable review
+// must bind the final awaiting-confirmation revision, so it cannot be safely
+// committed by an earlier generation stage.
+type managedReviewFinalizer interface {
+	FinalizeManagedReview(context.Context, testgendomain.Run) error
+}
+
 type managedValidationProvider interface {
 	ManagedValidationDriver
 	ManagedValidationReady() bool
@@ -832,6 +839,14 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			// attempt; a failed CAS never carries in-memory usage forward.
 			return
 		}
+		if committed.State == testgendomain.StateAwaitingConfirmation && committed.Request.ManagedGapID != "" {
+			if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+				if err := finalizer.FinalizeManagedReview(ctx, committed); err != nil {
+					s.fail(committed)
+					return
+				}
+			}
+		}
 		s.publishNewEvents(ctx, run, committed)
 		if committed.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(committed.State) {
 			return
@@ -903,6 +918,13 @@ func (s *generationService) ResumeAll(ctx context.Context) error {
 				continue
 			}
 			if run.State == testgendomain.StateAwaitingConfirmation {
+				if run.Request.ManagedGapID != "" {
+					if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+						if err := finalizer.FinalizeManagedReview(ctx, run); err != nil {
+							s.fail(run)
+						}
+					}
+				}
 				continue
 			}
 			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {

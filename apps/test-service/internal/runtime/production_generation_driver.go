@@ -38,12 +38,26 @@ type productionGenerationDriver struct {
 	resolver  productionTargetResolver
 	pipeline  *productionGenerationPipeline
 	validator productionGenerationValidator
+	finalizer managedReviewFinalizer
 	mu        sync.Mutex
 	cache     map[string]cachedProductionPipeline
 }
 
 func newProductionGenerationDriver(resolver productionTargetResolver, pipeline *productionGenerationPipeline, validator productionGenerationValidator) *productionGenerationDriver {
 	return &productionGenerationDriver{resolver: resolver, pipeline: pipeline, validator: validator, cache: make(map[string]cachedProductionPipeline)}
+}
+
+func (driver *productionGenerationDriver) setManagedReviewFinalizer(finalizer managedReviewFinalizer) {
+	if driver != nil {
+		driver.finalizer = finalizer
+	}
+}
+
+func (driver *productionGenerationDriver) FinalizeManagedReview(ctx context.Context, run testgendomain.Run) error {
+	if driver == nil || driver.finalizer == nil {
+		return task.ErrStorageUnavailable
+	}
+	return driver.finalizer.FinalizeManagedReview(ctx, run)
 }
 
 func (driver *productionGenerationDriver) Targets(ctx context.Context, input generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error) {

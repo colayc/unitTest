@@ -1,6 +1,7 @@
 package taskstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
@@ -130,6 +132,61 @@ func TestManagedReviewPersistsExactBytesAndIsOwnerBoundAfterRestart(t *testing.T
 	}
 	if _, err := s.ReadManagedReviewDraft(ctx, q.Binding, q.ReviewID, draft.Manifest.Digest()); !errors.Is(err, task.ErrNotFound) {
 		t.Fatalf("cross owner whole review=%v", err)
+	}
+}
+
+func TestManagedRegistryRecoversExactAcceptedBlockFromDurableReview(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	draft := reviewFixture(t, s)
+	fileID, err := coveragedetail.StableFileID(draft.Manifest.ProjectID, "src/a.cpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionID, err := coveragedetail.StableFunctionID(fileID, "linkage:7:_Z3foov:signature:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := managedtest.RenderMarkers(draft.Candidates[0].CandidateID, functionID, "foo", []byte("TEST(Generated, Zero) {}\n"), "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := managedtest.ParseDocument(block, int64(len(block)), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Candidates[0].AcceptedDigest = ""
+	draft.Candidates[0].CurrentBytes = []byte{}
+	draft.Candidates[0].GeneratedBytes = block
+	draft.Candidates[0].CurrentDigest = reviewHash(draft.Candidates[0].CurrentBytes)
+	draft.Candidates[0].GeneratedDigest = reviewHash(block)
+	draft.Manifest.CandidateSetDigest = managedtest.ReviewCandidateSetDigest(draft.Candidates)
+	draft.Manifest.CurrentPreimageDigest, draft.Manifest.GeneratedPreimageDigest = managedtest.ReviewPreimageSetDigests(draft.Candidates)
+	if err := s.CommitManagedReview(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	acceptedAt := draft.Manifest.CreatedAt.Add(time.Minute)
+	acceptance := managedtest.Acceptance{
+		AcceptanceID: strings.Repeat("1", 32), ReviewDigest: draft.Manifest.Digest(),
+		PreimageDigest: reviewHash(nil), PublishedFileDigest: reviewHash(block), At: acceptedAt,
+		Record: managedtest.Record{
+			CaseID: draft.Candidates[0].CandidateID, ProjectID: draft.Manifest.ProjectID, SourceFileID: fileID, FunctionID: functionID,
+			SourceRelativePath: "src/a.cpp", ScenarioID: "zero", TestRelativePath: draft.Candidates[0].TestRelativePath,
+			AcceptedBlockDigest: document.Blocks[0].Digest, GeneratorVersion: "unit-test-service-v1", Framework: "cpputest",
+			ToolchainID: draft.Manifest.ToolchainID, SourceDigest: draft.Manifest.SourceDigest,
+			ValidationReceiptDigest: strings.Repeat("f", 64), Status: managedtest.StatusCurrent, LastVerifiedAt: acceptedAt,
+		},
+	}
+	commitManagedFixture(t, s.ManagedTestRegistry(), acceptance)
+	got, err := s.ManagedTestRegistry().ReadAcceptedBlock(ctx, acceptance.Record.CaseID)
+	if err != nil || !bytes.Equal(got, block) {
+		t.Fatalf("accepted block=%q err=%v", got, err)
+	}
+	if _, err := s.db.Exec(`UPDATE managed_review_candidates SET candidate_json=? WHERE review_id=? AND candidate_id=?`, []byte(`{}`), draft.Manifest.ReviewID, acceptance.Record.CaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ManagedTestRegistry().ReadAcceptedBlock(ctx, acceptance.Record.CaseID); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("tampered review block accepted: %v", err)
 	}
 }
 

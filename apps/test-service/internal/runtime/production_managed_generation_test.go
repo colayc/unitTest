@@ -10,6 +10,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/managedtest"
+	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenpublish"
 )
@@ -70,6 +71,87 @@ func productionManagedFixture(t *testing.T) (testgendomain.Run, coveragedetail.I
 		Files: result.editSet.Files, Diff: result.editSet.Diff,
 	}
 	return run, index, set, generated, target, result
+}
+
+type productionManagedEvidenceFixture struct{ set testgenpublish.CandidateSet }
+
+func (fixture productionManagedEvidenceFixture) Ready() bool { return true }
+func (fixture productionManagedEvidenceFixture) CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error) {
+	return cloneProductionCandidateSet(fixture.set), nil
+}
+
+type productionManagedCandidateFixture struct{ values []testgendomain.Candidate }
+
+func (fixture productionManagedCandidateFixture) ListGenerationCandidates(context.Context, string) ([]testgendomain.Candidate, error) {
+	return append([]testgendomain.Candidate(nil), fixture.values...), nil
+}
+
+type productionManagedIndexFixture struct{ index coveragedetail.Index }
+
+func (productionManagedIndexFixture) CurrentCoverageReady() bool { return true }
+func (fixture productionManagedIndexFixture) ReadCurrentCoverageIndex(context.Context, coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
+	return fixture.index, nil
+}
+
+type productionManagedRegistryFixture struct {
+	records []managedtest.Record
+	blocks  map[string][]byte
+}
+
+func (fixture productionManagedRegistryFixture) List(context.Context, managedtest.Query) (managedtest.Page, error) {
+	return managedtest.Page{Items: append([]managedtest.Record(nil), fixture.records...)}, nil
+}
+func (fixture productionManagedRegistryFixture) ReadAcceptedBlock(_ context.Context, caseID string) ([]byte, error) {
+	value, ok := fixture.blocks[caseID]
+	if !ok {
+		return nil, task.ErrNotFound
+	}
+	return append([]byte(nil), value...), nil
+}
+
+type productionManagedReviewFixture struct {
+	draft managedtest.ReviewDraft
+	write int
+}
+
+func (*productionManagedReviewFixture) ManagedReviewsReady() bool { return true }
+func (fixture *productionManagedReviewFixture) CommitManagedReview(_ context.Context, draft managedtest.ReviewDraft) error {
+	fixture.write++
+	if fixture.write > 1 {
+		return task.ErrConflict
+	}
+	fixture.draft = draft
+	return nil
+}
+func (fixture *productionManagedReviewFixture) LookupManagedReviewBinding(context.Context, string, string) (managedtest.ReviewBinding, error) {
+	return fixture.draft.Manifest.Binding(), nil
+}
+func (fixture *productionManagedReviewFixture) ReadManagedReviewDraft(context.Context, managedtest.ReviewBinding, string, string) (managedtest.ReviewDraft, error) {
+	return fixture.draft, nil
+}
+
+func TestProductionManagedMaterializerPersistsReviewIdempotently(t *testing.T) {
+	run, index, set, _, _, _ := productionManagedFixture(t)
+	candidate := testgendomain.Candidate{CaseID: set.CaseIDs[0], StagedSourceArtifact: run.ArtifactDigests[0]}
+	reviews := &productionManagedReviewFixture{}
+	materializer := &productionManagedMaterializer{
+		candidates: productionManagedCandidateFixture{values: []testgendomain.Candidate{candidate}},
+		evidence:   productionManagedEvidenceFixture{set: set}, current: productionManagedIndexFixture{index: index},
+		preimages: &managedPublisherFixture{ready: true, preimages: map[string][]byte{set.Files[0].Path: []byte{}}},
+		registry:  productionManagedRegistryFixture{}, reviews: reviews,
+	}
+	if err := materializer.FinalizeManagedReview(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if reviews.write != 1 || !managedtest.ValidReviewDraft(reviews.draft) || reviews.draft.Manifest.RunRevision != run.Revision {
+		t.Fatalf("review not persisted: writes=%d draft=%+v", reviews.write, reviews.draft)
+	}
+	if err := materializer.FinalizeManagedReview(context.Background(), run); err != nil {
+		t.Fatalf("idempotent finalization: %v", err)
+	}
+	if reviews.write != 2 {
+		t.Fatalf("idempotent retry did not verify existing review: %d", reviews.write)
+	}
 }
 
 func TestBuildProductionManagedReviewCreatesMaintainableCases(t *testing.T) {
