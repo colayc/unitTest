@@ -15,12 +15,13 @@ type productionValidationProcessPlan struct {
 	allowedEnvironment        []string
 	allowedEnvUnset           []string
 	specs                     map[testgenvalidate.Stage]processcontrol.Spec
+	sequences                 map[testgenvalidate.Stage][]processcontrol.Spec
 	interpret                 testgenvalidate.StageInterpreter
 	recordLease, releaseLease testgenvalidate.LeaseWriter
 }
 
 type productionValidationProcessPlanProvider interface {
-	ResolveValidationProcessPlan(context.Context, string, string) (productionValidationProcessPlan, error)
+	ResolveValidationProcessPlan(context.Context, string, string, testgenvalidate.Stage, testgenvalidate.Roots) (productionValidationProcessPlan, error)
 }
 
 type productionValidationStageExecutor struct {
@@ -40,30 +41,46 @@ func (executor *productionValidationStageExecutor) Execute(ctx context.Context, 
 		!validProductionObjectID(roots.ProcessTaskID) || !validProductionDigest(roots.CandidateID) {
 		return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 	}
-	plan, err := executor.provider.ResolveValidationProcessPlan(ctx, roots.CandidateID, roots.ProcessTaskID)
+	plan, err := executor.provider.ResolveValidationProcessPlan(ctx, roots.CandidateID, roots.ProcessTaskID, stage, roots)
 	if err != nil || plan.taskID != roots.ProcessTaskID || !validProductionObjectID(plan.taskID) || !validProductionObjectID(plan.serviceInstanceID) ||
 		len(plan.tools) == 0 || plan.recordLease == nil || plan.releaseLease == nil {
 		return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 	}
-	spec, ok := plan.specs[stage]
-	if !ok {
+	specs := append([]processcontrol.Spec(nil), plan.sequences[stage]...)
+	if len(specs) == 0 {
+		spec, ok := plan.specs[stage]
+		if ok {
+			specs = []processcontrol.Spec{spec}
+		}
+	}
+	if len(specs) == 0 || len(specs) > 4 {
 		return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 	}
 	tools := make(map[string]string, len(plan.tools))
 	for path, digest := range plan.tools {
 		tools[path] = digest
 	}
-	spec = cloneProductionValidationProcessSpec(spec)
-	prepared := testgenvalidate.PreparedProcessExecutor{
-		Runner: executor.runner, TaskID: plan.taskID, ServiceInstanceID: plan.serviceInstanceID,
-		ToolSHA256: tools, AllowedEnvironment: append([]string(nil), plan.allowedEnvironment...),
-		AllowedEnvUnset: append([]string(nil), plan.allowedEnvUnset...),
-		RecordLease:     plan.recordLease, ReleaseLease: plan.releaseLease, Interpret: plan.interpret,
-		Plan: func(context.Context, testgenvalidate.Stage, testgenvalidate.Roots) (processcontrol.Spec, error) {
-			return spec, nil
-		},
+	var result testgenvalidate.StageEvidence
+	for index, raw := range specs {
+		spec := cloneProductionValidationProcessSpec(raw)
+		prepared := testgenvalidate.PreparedProcessExecutor{
+			Runner: executor.runner, TaskID: plan.taskID, ServiceInstanceID: plan.serviceInstanceID,
+			ToolSHA256: tools, AllowedEnvironment: append([]string(nil), plan.allowedEnvironment...),
+			AllowedEnvUnset: append([]string(nil), plan.allowedEnvUnset...),
+			RecordLease:     plan.recordLease, ReleaseLease: plan.releaseLease,
+			Plan: func(context.Context, testgenvalidate.Stage, testgenvalidate.Roots) (processcontrol.Spec, error) {
+				return spec, nil
+			},
+		}
+		if index == len(specs)-1 {
+			prepared.Interpret = plan.interpret
+		}
+		result, err = prepared.Execute(ctx, stage, roots)
+		if err != nil {
+			return testgenvalidate.StageEvidence{}, err
+		}
 	}
-	return prepared.Execute(ctx, stage, roots)
+	return result, nil
 }
 
 func cloneProductionValidationProcessSpec(value processcontrol.Spec) processcontrol.Spec {
