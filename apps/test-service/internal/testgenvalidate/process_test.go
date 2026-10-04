@@ -240,6 +240,43 @@ func TestPreparedExecutorStopsOutputFlood(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutorAllowsBoundedCoverageExportAndCompactsReceiptOutput(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "llvm-cov.exe")
+	if err := os.WriteFile(executable, []byte("fixed-tool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"source", "build", "artifacts"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := []byte(strings.Repeat("x", maxStageOutput+1))
+	process := &fakeProcess{output: make(chan processcontrol.Output, 1), done: make(chan processcontrol.Result, 1)}
+	process.output <- processcontrol.Output{Data: raw}
+	process.done <- processcontrol.Result{}
+	close(process.output)
+	close(process.done)
+	executor := PreparedProcessExecutor{
+		Runner: &fakeRunner{process: process}, TaskID: testID, ServiceInstanceID: testID,
+		ToolSHA256: map[string]string{executable: digestTest([]byte("fixed-tool"))},
+		Plan: func(context.Context, Stage, Roots) (processcontrol.Spec, error) {
+			return processcontrol.Spec{Executable: executable, Dir: filepath.Join(root, "artifacts")}, nil
+		},
+		Interpret: func(stage Stage, _ Roots, output []byte) (StageEvidence, error) {
+			if stage != StageCoverage || !reflect.DeepEqual(output, raw) {
+				return StageEvidence{}, ErrProcessRejected
+			}
+			return StageEvidence{Output: []byte("coverage-normalized"), CoverageJSON: []byte(`{"schemaVersion":"1.0"}`)}, nil
+		},
+		RecordLease: func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil },
+	}
+	evidence, err := executor.Execute(context.Background(), StageCoverage, Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")})
+	if err != nil || string(evidence.Output) != "coverage-normalized" || len(evidence.CoverageJSON) == 0 {
+		t.Fatalf("coverage evidence=%+v error=%v", evidence, err)
+	}
+}
+
 func TestPreparedExecutorRejectsMissingExitResult(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "cmake.exe")

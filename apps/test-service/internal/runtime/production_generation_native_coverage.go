@@ -190,7 +190,7 @@ func productionValidationCoverageInterpreter(platform string, registration produ
 		if err != nil || len(encoded) == 0 || len(encoded) > 32<<20 {
 			return testgenvalidate.StageEvidence{}, errProductionValidationUnavailable
 		}
-		return testgenvalidate.StageEvidence{CoverageJSON: encoded}, nil
+		return testgenvalidate.StageEvidence{Output: []byte("coverage:" + productionBytesDigest(encoded)), CoverageJSON: encoded}, nil
 	}
 }
 

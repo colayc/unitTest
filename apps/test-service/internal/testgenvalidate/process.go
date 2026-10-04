@@ -18,6 +18,8 @@ import (
 
 var ErrProcessRejected = errors.New("validation process rejected")
 
+const maxCoverageProcessOutput = 32 << 20
+
 // TrustedProcessPlan is resolved from fixed service/build/framework metadata,
 // never from ValidationRequest. It may produce a CMake, test or collector plan.
 type TrustedProcessPlan func(context.Context, Stage, Roots) (processcontrol.Spec, error)
@@ -97,6 +99,10 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		return evidence, ErrProcessRejected
 	}
 	var output []byte
+	outputLimit := maxStageOutput
+	if stage == StageCoverage {
+		outputLimit = maxCoverageProcessOutput
+	}
 	gotResult := false
 	outputCh, doneCh := process.Output(), process.Done()
 	for outputCh != nil || doneCh != nil {
@@ -110,7 +116,7 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 				outputCh = nil
 				continue
 			}
-			if len(chunk.Data) > maxStageOutput-len(output) {
+			if len(chunk.Data) > outputLimit-len(output) {
 				_ = stopProcess()
 				_ = closeProcess()
 				return evidence, ErrProcessRejected
@@ -144,8 +150,11 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		if err != nil {
 			return StageEvidence{}, ErrProcessRejected
 		}
-		if len(interpreted.Output) != 0 || interpreted.ExitCode != 0 {
+		if len(interpreted.Output) > maxStageOutput || interpreted.ExitCode != 0 {
 			return StageEvidence{}, ErrProcessRejected
+		}
+		if interpreted.Output != nil {
+			evidence.Output = append([]byte(nil), interpreted.Output...)
 		}
 		evidence.DiscoveredCaseIDs = interpreted.DiscoveredCaseIDs
 		evidence.CoverageJSON = interpreted.CoverageJSON
