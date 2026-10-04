@@ -86,6 +86,7 @@ type Runtime struct {
 	coverageBackend     session.CoverageBackend
 	generationBackend   runtimeGenerationBackend
 	coverageExecutor    coverageExecutor
+	productionBuilds    productionBuildPreparer
 	productBundleRoots  ProductBundleRoots
 	productBundles      *ProductBundles
 	detailFailed        atomic.Bool
@@ -481,6 +482,7 @@ func Open(config Config) (*Runtime, error) {
 		lock:          locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root, platform: config.Platform,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
+		productionBuilds:   newCoordinatorProductionBuildPreparer(coordinator),
 		productBundleRoots: config.ProductBundleRoots,
 		productBundles:     productBundles,
 	}
