@@ -29,7 +29,9 @@ type AnalysisRequest struct {
 	Timeout               time.Duration
 }
 
-type verifiedBundle interface {
+// VerifiedBundle is the narrow product capability consumed by the analyzer.
+// It exposes no discovery or PATH fallback.
+type VerifiedBundle interface {
 	ClangPath() string
 	ResourceDir() string
 	ManifestSHA256() string
@@ -37,11 +39,15 @@ type verifiedBundle interface {
 }
 
 type Analyzer struct {
-	bundle verifiedBundle
+	bundle VerifiedBundle
 	runner probe.Runner
 }
 
 func NewAnalyzer(bundle *testgenbundle.Bundle) (*Analyzer, error) {
+	return NewAnalyzerWithVerifiedBundle(bundle)
+}
+
+func NewAnalyzerWithVerifiedBundle(bundle VerifiedBundle) (*Analyzer, error) {
 	if bundle == nil {
 		return nil, errors.New("missing fixed Clang bundle")
 	}
