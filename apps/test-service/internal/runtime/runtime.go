@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	goruntime "runtime"
 	"sync"
 	"sync/atomic"
@@ -50,6 +49,7 @@ type Config struct {
 	// product-owned bundles, coverage evidence and process ownership.
 	// Nil (the production default today) never advertises Protocol v1.5.
 	GenerationFactory  func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
+	ProductBundleRoots ProductBundleRoots
 	CMakeBundleRoot    string
 	DevCMakeExecutable string
 	Platform           string
@@ -79,6 +79,8 @@ type Runtime struct {
 	coverageBackend     session.CoverageBackend
 	generationBackend   *generationService
 	coverageExecutor    coverageExecutor
+	productBundleRoots  ProductBundleRoots
+	productBundles      *ProductBundles
 	detailFailed        atomic.Bool
 
 	shutdownMu          sync.Mutex
@@ -155,6 +157,7 @@ type dependencies struct {
 		testCoordinatorConfig,
 	) (runtimeTestCoordinator, io.Closer, error)
 	newCoverageExecutor func(coverageExecutionConfig) (coverageExecutor, error)
+	openProductBundles  func(ProductBundleRoots, string) (*ProductBundles, error)
 	newRunner           func(string) processcontrol.Runner
 	newBroker           func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
 	newManager          func(task.ManagerConfig) (runtimeManager, error)
@@ -189,6 +192,7 @@ func defaultDependencies() dependencies {
 		},
 		newTestCoordinator:  newRuntimeTestCoordinator,
 		newCoverageExecutor: newRuntimeCoverageExecutor,
+		openProductBundles:  openProductBundles,
 		newRunner:           processcontrol.NewRunner,
 		newBroker:           eventbroker.New,
 		newManager: func(config task.ManagerConfig) (runtimeManager, error) {
@@ -238,6 +242,9 @@ func (d dependencies) complete() dependencies {
 	if d.newCoverageExecutor == nil {
 		d.newCoverageExecutor = defaults.newCoverageExecutor
 	}
+	if d.openProductBundles == nil {
+		d.openProductBundles = defaults.openProductBundles
+	}
 	if d.newRunner == nil {
 		d.newRunner = defaults.newRunner
 	}
@@ -254,6 +261,11 @@ func Open(config Config) (*Runtime, error) {
 	if config.DataDir == "" || config.ServiceExecutable == "" || config.WorkspaceRoot == "" ||
 		config.Platform != goruntime.GOOS {
 		return nil, task.ErrInvalidArgument
+	}
+	if config.ProductBundleRoots.any() {
+		if err := config.ProductBundleRoots.Validate(); err != nil {
+			return nil, task.ErrInvalidArgument
+		}
 	}
 	deps := defaultDependencies()
 	if config.dependencies != nil {
@@ -325,10 +337,11 @@ func Open(config Config) (*Runtime, error) {
 		return failArtifacts(task.ErrInvalidArgument)
 	}
 	var (
-		inspector    *discovery.Inspector
-		installation cmake.Installation
-		observer     *stepObserverProxy
-		probeRunner  probe.Runner
+		inspector      *discovery.Inspector
+		installation   cmake.Installation
+		observer       *stepObserverProxy
+		probeRunner    probe.Runner
+		productBundles *ProductBundles
 	)
 	if config.TrustedWorkspace {
 		loaded, err := deps.loadWorkspace(workspaceRoot)
@@ -346,11 +359,21 @@ func Open(config Config) (*Runtime, error) {
 		if probeRunner == nil {
 			return failArtifacts(task.ErrInvalidArgument)
 		}
+		if config.ProductBundleRoots.any() {
+			productBundles, err = deps.openProductBundles(config.ProductBundleRoots, config.Platform)
+			if err != nil || productBundles == nil {
+				return failArtifacts(ErrProductBundlesUnavailable)
+			}
+		}
+		cmakeBundleRoot := config.CMakeBundleRoot
+		if config.ProductBundleRoots.CMake != "" {
+			cmakeBundleRoot = config.ProductBundleRoots.CMake
+		}
 		resolverConfig := cmake.ResolverConfig{
-			BundleRoot: config.CMakeBundleRoot, DevExecutable: config.DevCMakeExecutable,
+			BundleRoot: cmakeBundleRoot, DevExecutable: config.DevCMakeExecutable,
 			Platform: cmakePlatform(config.Platform), Architecture: cmakeArchitecture(),
 		}
-		if loaded.Config.CMake.Executable != "" {
+		if productBundles == nil && loaded.Config.CMake.Executable != "" {
 			resolverConfig.Override = loaded.Config.CMake.Executable
 		}
 		installation, err = deps.resolveCMake(ctx, probeRunner, resolverConfig)
@@ -442,6 +465,8 @@ func Open(config Config) (*Runtime, error) {
 		lock:          locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root, platform: config.Platform,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
+		productBundleRoots: config.ProductBundleRoots,
+		productBundles:     productBundles,
 	}
 	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend == nil {
 		coverageCoordinator, err := coveragecoord.NewCoordinator(store, config.Clock, newID)
@@ -460,16 +485,11 @@ func Open(config Config) (*Runtime, error) {
 		if !ok {
 			return runtimeValue.failOpen(task.ErrStorageUnavailable)
 		}
-		servicePath, servicePathErr := filepath.Abs(config.ServiceExecutable)
-		if servicePathErr != nil || filepath.Clean(servicePath) != servicePath {
-			return runtimeValue.failOpen(task.ErrInvalidArgument)
-		}
-		coverageBundleRoot := filepath.Join(filepath.Dir(servicePath), "bundles", "coverage")
 		coverageExecutor, err := deps.newCoverageExecutor(coverageExecutionConfig{
 			Platform: config.Platform, Tasks: manager, Store: store,
 			Build: coverageBuildPreparer{delegate: buildPreparer}, Tests: embeddedTests,
 			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
-			CoverageBundleRoot: coverageBundleRoot,
+			CoverageBundleRoot: config.ProductBundleRoots.Coverage,
 			Clock:              config.Clock, NewID: newID,
 			DetailFailure: runtimeValue.disableCoverageDetails,
 		})
