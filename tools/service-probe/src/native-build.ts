@@ -53,6 +53,7 @@ import type {
   FrameworkId,
   FrameworkToolchainEvidence,
 } from "./native-framework-report.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -72,15 +73,6 @@ const nativeLivenessReconnectBackoffMs = 250;
 const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
-
-function productionBundleRoots(root: string, platform: NodeJS.Platform) {
-  if (platform !== "linux" && platform !== "win32") throw new Error("production bundle platform is unsupported");
-  const key = platform === "win32" ? "windows-x64" : "linux-x64";
-  return {
-    coverageBundleRoot: join(root, ".superpowers", "runtime", "coverage-bundle", key),
-    testgenBundleRoot: join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", key),
-  };
-}
 
 async function requireProductionGenerationCapabilities(client: ProtocolClient): Promise<void> {
   const capabilities = await client.getCapabilities();

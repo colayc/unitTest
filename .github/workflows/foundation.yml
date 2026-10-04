@@ -288,6 +288,20 @@ jobs:
           $cmakeBin = Split-Path -Parent $result.executable
           $cmakeBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare and verify Windows coverage bundle
+        shell: pwsh
+        run: |
+          pnpm prepare:coverage-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage bundle preparation failed' }
+          pnpm check:coverage-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage bundle verification failed' }
+      - name: Prepare and verify Windows test-generation bundle
+        shell: pwsh
+        run: |
+          pnpm prepare:testgen-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle preparation failed' }
+          pnpm check:testgen-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle verification failed' }
       - id: framework-manifest
         shell: pwsh
         run: |

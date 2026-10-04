@@ -89,3 +89,18 @@ test("foundation verification prepares and checks the offline Clang bundle befor
       `${platform} verification must prepare and check Clang before pnpm verify`);
   }
 });
+
+test("Windows native generation matrix prepares both production bundles before the short workspace copy", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  const section = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];
+  assert.ok(section, "Windows framework verification job is missing");
+  const coveragePrepare = section.indexOf("pnpm prepare:coverage-bundle");
+  const coverageCheck = section.indexOf("pnpm check:coverage-bundle");
+  const testgenPrepare = section.indexOf("pnpm prepare:testgen-bundle");
+  const testgenCheck = section.indexOf("pnpm check:testgen-bundle");
+  const shortCopy = section.indexOf("Prepare short Windows framework workspace");
+  const nativeRun = section.indexOf("native-run.js --platform win32");
+  assert.ok(coveragePrepare >= 0 && coverageCheck > coveragePrepare && shortCopy > coverageCheck);
+  assert.ok(testgenPrepare >= 0 && testgenCheck > testgenPrepare && shortCopy > testgenCheck);
+  assert.ok(nativeRun > shortCopy, "native generation must consume the verified short-workspace bundle copies");
+});

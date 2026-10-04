@@ -9,6 +9,7 @@ import type {
   FrameworkPlatformFrameworkOptions,
 } from "./native-framework-matrix.js";
 import { stableFrameworkIdDigest } from "./native-framework-matrix.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import { parseFrameworkRuntimeManifest } from "./native-framework-runtime-contract.js";
 import { acquireFrameworkRuntimeLock } from "./native-framework-publish.js";
 import { collectAuditedFrameworkBenchmark } from "./native-framework-benchmark.js";
@@ -127,6 +128,7 @@ async function loadLockedFrameworkRuntime(
           workspaceRoot: join(workspaceBase, "workspace"),
           trustedWorkspace: true,
           cmakeBundleRoot: bundleRoot,
+          ...productionBundleRoots(repositoryRoot, platform),
         });
         fixtures.push(fixture);
         frameworks.push({
