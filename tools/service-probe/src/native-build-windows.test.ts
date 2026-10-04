@@ -15,6 +15,8 @@ import {
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 import { buildCoverageBackendReport, verifyRequiredFrameworkReport } from "./native-report.js";
 
+const productionCapabilities = () => ({ coverageDetails: true, testGeneration: true, managedTests: true });
+
 test("Windows clang-cl coverage remains required even when Linux backend rows pass", () => {
   assert.throws(() => buildCoverageBackendReport("a".repeat(40), [
     { backend: "linux-gcc", status: "passed" },
@@ -106,7 +108,7 @@ test("required Windows native run binds both real framework executables and publ
       );
       const family = (["msvc", "clang-cl"] as const)[launchIndex++]!;
       return {
-        client: { inspectWorkspace: async () => workspaceSnapshot(family) },
+        client: { getCapabilities: async () => productionCapabilities(), inspectWorkspace: async () => workspaceSnapshot(family) },
         dispose: async () => { events.push(`dispose:${family}`); },
       } as unknown as TaskServiceFixture;
     },

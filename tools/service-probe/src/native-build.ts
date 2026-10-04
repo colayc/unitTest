@@ -81,6 +81,15 @@ function productionBundleRoots(root: string, platform: NodeJS.Platform) {
     testgenBundleRoot: join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", key),
   };
 }
+
+async function requireProductionGenerationCapabilities(client: ProtocolClient): Promise<void> {
+  const capabilities = await client.getCapabilities();
+  if (!("coverageDetails" in capabilities) || capabilities.coverageDetails !== true ||
+      !("testGeneration" in capabilities) || capabilities.testGeneration !== true ||
+      !("managedTests" in capabilities) || capabilities.managedTests !== true) {
+    throw new Error("production test generation capability is unavailable");
+  }
+}
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
   linux: ["gcc", "clang"],
@@ -256,6 +265,11 @@ async function runNativeMatrixWithDependencies(
         cmakeBundleRoot: bundle.bundleRoot,
         ...productionBundleRoots(dependencies.repositoryRoot, options.platform),
       });
+      await withNamedTimeout(
+        `${family} production generation capability`,
+        requireProductionGenerationCapabilities(fixture.client),
+        nativeTimeoutMs,
+      );
       const snapshot = await withNamedTimeout(
         `${family} workspace inspection`,
         fixture.client.inspectWorkspace(),
@@ -1940,4 +1954,5 @@ export const __testing = Object.freeze({
   waitForTask,
   startFailureBuildWithStaleRetry,
   frameworkExecutableDigest,
+  requireProductionGenerationCapabilities,
 });
