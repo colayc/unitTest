@@ -154,13 +154,25 @@ test("native managed executor uses only report-bound IDs and closes review publi
 
 test("committed CppUTest and Unity fixtures are deterministic and do not use mock libraries", async () => {
   for (const [framework, files] of Object.entries({
-    cpputest: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.hpp", "src/classifier.cpp", "tests/classifier_test.cpp"],
-    unity: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.h", "src/classifier.c", "tests/classifier_test.c"],
+    cpputest: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.hpp", "src/classifier.cpp", "tests/CMakeLists.txt", "tests/classifier_test.cpp"],
+    unity: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.h", "src/classifier.c", "tests/CMakeLists.txt", "tests/classifier_test.c"],
   })) {
     const contents = await Promise.all(files.map((file) => readFile(join(fixtureRoot, framework, file), "utf8")));
-    assert.doesNotMatch(contents.join("\n"), /CppUMock|CMock|Mock|Stub/u);
+    assert.doesNotMatch(contents.join("\n"), /mock|stub/iu);
     assert.doesNotMatch(contents.join("\n"), /[A-Za-z]:\\|(?:^|\s)\//u);
     const config = JSON.parse(contents[1]!);
     assert.equal(config.projects[0].tests.containers[0].framework, framework);
+    assert.match(contents[0]!, /add_subdirectory\(tests\)/u);
+    const testsCMake = contents[4]!;
+    assert.match(testsCMake, /add_executable\(classifier-tests classifier_test\.(?:c|cpp)\)/u);
+    assert.match(
+      testsCMake,
+      framework === "cpputest"
+        ? /target_link_libraries\(classifier-tests PRIVATE classifier CppUTest CppUTestExt\)/u
+        : /add_library\(unity STATIC/u,
+    );
+    const existingTests = contents[5]!;
+    assert.match(existingTests, /positive/iu);
+    assert.doesNotMatch(existingTests, /negative|zero/iu);
   }
 });
