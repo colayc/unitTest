@@ -360,6 +360,13 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 	if err := walk(body, 0, map[string]int{}); err != nil {
 		return Function{}, err
 	}
+	parameterIDs := map[string]string{}
+	for _, child := range n.Inner {
+		if child != nil && child.Kind == "ParmVarDecl" && child.ID != "" {
+			parameterIDs[child.ID] = child.Name
+		}
+	}
+	f.ReturnRules = extractClosedReturnRules(body, parameterIDs)
 	f.Decision = (SafetyClassifier{}).Classify(f)
 	setEffect(&f)
 	return f, nil

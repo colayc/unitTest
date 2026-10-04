@@ -121,6 +121,35 @@ type Diagnostic struct {
 	Reason   ReasonCode `json:"reason"`
 }
 
+// ClosedExpression is a deliberately small, path-free expression model used
+// only when the analyzer can preserve the complete scalar return semantics.
+// Unsupported statements leave ReturnRules empty and therefore cannot create
+// an oracle proof.
+type ExpressionKind string
+
+const (
+	ExpressionParameter ExpressionKind = "parameter"
+	ExpressionInteger   ExpressionKind = "integer"
+	ExpressionBoolean   ExpressionKind = "boolean"
+	ExpressionEnum      ExpressionKind = "enum"
+	ExpressionUnary     ExpressionKind = "unary"
+	ExpressionBinary    ExpressionKind = "binary"
+)
+
+type ClosedExpression struct {
+	Kind     ExpressionKind    `json:"kind"`
+	Name     string            `json:"name,omitempty"`
+	Value    string            `json:"value,omitempty"`
+	Operator string            `json:"operator,omitempty"`
+	Left     *ClosedExpression `json:"left,omitempty"`
+	Right    *ClosedExpression `json:"right,omitempty"`
+}
+
+type ReturnRule struct {
+	Conditions []ClosedExpression `json:"conditions,omitempty"`
+	Result     ClosedExpression   `json:"result"`
+}
+
 // OracleProof is a closed, source-bound fact emitted only by a trusted
 // analyzer/contract importer. The current analyzer emits none; absence keeps
 // verified assertion generation closed rather than trusting runtime output.
@@ -147,6 +176,7 @@ type Function struct {
 	Excerpt        SourceExcerpt `json:"excerpt"`
 	Effect         EffectKind    `json:"effect"`
 	Decision       Decision      `json:"decision"`
+	ReturnRules    []ReturnRule  `json:"returnRules,omitempty"`
 	OracleProofs   []OracleProof `json:"oracleProofs,omitempty"`
 	originVerified bool
 }

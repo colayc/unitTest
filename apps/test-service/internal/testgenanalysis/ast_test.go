@@ -38,6 +38,23 @@ func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	}
 }
 
+func TestDecodeASTBuildsClosedReturnRulesForScalarIf(t *testing.T) {
+	program, err := decodeAST(strings.NewReader(scalarAST), 1<<20, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(program.Functions) != 1 || len(program.Functions[0].ReturnRules) != 2 {
+		t.Fatalf("return rules=%+v", program.Functions)
+	}
+	first, second := program.Functions[0].ReturnRules[0], program.Functions[0].ReturnRules[1]
+	if len(first.Conditions) != 1 || first.Conditions[0].Operator != ">" || first.Conditions[0].Left.Name != "x" || first.Result.Value != "1" {
+		t.Fatalf("first rule=%+v", first)
+	}
+	if len(second.Conditions) != 1 || second.Conditions[0].Operator != "!" || second.Result.Value != "0" {
+		t.Fatalf("second rule=%+v", second)
+	}
+}
+
 func TestNativeClangASTFixtures(t *testing.T) {
 	clang := os.Getenv("UTIDE_TESTGEN_TEST_CLANG")
 	if clang == "" {
