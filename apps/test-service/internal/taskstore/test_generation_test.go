@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,42 @@ func TestGenerationPersistenceAndRevisionCAS(t *testing.T) {
 	reopened, err := s.GetGeneration(ctx, original.ID)
 	if err != nil || reopened.State != next.State || reopened.Revision != 2 {
 		t.Fatalf("checkpoint = %+v, %v", reopened, err)
+	}
+}
+
+func TestGenerationProcessLeaseIsDurableAndOwnerBound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	run, err := s.CreateGeneration(ctx, generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := run
+	next.State = testgendomain.StateBaseline
+	next.Revision++
+	run, err = s.CheckpointGeneration(ctx, run.Revision, next, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := task.ProcessLease{TaskID: run.TaskID, HostPID: 42, HostStartIdentity: "start", ServiceInstanceID: strings.Repeat("4", 32)}
+	if err := s.PutGenerationProcessLease(ctx, lease); err != nil {
+		t.Fatalf("PutGenerationProcessLease() error = %v", err)
+	}
+	leasing, err := s.ActiveLeases(ctx)
+	if err != nil || len(leasing) != 1 || !reflect.DeepEqual(leasing[0], lease) {
+		t.Fatalf("ActiveLeases() = %+v, %v", leasing, err)
+	}
+	wrong := lease
+	wrong.ServiceInstanceID = strings.Repeat("5", 32)
+	if err := s.ReleaseGenerationProcessLease(ctx, wrong); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("wrong owner release error = %v", err)
+	}
+	if err := s.ReleaseGenerationProcessLease(ctx, lease); err != nil {
+		t.Fatalf("ReleaseGenerationProcessLease() error = %v", err)
+	}
+	leasing, err = s.ActiveLeases(ctx)
+	if err != nil || len(leasing) != 0 {
+		t.Fatalf("released ActiveLeases() = %+v, %v", leasing, err)
 	}
 }
 

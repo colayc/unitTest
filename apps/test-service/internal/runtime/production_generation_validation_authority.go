@@ -53,7 +53,8 @@ func validProductionValidationBinding(binding productionValidationBinding) bool 
 	sealed := binding
 	sealed.ValidationID = ""
 	if !validProductionDigest(binding.ValidationID) || productionValidationDigest(sealed) != binding.ValidationID ||
-		!validProductionObjectID(binding.RunID) || !validProductionDigest(binding.TaskDigest) || !validProductionDigest(binding.SnapshotDigest) ||
+		!validProductionObjectID(binding.RunID) || !validProductionObjectID(binding.TaskID) ||
+		binding.TaskDigest != productionBytesDigest([]byte(binding.TaskID)) || !validProductionDigest(binding.SnapshotDigest) ||
 		!validProductionDigest(binding.EditDigest) || !validProductionDigest(binding.AssertionDigest) ||
 		binding.ProjectID == "" || len(binding.ProjectID) > 128 || !validProductionDigest(binding.WorkspaceGeneration) ||
 		!validProductionObjectID(binding.CoverageReportID) || !validProductionDigest(binding.BaselineReportDigest) ||

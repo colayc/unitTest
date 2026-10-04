@@ -29,7 +29,8 @@ var errProductionValidationUnavailable = errors.New("production test generation 
 // bytes and closed run identities. The authority uses it to register the
 // candidate that testgenvalidate.Validator later resolves independently.
 type productionValidationBinding struct {
-	ValidationID, RunID, TaskDigest, SnapshotDigest  string
+	ValidationID, RunID, TaskID, TaskDigest          string
+	SnapshotDigest                                   string
 	EditDigest, AssertionDigest, TargetSymbol        string
 	ProjectID, WorkspaceGeneration, CoverageReportID string
 	BaselineReportDigest, SourceRelativePath         string
@@ -282,7 +283,7 @@ func productionValidationBindingFor(run testgendomain.Run, target generationTarg
 		targetSymbol = "file:" + target.fileID
 	}
 	binding := productionValidationBinding{
-		RunID: run.ID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: testgendomain.NewGenerationRecord(run.Request).SnapshotDigest,
+		RunID: run.ID, TaskID: run.TaskID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: testgendomain.NewGenerationRecord(run.Request).SnapshotDigest,
 		EditDigest: productionValidationDigest(pipeline.editSet.Files), AssertionDigest: assertionDigest,
 		ProjectID: target.projectID, WorkspaceGeneration: target.workspaceGeneration, CoverageReportID: target.coverageReportID,
 		BaselineReportDigest: target.request.BaselineReportDigest, SourceRelativePath: target.sourceRelativePath, SourceDigest: target.sourceDigest,
@@ -328,7 +329,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 		return GenerationStageResult{}, err
 	}
 	validated, err := adapter.validator.Validate(ctx, testgenvalidate.ValidationRequest{
-		TaskID: binding.TaskDigest, CandidateID: binding.ValidationID, Edits: pipeline.editSet,
+		TaskID: binding.TaskDigest, ProcessTaskID: binding.TaskID, CandidateID: binding.ValidationID, Edits: pipeline.editSet,
 		BaselineCoverage: input.BaselineCoverage, Metrics: input.Metrics, Assertion: evidence,
 	})
 	if err != nil {
@@ -438,12 +439,12 @@ func (adapter *productionGenerationValidation) loadRecord(ctx context.Context, r
 	if err != nil || !bytes.Equal(canonical, encoded) || persisted.Version != 1 || !reflect.DeepEqual(persisted.Candidate, candidate) ||
 		persisted.Binding.RunID != run.ID || persisted.Binding.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest ||
 		persisted.Binding.ValidationID != productionValidationDigest(productionValidationBinding{
-			RunID: persisted.Binding.RunID, TaskDigest: persisted.Binding.TaskDigest, SnapshotDigest: persisted.Binding.SnapshotDigest,
+			RunID: persisted.Binding.RunID, TaskID: persisted.Binding.TaskID, TaskDigest: persisted.Binding.TaskDigest, SnapshotDigest: persisted.Binding.SnapshotDigest,
 			EditDigest: persisted.Binding.EditDigest, AssertionDigest: persisted.Binding.AssertionDigest, TargetSymbol: persisted.Binding.TargetSymbol,
 			ProjectID: persisted.Binding.ProjectID, WorkspaceGeneration: persisted.Binding.WorkspaceGeneration, CoverageReportID: persisted.Binding.CoverageReportID,
 			BaselineReportDigest: persisted.Binding.BaselineReportDigest, SourceRelativePath: persisted.Binding.SourceRelativePath, SourceDigest: persisted.Binding.SourceDigest,
 			TargetFunctionIDs: append([]string(nil), persisted.Binding.TargetFunctionIDs...), CoverageFunctionIDs: append([]string(nil), persisted.Binding.CoverageFunctionIDs...), Kind: persisted.Binding.Kind,
-		}) || persisted.Binding.TaskDigest != productionBytesDigest([]byte(run.TaskID)) || !validProductionReceipts(persisted.Receipts) ||
+		}) || persisted.Binding.TaskID != run.TaskID || persisted.Binding.TaskDigest != productionBytesDigest([]byte(run.TaskID)) || !validProductionReceipts(persisted.Receipts) ||
 		persisted.Set.RunID != run.ID || persisted.Set.SnapshotDigest != persisted.Binding.SnapshotDigest || !reflect.DeepEqual(persisted.Set.CaseIDs, []string{candidate.CaseID}) ||
 		persisted.Binding.EditDigest != productionValidationDigest(persisted.Set.Files) || !reflect.DeepEqual(candidate.PlannedEdits, productionPlannedEdits(persisted.Set.Files)) {
 		return productionValidatedRecord{}, errProductionValidationUnavailable

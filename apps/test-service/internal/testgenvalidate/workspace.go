@@ -21,7 +21,13 @@ const maxSnapshotFiles = 10000
 const maxSnapshotBytes int64 = 512 << 20
 const maxEditBytes = 4 << 20
 
-type Roots struct{ Source, Build, Artifacts, SnapshotDigest string }
+type Roots struct {
+	Source, Build, Artifacts, SnapshotDigest string
+	// TaskID and CandidateID are validator-owned identities. They let a
+	// production stage planner resolve the exact service-prepared plan without
+	// deriving authority from staged file names or process output.
+	TaskID, ProcessTaskID, CandidateID string
+}
 
 // WorkspaceSnapshotDigest returns the exact source-tree identity consumed by
 // Validator. Production authorities must use this function instead of

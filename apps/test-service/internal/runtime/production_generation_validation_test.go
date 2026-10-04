@@ -22,14 +22,16 @@ import (
 )
 
 type productionValidationPlannerFixture struct {
-	candidateID string
-	coverage    []byte
-	fail        testgenvalidate.Stage
-	stages      []testgenvalidate.Stage
+	candidateID    string
+	coverage       []byte
+	fail           testgenvalidate.Stage
+	stages         []testgenvalidate.Stage
+	processTaskIDs []string
 }
 
-func (planner *productionValidationPlannerFixture) Execute(_ context.Context, stage testgenvalidate.Stage, _ testgenvalidate.Roots) (testgenvalidate.StageEvidence, error) {
+func (planner *productionValidationPlannerFixture) Execute(_ context.Context, stage testgenvalidate.Stage, roots testgenvalidate.Roots) (testgenvalidate.StageEvidence, error) {
 	planner.stages = append(planner.stages, stage)
+	planner.processTaskIDs = append(planner.processTaskIDs, roots.ProcessTaskID)
 	if stage == planner.fail {
 		return testgenvalidate.StageEvidence{ExitCode: 1}, nil
 	}
@@ -228,6 +230,11 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	}
 	if len(authority.planner.stages) != 6 || authority.planner.stages[0] != testgenvalidate.StageConfigure || authority.planner.stages[5] != testgenvalidate.StageCoverage {
 		t.Fatalf("stages=%v", authority.planner.stages)
+	}
+	for _, taskID := range authority.planner.processTaskIDs {
+		if taskID != run.TaskID {
+			t.Fatalf("validation process task ID = %q, want %q", taskID, run.TaskID)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(authority.source, "tests", "generated", "classify_test.cpp")); !os.IsNotExist(err) {
 		t.Fatalf("validator wrote workspace: %v", err)

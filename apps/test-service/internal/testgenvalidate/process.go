@@ -36,7 +36,7 @@ type PreparedProcessExecutor struct {
 }
 
 func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots Roots) (evidence StageEvidence, err error) {
-	if ctx == nil || e.Runner == nil || e.Plan == nil || e.RecordLease == nil || e.ReleaseLease == nil || !validDigest(e.TaskID) || !validDigest(e.ServiceInstanceID) {
+	if ctx == nil || e.Runner == nil || e.Plan == nil || e.RecordLease == nil || e.ReleaseLease == nil || !validProcessIdentity(e.TaskID) || !validProcessIdentity(e.ServiceInstanceID) {
 		return evidence, ErrProcessRejected
 	}
 	spec, err := e.Plan(ctx, stage, roots)
@@ -149,6 +149,10 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		evidence.CoverageJSON = interpreted.CoverageJSON
 	}
 	return evidence, nil
+}
+
+func validProcessIdentity(value string) bool {
+	return validDigest(value) || validObjectID(value)
 }
 
 func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Roots) bool {

@@ -129,8 +129,9 @@ func productionValidationAuthorityTestFixture(t *testing.T) (*runtimeProductionV
 	if err != nil {
 		t.Fatal(err)
 	}
+	taskID := strings.Repeat("9", 32)
 	binding := productionValidationBinding{
-		RunID: strings.Repeat("8", 32), TaskDigest: strings.Repeat("9", 64), SnapshotDigest: strings.Repeat("a", 64),
+		RunID: strings.Repeat("8", 32), TaskID: taskID, TaskDigest: productionBytesDigest([]byte(taskID)), SnapshotDigest: strings.Repeat("a", 64),
 		EditDigest: strings.Repeat("b", 64), AssertionDigest: strings.Repeat("c", 64), TargetSymbol: "file:" + fileID,
 		ProjectID: "core", WorkspaceGeneration: resolver.context.index.WorkspaceGeneration, CoverageReportID: resolver.context.index.ReportID,
 		BaselineReportDigest: resolver.context.baselineReportDigest, SourceRelativePath: "src/choose.c", SourceDigest: productionBytesDigest(source),
