@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/managedtest"
 	analysis "unit-test-ide.local/test-service/internal/testgenanalysis"
 	assertion "unit-test-ide.local/test-service/internal/testgenassert"
 	"unit-test-ide.local/test-service/internal/testgendomain"
@@ -119,5 +120,29 @@ func TestProductionGenerationPipelineRejectsInvalidTargetBeforeAnalysis(t *testi
 	}
 	if analyzer.calls != 0 {
 		t.Fatalf("analyzer calls=%d", analyzer.calls)
+	}
+}
+
+func TestProductionGenerationPipelineRendersMaintainableManagedCases(t *testing.T) {
+	pipeline, target, _, _ := productionPipelineFixture(t)
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := exactGeneratedSource(result.editSet.Files)
+	if !ok {
+		t.Fatal("managed source missing")
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 4096)
+	if err != nil || len(document.Blocks) != len(result.vectors) {
+		t.Fatalf("managed document blocks=%d vectors=%d err=%v\n%s", len(document.Blocks), len(result.vectors), err, source)
+	}
+	for _, block := range document.Blocks {
+		if block.FunctionID != target.functionID || !strings.HasPrefix(block.CaseID, "utc_") {
+			t.Fatalf("unmaintainable managed block: %+v", block)
+		}
 	}
 }

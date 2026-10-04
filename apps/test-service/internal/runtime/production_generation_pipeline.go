@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ type generationTarget struct {
 	analyzerBundleDigest                        string
 	language                                    render.Language
 	headerPath                                  string
+	managed                                     bool
+	sourceRelativePath                          string
 	analysis                                    analysis.AnalysisRequest
 	gap                                         solver.CoverageGap
 	renderTarget                                render.TargetMetadata
@@ -95,6 +98,7 @@ func (target generationTarget) valid() bool {
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||
 		target.gap.CompileSnapshot != target.compileSnapshotDigest || target.gap.SymbolID == "" ||
+		target.managed && (target.request.ManagedGapID != target.gapID || target.sourceRelativePath == "") ||
 		target.wallTime <= 0 || target.wallTime > 24*time.Hour || target.candidateLimit < 1 || target.candidateLimit > 1000 ||
 		target.memoryBytes < 1024 || target.memoryBytes > 1<<30 || target.concurrency < 1 || target.concurrency > 16 {
 		return false
@@ -107,6 +111,33 @@ func (target generationTarget) valid() bool {
 	default:
 		return false
 	}
+}
+
+func productionUnified(name, before, after string) string {
+	if before == after {
+		return ""
+	}
+	oldLines := strings.Split(strings.TrimSuffix(before, "\n"), "\n")
+	if before == "" {
+		oldLines = nil
+	}
+	newLines := strings.Split(strings.TrimSuffix(after, "\n"), "\n")
+	if after == "" {
+		newLines = nil
+	}
+	var builder strings.Builder
+	start := 0
+	if len(oldLines) > 0 {
+		start = 1
+	}
+	fmt.Fprintf(&builder, "--- a/%s\n+++ b/%s\n@@ -%d,%d +1,%d @@\n", name, name, start, len(oldLines), len(newLines))
+	for _, line := range oldLines {
+		builder.WriteString("-" + line + "\n")
+	}
+	for _, line := range newLines {
+		builder.WriteString("+" + line + "\n")
+	}
+	return builder.String()
 }
 
 func forbiddenGeneratedText(value string) bool {
@@ -174,6 +205,21 @@ func (pipeline *productionGenerationPipeline) Generate(ctx context.Context, targ
 		Program: program, SymbolID: target.gap.SymbolID, Language: target.language,
 		HeaderPath: target.headerPath, Target: target.renderTarget, Cases: cases,
 	})
+	if err == nil && target.managed {
+		managed, managedErr := render.RenderManagedFile(render.ManagedRenderInput{
+			Program: program, ProjectID: target.projectID, SourceRelativePath: target.sourceRelativePath, SourceFileID: target.fileID,
+			Framework: target.framework, GeneratorVersion: "unit-test-service-v1", Language: target.language,
+			HeaderPath: target.headerPath, Target: target.renderTarget,
+			Functions: []render.ManagedFunctionInput{{FunctionID: target.functionID, SymbolID: target.gap.SymbolID, Cases: cases}},
+		})
+		if managedErr != nil || len(editSet.Files) != 2 || editSet.Files[0].Path != managed.Path {
+			return productionPipelineResult{}, errProductionGenerationUnavailable
+		}
+		editSet.Files[0].Content = append([]byte(nil), managed.Content...)
+		editSet.Files[0].AfterDigest = productionBytesDigest(managed.Content)
+		editSet.Diff = productionUnified(managed.Path, "", string(managed.Content)) +
+			productionUnified(editSet.Files[1].Path, target.renderTarget.ExistingCMake, string(editSet.Files[1].Content))
+	}
 	if err != nil || forbiddenGeneratedText(editSet.Diff) {
 		return productionPipelineResult{}, errProductionGenerationUnavailable
 	}
