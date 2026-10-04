@@ -31,6 +31,7 @@ var errProductionValidationUnavailable = errors.New("production test generation 
 type productionValidationBinding struct {
 	ValidationID, RunID, TaskDigest, SnapshotDigest string
 	EditDigest, AssertionDigest, TargetSymbol       string
+	TargetFunctionIDs                               []string
 	Kind                                            testgendomain.CandidateKind
 }
 
@@ -145,20 +146,22 @@ func productionManagedCases(target generationTarget, pipeline productionPipeline
 		return nil, nil
 	}
 	document, err := managedtest.ParseDocument(source, int64(len(source)), 200)
-	if err != nil || len(document.Blocks) != len(pipeline.vectors) || len(document.Blocks) == 0 {
+	if err != nil || len(document.Blocks) != len(pipeline.vectors) || len(document.Blocks) == 0 || len(pipeline.functions) == 0 {
 		return nil, errProductionValidationUnavailable
 	}
 	byID := make(map[string]productionManagedCaseEvidence, len(pipeline.vectors))
-	for _, vector := range pipeline.vectors {
-		caseID, err := managedtest.StableCaseID(target.projectID, target.sourceRelativePath, target.functionID, vector.ID)
-		if err != nil {
-			return nil, errProductionValidationUnavailable
-		}
-		byID[caseID] = productionManagedCaseEvidence{
-			CaseID: caseID, FunctionID: target.functionID, ScenarioID: vector.ID,
-			ProjectID: target.projectID, SourceFileID: target.fileID, SourceRelativePath: target.sourceRelativePath,
-			TestRelativePath: target.renderTarget.TestPath, GeneratorVersion: "unit-test-service-v1", Framework: target.framework,
-			ToolchainID: target.toolchainID, SourceDigest: target.sourceDigest,
+	for _, function := range pipeline.functions {
+		for _, vector := range function.vectors {
+			caseID, err := managedtest.StableCaseID(target.projectID, target.sourceRelativePath, function.functionID, vector.ID)
+			if err != nil {
+				return nil, errProductionValidationUnavailable
+			}
+			byID[caseID] = productionManagedCaseEvidence{
+				CaseID: caseID, FunctionID: function.functionID, ScenarioID: vector.ID,
+				ProjectID: target.projectID, SourceFileID: target.fileID, SourceRelativePath: target.sourceRelativePath,
+				TestRelativePath: target.renderTarget.TestPath, GeneratorVersion: "unit-test-service-v1", Framework: target.framework,
+				ToolchainID: target.toolchainID, SourceDigest: target.sourceDigest,
+			}
 		}
 	}
 	result := make([]productionManagedCaseEvidence, 0, len(document.Blocks))
@@ -252,10 +255,27 @@ func productionValidationBindingFor(run testgendomain.Run, target generationTarg
 	if err != nil {
 		return productionValidationBinding{}, err
 	}
+	targetFunctions := make([]string, 0, len(pipeline.functions))
+	seen := map[string]bool{}
+	for _, function := range pipeline.functions {
+		if !validProductionDigest(function.symbolID) || seen[function.symbolID] {
+			return productionValidationBinding{}, errProductionValidationUnavailable
+		}
+		seen[function.symbolID] = true
+		targetFunctions = append(targetFunctions, function.symbolID)
+	}
+	sort.Strings(targetFunctions)
+	if len(targetFunctions) == 0 {
+		return productionValidationBinding{}, errProductionValidationUnavailable
+	}
+	targetSymbol := "fn:" + target.primarySymbolID()
+	if target.request.Scope == testgendomain.ScopeFile {
+		targetSymbol = "file:" + target.fileID
+	}
 	binding := productionValidationBinding{
 		RunID: run.ID, TaskDigest: productionBytesDigest([]byte(run.TaskID)), SnapshotDigest: testgendomain.NewGenerationRecord(run.Request).SnapshotDigest,
 		EditDigest: productionValidationDigest(pipeline.editSet.Files), AssertionDigest: assertionDigest,
-		TargetSymbol: "fn:" + target.gap.SymbolID, Kind: kind,
+		TargetSymbol: targetSymbol, TargetFunctionIDs: targetFunctions, Kind: kind,
 	}
 	binding.ValidationID = productionValidationDigest(binding)
 	return binding, nil
@@ -331,7 +351,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	set := testgenpublish.CandidateSet{
 		RunID: run.ID, SnapshotDigest: binding.SnapshotDigest, CaseIDs: []string{caseID},
 		TestTarget: target.renderTarget.TestTarget, ProductionTarget: target.renderTarget.ProductionTarget,
-		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.gap.SymbolID,
+		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.primarySymbolID(),
 		Files: append([]testgenrender.StagedFile(nil), pipeline.editSet.Files...), Diff: pipeline.editSet.Diff,
 	}
 	if binding.Kind == testgendomain.KindCharacterization {
@@ -408,7 +428,8 @@ func (adapter *productionGenerationValidation) loadRecord(ctx context.Context, r
 		persisted.Binding.RunID != run.ID || persisted.Binding.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest ||
 		persisted.Binding.ValidationID != productionValidationDigest(productionValidationBinding{
 			RunID: persisted.Binding.RunID, TaskDigest: persisted.Binding.TaskDigest, SnapshotDigest: persisted.Binding.SnapshotDigest,
-			EditDigest: persisted.Binding.EditDigest, AssertionDigest: persisted.Binding.AssertionDigest, TargetSymbol: persisted.Binding.TargetSymbol, Kind: persisted.Binding.Kind,
+			EditDigest: persisted.Binding.EditDigest, AssertionDigest: persisted.Binding.AssertionDigest, TargetSymbol: persisted.Binding.TargetSymbol,
+			TargetFunctionIDs: append([]string(nil), persisted.Binding.TargetFunctionIDs...), Kind: persisted.Binding.Kind,
 		}) || persisted.Binding.TaskDigest != productionBytesDigest([]byte(run.TaskID)) || !validProductionReceipts(persisted.Receipts) ||
 		persisted.Set.RunID != run.ID || persisted.Set.SnapshotDigest != persisted.Binding.SnapshotDigest || !reflect.DeepEqual(persisted.Set.CaseIDs, []string{candidate.CaseID}) ||
 		persisted.Binding.EditDigest != productionValidationDigest(persisted.Set.Files) || !reflect.DeepEqual(candidate.PlannedEdits, productionPlannedEdits(persisted.Set.Files)) {
@@ -506,7 +527,7 @@ func (adapter *productionGenerationValidation) Minimize(ctx context.Context, run
 			return GenerationStageResult{}, err
 		}
 		var persisted productionValidationEvidence
-		if json.Unmarshal(encoded, &persisted) != nil || persisted.Binding != binding {
+		if json.Unmarshal(encoded, &persisted) != nil || !reflect.DeepEqual(persisted.Binding, binding) {
 			return GenerationStageResult{}, errProductionValidationUnavailable
 		}
 		record, err = adapter.loadRecord(ctx, run, persisted.Candidate)

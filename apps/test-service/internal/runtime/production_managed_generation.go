@@ -119,6 +119,29 @@ func managedReviewStatus(operation managedtest.Operation) (managedtest.Status, b
 	}
 }
 
+func productionManagedAllowedFunctions(index coveragedetail.Index, target testgendomain.ManagedTarget, scope testgendomain.Scope) (map[string]bool, bool) {
+	if scope != testgendomain.ScopeFile {
+		if !validProductionObjectID(target.FunctionID) {
+			return nil, false
+		}
+		return map[string]bool{target.FunctionID: true}, true
+	}
+	allowed := map[string]bool{}
+	for _, file := range index.Files {
+		if file.ID != target.FileID {
+			continue
+		}
+		for _, function := range file.Functions {
+			if function.Status != coveragedetail.StatusCurrent || !validProductionObjectID(function.ID) || allowed[function.ID] {
+				return nil, false
+			}
+			allowed[function.ID] = true
+		}
+		break
+	}
+	return allowed, len(allowed) > 0
+}
+
 // buildProductionManagedReview turns the exact validated managed source into a
 // durable review. It never writes the workspace. The same ReconcileInput is
 // retained for the later selected-output publication plan.
@@ -133,7 +156,11 @@ func buildProductionManagedReview(input productionManagedReviewInput) (managedte
 		ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
 		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID(),
 	}, input.Index)
-	if err != nil || target.SourceDigest != run.Request.SourceDigest || target.FunctionID == "" || target.SelectionID(run.Request.Scope) != run.Request.ManagedSelectionID() {
+	if err != nil || target.SourceDigest != run.Request.SourceDigest || target.SelectionID(run.Request.Scope) != run.Request.ManagedSelectionID() {
+		return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
+	}
+	allowedFunctions, ok := productionManagedAllowedFunctions(input.Index, target, run.Request.Scope)
+	if !ok {
 		return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 	}
 	path, generated, ok := productionManagedSource(input.Set)
@@ -155,7 +182,7 @@ func buildProductionManagedReview(input productionManagedReviewInput) (managedte
 		return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 	}
 	for _, block := range generatedDocument.Blocks {
-		if block.FunctionID != target.FunctionID {
+		if !allowedFunctions[block.FunctionID] {
 			return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 		}
 	}
@@ -167,7 +194,7 @@ func buildProductionManagedReview(input productionManagedReviewInput) (managedte
 	sort.Slice(accepted, func(left, right int) bool { return accepted[left].CaseID < accepted[right].CaseID })
 	for _, record := range accepted {
 		if !managedtest.ValidRecord(record) || record.ProjectID != run.Request.ProjectID || record.SourceFileID != target.FileID ||
-			record.FunctionID != target.FunctionID || record.SourceRelativePath != target.File || record.TestRelativePath != path ||
+			!allowedFunctions[record.FunctionID] || record.SourceRelativePath != target.File || record.TestRelativePath != path ||
 			record.ToolchainID != input.Index.ToolchainID || record.SourceDigest != run.Request.SourceDigest || record.Status == managedtest.StatusInvalid {
 			return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 		}

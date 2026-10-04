@@ -74,7 +74,7 @@ func (authority *productionValidationAuthorityFixture) resolve(_ context.Context
 	}
 	return testgenvalidate.ResolvedCandidate{
 		ID: candidateID, Kind: authority.binding.Kind, TargetSymbol: authority.binding.TargetSymbol,
-		TargetFileURI: "source.c", TargetLines: []int64{1},
+		TargetFileURI: "source.c", TargetLines: []int64{1}, TargetFunctionIDs: append([]string(nil), authority.binding.TargetFunctionIDs...),
 		BaselineSHA256:       digestRuntimeValidation(authority.baseline),
 		SourceSnapshotDigest: authority.fingerprint,
 		AssertionDigest:      authority.binding.AssertionDigest,
@@ -323,6 +323,20 @@ func TestProductionValidationPersistsManagedCaseAndReceiptEvidence(t *testing.T)
 	_, replayed, replayReceipt, replayDigest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
 	if err != nil || !reflect.DeepEqual(replayed, cases) || !bytes.Equal(replayReceipt, receipt) || replayDigest != digest {
 		t.Fatalf("replayed managed evidence cases=%+v digest=%s err=%v", replayed, replayDigest, err)
+	}
+}
+
+func TestProductionValidationBindsEveryGeneratedFileFunction(t *testing.T) {
+	adapter, run, _, _, authority, _ := productionValidationFixture(t)
+	_, _, _, _, target, pipeline := productionManagedFileFixture(t)
+	run.Request = target.request
+	validated, err := adapter.Validate(context.Background(), run, target, pipeline)
+	if err != nil || len(validated.Candidates) != 1 {
+		t.Fatalf("file validation=%+v err=%v", validated, err)
+	}
+	want := []string{strings.Repeat("c", 64), strings.Repeat("e", 64)}
+	if authority.binding.TargetSymbol != "file:"+target.fileID || !reflect.DeepEqual(authority.binding.TargetFunctionIDs, want) {
+		t.Fatalf("binding=%+v want functions=%v", authority.binding, want)
 	}
 }
 

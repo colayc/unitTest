@@ -11,8 +11,10 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/managedtest"
 	"unit-test-ide.local/test-service/internal/task"
+	analysis "unit-test-ide.local/test-service/internal/testgenanalysis"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenpublish"
+	solver "unit-test-ide.local/test-service/internal/testgensolver"
 )
 
 func productionManagedFixture(t *testing.T) (testgendomain.Run, coveragedetail.Index, testgenpublish.CandidateSet, []byte, generationTarget, productionPipelineResult) {
@@ -68,6 +70,84 @@ func productionManagedFixture(t *testing.T) (testgendomain.Run, coveragedetail.I
 		RunID: run.ID, SnapshotDigest: run.Record.SnapshotDigest, CaseIDs: []string{groupID},
 		TestTarget: target.renderTarget.TestTarget, ProductionTarget: target.renderTarget.ProductionTarget,
 		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.gap.SymbolID,
+		Files: result.editSet.Files, Diff: result.editSet.Diff,
+	}
+	return run, index, set, generated, target, result
+}
+
+func productionManagedFileFixture(t *testing.T) (testgendomain.Run, coveragedetail.Index, testgenpublish.CandidateSet, []byte, generationTarget, productionPipelineResult) {
+	t.Helper()
+	pipeline, target, analyzer, _ := productionPipelineFixture(t)
+	second := analyzer.program.Functions[0]
+	second.SymbolID = strings.Repeat("e", 64)
+	second.Name = "classify_other"
+	second.Parameters = []analysis.Parameter{{Name: "y", Type: analysis.Type{Kind: analysis.TypeInteger, Spelling: "int", BitWidth: 32, Signed: true}}}
+	second.Branches = nil
+	second.OracleProofs = nil
+	analyzer.program.Functions = append(analyzer.program.Functions, second)
+
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	fileID, err := coveragedetail.StableFileID(target.projectID, target.sourceRelativePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := coveragedetail.StableFunctionID(fileID, "linkage:_Z8classifyi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := coveragedetail.StableFunctionID(fileID, "linkage:_Z14classify_otheri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondID < firstID {
+		firstID, secondID = secondID, firstID
+		analyzer.program.Functions[0], analyzer.program.Functions[1] = analyzer.program.Functions[1], analyzer.program.Functions[0]
+	}
+	target.fileID, target.functionID, target.gapID = fileID, "", ""
+	target.gap = solver.CoverageGap{}
+	target.functions = []generationFunctionTarget{
+		{functionID: firstID, gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: analyzer.program.Functions[0].SymbolID, CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+		{functionID: secondID, gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: analyzer.program.Functions[1].SymbolID, CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+	}
+	target.request.Scope = testgendomain.ScopeFile
+	target.request.ManagedTargetID = fileID
+	target.request.ManagedGapID = ""
+	target.request.SessionOwnerDigest = strings.Repeat("a", 64)
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, ok := exactGeneratedSource(result.editSet.Files)
+	if !ok {
+		t.Fatal("missing generated managed file source")
+	}
+	groupID := strings.Repeat("b", 32)
+	run := testgendomain.Run{
+		ID: groupID, TaskID: strings.Repeat("c", 32), Request: target.request,
+		State: testgendomain.StateAwaitingConfirmation, Revision: 8,
+		CreatedAt: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC), CandidateCount: 1,
+		ArtifactDigests: []testgendomain.ArtifactRef{{ID: strings.Repeat("d", 32), Digest: productionBytesDigest(generated)}},
+		Record:          testgendomain.NewGenerationRecord(target.request),
+	}
+	run.Record.MinimizedCaseIDs = []string{groupID}
+	index := coveragedetail.Index{
+		WorkspaceGeneration: target.workspaceGeneration, ProjectID: target.projectID,
+		ReportID: target.coverageReportID, RunID: strings.Repeat("e", 32), ToolchainID: target.toolchainID,
+		Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent},
+		Files: []coveragedetail.File{{
+			ID: fileID, RelativePath: target.sourceRelativePath, SourceSHA256: target.sourceDigest, Status: coveragedetail.StatusCurrent,
+			Functions: []coveragedetail.Function{
+				{ID: firstID, Name: analyzer.program.Functions[0].Name, Status: coveragedetail.StatusCurrent},
+				{ID: secondID, Name: analyzer.program.Functions[1].Name, Status: coveragedetail.StatusCurrent},
+			},
+		}},
+	}
+	set := testgenpublish.CandidateSet{
+		RunID: run.ID, SnapshotDigest: run.Record.SnapshotDigest, CaseIDs: []string{groupID},
+		TestTarget: target.renderTarget.TestTarget, ProductionTarget: target.renderTarget.ProductionTarget,
+		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.primarySymbolID(),
 		Files: result.editSet.Files, Diff: result.editSet.Diff,
 	}
 	return run, index, set, generated, target, result
@@ -177,6 +257,29 @@ func TestProductionManagedReviewAcceptsReportBoundFunctionRun(t *testing.T) {
 	}
 }
 
+func TestProductionManagedReviewAcceptsEveryCurrentFunctionInReportBoundFileRun(t *testing.T) {
+	run, index, set, generated, target, result := productionManagedFileFixture(t)
+	draft, _, err := buildProductionManagedReview(productionManagedReviewInput{
+		Run: run, Index: index, Set: set, SourceArtifactID: run.ArtifactDigests[0].ID, Current: []byte{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := managedtest.ParseDocument(generated, int64(len(generated)), 200)
+	if err != nil || len(document.Blocks) != len(result.vectors) || len(draft.Candidates) != len(document.Blocks) {
+		t.Fatalf("blocks=%d vectors=%d candidates=%d err=%v", len(document.Blocks), len(result.vectors), len(draft.Candidates), err)
+	}
+	allowed := map[string]bool{}
+	for _, function := range target.functions {
+		allowed[function.functionID] = true
+	}
+	for _, block := range document.Blocks {
+		if !allowed[block.FunctionID] {
+			t.Fatalf("review accepted unrelated function %s", block.FunctionID)
+		}
+	}
+}
+
 func TestProductionManagedBaselineAcceptsExactFileFunctionAndGapTargets(t *testing.T) {
 	_, index, _, _, target, _ := productionManagedFixture(t)
 	materializer := &productionManagedMaterializer{current: productionManagedIndexFixture{index: index}}
@@ -237,6 +340,39 @@ func TestProductionManagedCandidateSetUsesExecutableCaseIDsAndEvidence(t *testin
 		if !managedtest.ValidRecord(record) || managed.CaseIDs[position] != strings.TrimPrefix(record.CaseID, "utc_") || record.AcceptedBlockDigest != document.Blocks[position].Digest {
 			t.Fatalf("record %d = %+v", position, record)
 		}
+	}
+}
+
+func TestProductionManagedFileCandidateSetRetainsMaintainableRecordsForEveryFunction(t *testing.T) {
+	run, index, set, generated, target, result := productionManagedFileFixture(t)
+	candidate := testgendomain.Candidate{CaseID: set.CaseIDs[0], Kind: testgendomain.KindVerified, StagedSourceArtifact: run.ArtifactDigests[0]}
+	cases, err := productionManagedCases(target, result, generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, _, err := buildProductionManagedReview(productionManagedReviewInput{
+		Run: run, Index: index, Set: set, SourceArtifactID: candidate.StagedSourceArtifact.ID, Current: []byte{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := []byte(`{"version":1,"validated":true}`)
+	materializer := &productionManagedMaterializer{
+		candidates: productionManagedCandidateFixture{values: []testgendomain.Candidate{candidate}},
+		evidence:   productionManagedEvidenceFixture{set: set, cases: cases, receipt: receipt}, current: productionManagedIndexFixture{index: index},
+		preimages: &managedPublisherFixture{ready: true, preimages: map[string][]byte{set.Files[0].Path: []byte{}}},
+		registry:  productionManagedRegistryFixture{}, reviews: &productionManagedReviewFixture{},
+	}
+	managed, err := materializer.ManagedCandidateSet(context.Background(), run, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functions := map[string]bool{}
+	for _, record := range managed.Managed.Records {
+		functions[record.FunctionID] = true
+	}
+	if len(managed.Managed.Records) != len(result.vectors) || len(functions) != len(target.functions) {
+		t.Fatalf("records=%d vectors=%d functions=%v", len(managed.Managed.Records), len(result.vectors), functions)
 	}
 }
 

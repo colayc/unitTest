@@ -37,6 +37,13 @@ type generationTarget struct {
 	candidateLimit                              int
 	memoryBytes                                 int64
 	concurrency                                 int
+	functions                                   []generationFunctionTarget
+}
+
+type generationFunctionTarget struct {
+	functionID string
+	gapID      string
+	gap        solver.CoverageGap
 }
 
 type productionAnalyzer interface {
@@ -54,8 +61,16 @@ type productionPipelineResult struct {
 	program      analysis.Program
 	vectors      []solver.InputVector
 	observations []assertion.Observation
+	functions    []productionPipelineFunction
 	editSet      render.StagedEditSet
 	stages       []string
+}
+
+type productionPipelineFunction struct {
+	functionID, symbolID string
+	vectors              []solver.InputVector
+	observations         []assertion.Observation
+	cases                []render.Case
 }
 
 type productionGenerationPipeline struct {
@@ -86,20 +101,52 @@ func validProductionObjectID(value string) bool {
 
 func (target generationTarget) validResolvedScope() bool {
 	if !target.managed {
-		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID)
+		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) && validProductionGap(target.gap, target.compileSnapshotDigest)
 	}
 	switch target.request.Scope {
 	case testgendomain.ScopeSymbol:
 		return validProductionObjectID(target.functionID) && target.gapID == "" &&
-			target.request.ManagedTargetID == target.functionID && target.gap.Kind == solver.GapFunction
+			target.request.ManagedTargetID == target.functionID && target.gap.Kind == solver.GapFunction &&
+			validProductionGap(target.gap, target.compileSnapshotDigest) && len(target.functions) == 0
+	case testgendomain.ScopeFile:
+		if target.functionID != "" || target.gapID != "" || target.request.ManagedTargetID != target.fileID ||
+			len(target.functions) == 0 || len(target.functions) > target.candidateLimit {
+			return false
+		}
+		previous := ""
+		for _, function := range target.functions {
+			if !validProductionObjectID(function.functionID) || function.functionID <= previous || function.gapID != "" ||
+				function.gap.Kind != solver.GapFunction || !validProductionGap(function.gap, target.compileSnapshotDigest) {
+				return false
+			}
+			previous = function.functionID
+		}
+		return true
 	case testgendomain.ScopeCoverageGap:
 		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) &&
-			target.request.ManagedGapID == target.gapID
+			target.request.ManagedGapID == target.gapID && validProductionGap(target.gap, target.compileSnapshotDigest) && len(target.functions) == 0
 	default:
-		// File generation needs a bounded multi-function execution plan. It must
-		// stay unavailable until that plan is implemented atomically.
 		return false
 	}
+}
+
+func validProductionGap(gap solver.CoverageGap, compileSnapshot string) bool {
+	return gap.CompileSnapshot == compileSnapshot && validProductionDigest(gap.SymbolID) && gap.AnalyzerVersion != ""
+}
+
+func (target generationTarget) selectedFunctions() []generationFunctionTarget {
+	if target.request.Scope == testgendomain.ScopeFile {
+		return append([]generationFunctionTarget(nil), target.functions...)
+	}
+	return []generationFunctionTarget{{functionID: target.functionID, gapID: target.gapID, gap: target.gap}}
+}
+
+func (target generationTarget) primarySymbolID() string {
+	selected := target.selectedFunctions()
+	if len(selected) == 0 {
+		return ""
+	}
+	return selected[0].gap.SymbolID
 }
 
 func (target generationTarget) valid() bool {
@@ -114,7 +161,6 @@ func (target generationTarget) valid() bool {
 		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.toolchainID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||
-		target.gap.CompileSnapshot != target.compileSnapshotDigest || target.gap.SymbolID == "" ||
 		target.managed && target.sourceRelativePath == "" ||
 		target.wallTime <= 0 || target.wallTime > 24*time.Hour || target.candidateLimit < 1 || target.candidateLimit > 1000 ||
 		target.memoryBytes < 1024 || target.memoryBytes > 1<<30 || target.concurrency < 1 || target.concurrency > 16 {
@@ -167,6 +213,38 @@ func forbiddenGeneratedText(value string) bool {
 	return false
 }
 
+func (pipeline *productionGenerationPipeline) solveFunction(ctx context.Context, program analysis.Program, selected generationFunctionTarget, budget solver.Budget) (analysis.Program, productionPipelineFunction, error) {
+	vectors, diagnostics, err := pipeline.solver.Solve(ctx, program, selected.gap, budget)
+	if err != nil || len(vectors) == 0 || len(diagnostics) != 0 {
+		return analysis.Program{}, productionPipelineFunction{}, errProductionGenerationUnavailable
+	}
+	sort.Slice(vectors, func(left, right int) bool { return vectors[left].ID < vectors[right].ID })
+	program, observations, err := pipeline.oracle.Bind(ctx, program, selected.gap.SymbolID, vectors)
+	if err != nil || len(observations) != len(vectors) {
+		return analysis.Program{}, productionPipelineFunction{}, errProductionGenerationUnavailable
+	}
+	byCandidate := make(map[string]assertion.Observation, len(observations))
+	for _, observation := range observations {
+		if _, duplicate := byCandidate[observation.CandidateID]; duplicate {
+			return analysis.Program{}, productionPipelineFunction{}, errProductionGenerationUnavailable
+		}
+		byCandidate[observation.CandidateID] = observation
+	}
+	function := productionPipelineFunction{functionID: selected.functionID, symbolID: selected.gap.SymbolID, vectors: vectors}
+	for _, vector := range vectors {
+		observation, ok := byCandidate[vector.ID]
+		if !ok {
+			return analysis.Program{}, productionPipelineFunction{}, errProductionGenerationUnavailable
+		}
+		if _, _, err := assertion.Derive(program, vector, observation); err != nil {
+			return analysis.Program{}, productionPipelineFunction{}, errProductionGenerationUnavailable
+		}
+		function.observations = append(function.observations, observation)
+		function.cases = append(function.cases, render.Case{Vector: vector, Observation: observation})
+	}
+	return program, function, nil
+}
+
 func (pipeline *productionGenerationPipeline) Generate(ctx context.Context, target generationTarget) (productionPipelineResult, error) {
 	if ctx == nil || pipeline == nil || pipeline.analyzer == nil || pipeline.oracle == nil || !target.valid() {
 		return productionPipelineResult{}, errProductionGenerationUnavailable
@@ -179,55 +257,59 @@ func (pipeline *productionGenerationPipeline) Generate(ctx context.Context, targ
 		return productionPipelineResult{}, err
 	}
 	result := productionPipelineResult{program: program, stages: []string{"analyze"}}
-	vectors, diagnostics, err := pipeline.solver.Solve(ctx, program, target.gap, solver.Budget{
-		WallTime: target.wallTime, CandidateLimit: target.candidateLimit,
-		MemoryBytes: target.memoryBytes, Concurrency: target.concurrency,
-	})
-	if err != nil {
-		return productionPipelineResult{}, err
-	}
-	if len(vectors) == 0 || len(diagnostics) != 0 {
-		return productionPipelineResult{}, errProductionGenerationUnavailable
-	}
-	sort.Slice(vectors, func(left, right int) bool { return vectors[left].ID < vectors[right].ID })
-	result.vectors = vectors
-	result.stages = append(result.stages, "solve")
-	program, observations, err := pipeline.oracle.Bind(ctx, program, target.gap.SymbolID, vectors)
-	if err != nil || len(observations) != len(vectors) {
-		return productionPipelineResult{}, errProductionGenerationUnavailable
-	}
-	byCandidate := make(map[string]assertion.Observation, len(observations))
-	for _, observation := range observations {
-		if _, duplicate := byCandidate[observation.CandidateID]; duplicate {
+	selected := target.selectedFunctions()
+	generationContext, cancel := context.WithTimeout(ctx, target.wallTime)
+	defer cancel()
+	remainingCandidates := target.candidateLimit
+	seenVectors := map[string]bool{}
+	for index, functionTarget := range selected {
+		remainingFunctions := len(selected) - index
+		limit := remainingCandidates / remainingFunctions
+		if limit < 1 {
 			return productionPipelineResult{}, errProductionGenerationUnavailable
 		}
-		byCandidate[observation.CandidateID] = observation
-	}
-	cases := make([]render.Case, 0, len(vectors))
-	orderedObservations := make([]assertion.Observation, 0, len(vectors))
-	for _, vector := range vectors {
-		observation, ok := byCandidate[vector.ID]
-		if !ok {
-			return productionPipelineResult{}, errProductionGenerationUnavailable
+		remainingWall := target.wallTime
+		if deadline, ok := generationContext.Deadline(); ok {
+			remainingWall = time.Until(deadline)
 		}
-		if _, _, err := assertion.Derive(program, vector, observation); err != nil {
-			return productionPipelineResult{}, errProductionGenerationUnavailable
+		if remainingWall <= 0 {
+			return productionPipelineResult{}, context.DeadlineExceeded
 		}
-		orderedObservations = append(orderedObservations, observation)
-		cases = append(cases, render.Case{Vector: vector, Observation: observation})
+		var function productionPipelineFunction
+		program, function, err = pipeline.solveFunction(generationContext, program, functionTarget, solver.Budget{
+			WallTime: remainingWall, CandidateLimit: limit, MemoryBytes: target.memoryBytes, Concurrency: target.concurrency,
+		})
+		if err != nil {
+			return productionPipelineResult{}, err
+		}
+		for _, vector := range function.vectors {
+			if seenVectors[vector.ID] {
+				return productionPipelineResult{}, errProductionGenerationUnavailable
+			}
+			seenVectors[vector.ID] = true
+		}
+		remainingCandidates -= len(function.vectors)
+		result.functions = append(result.functions, function)
+		result.vectors = append(result.vectors, function.vectors...)
+		result.observations = append(result.observations, function.observations...)
 	}
-	result.program, result.observations = program, orderedObservations
-	result.stages = append(result.stages, "assert")
+	result.program = program
+	result.stages = append(result.stages, "solve", "assert")
+	primary := result.functions[0]
 	editSet, err := render.Render(render.RenderRequest{
-		Program: program, SymbolID: target.gap.SymbolID, Language: target.language,
-		HeaderPath: target.headerPath, Target: target.renderTarget, Cases: cases,
+		Program: program, SymbolID: primary.symbolID, Language: target.language,
+		HeaderPath: target.headerPath, Target: target.renderTarget, Cases: primary.cases,
 	})
 	if err == nil && target.managed {
+		managedFunctions := make([]render.ManagedFunctionInput, 0, len(result.functions))
+		for _, function := range result.functions {
+			managedFunctions = append(managedFunctions, render.ManagedFunctionInput{FunctionID: function.functionID, SymbolID: function.symbolID, Cases: function.cases})
+		}
 		managed, managedErr := render.RenderManagedFile(render.ManagedRenderInput{
 			Program: program, ProjectID: target.projectID, SourceRelativePath: target.sourceRelativePath, SourceFileID: target.fileID,
 			Framework: target.framework, GeneratorVersion: "unit-test-service-v1", Language: target.language,
 			HeaderPath: target.headerPath, Target: target.renderTarget,
-			Functions: []render.ManagedFunctionInput{{FunctionID: target.functionID, SymbolID: target.gap.SymbolID, Cases: cases}},
+			Functions: managedFunctions,
 		})
 		if managedErr != nil || len(editSet.Files) != 2 || editSet.Files[0].Path != managed.Path {
 			return productionPipelineResult{}, errProductionGenerationUnavailable

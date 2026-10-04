@@ -29,15 +29,27 @@ type pipelineOracleFixture struct{ calls int }
 
 func (fixture *pipelineOracleFixture) Bind(_ context.Context, program analysis.Program, symbolID string, vectors []solver.InputVector) (analysis.Program, []assertion.Observation, error) {
 	fixture.calls++
+	functionIndex := -1
+	for index := range program.Functions {
+		if program.Functions[index].SymbolID == symbolID {
+			if functionIndex != -1 {
+				return analysis.Program{}, nil, errProductionGenerationUnavailable
+			}
+			functionIndex = index
+		}
+	}
+	if functionIndex == -1 {
+		return analysis.Program{}, nil, errProductionGenerationUnavailable
+	}
 	observations := make([]assertion.Observation, 0, len(vectors))
 	for _, vector := range vectors {
 		expected := solver.Value{Kind: analysis.TypeInteger, Integer: "7"}
 		evidence := assertion.Evidence{
 			Kind: assertion.EvidenceReturnContract, Target: assertion.TargetReturn,
-			TargetDigest: symbolID, SourceDigest: program.Functions[0].Excerpt.Digest,
+			TargetDigest: symbolID, SourceDigest: program.Functions[functionIndex].Excerpt.Digest,
 			Expected: expected, Rule: assertion.RuleEqual, Stability: assertion.StabilityDeterministic,
 		}
-		program.Functions[0].OracleProofs = append(program.Functions[0].OracleProofs, analysis.OracleProof{
+		program.Functions[functionIndex].OracleProofs = append(program.Functions[functionIndex].OracleProofs, analysis.OracleProof{
 			Kind: string(evidence.Kind), CandidateID: vector.ID,
 			InputDigest: assertion.InputDigest(vector.Inputs), TargetDigest: evidence.TargetDigest,
 			SourceDigest: evidence.SourceDigest, ExpectedDigest: assertion.ValueDigest(expected), Rule: string(evidence.Rule),
@@ -170,5 +182,80 @@ func TestProductionGenerationPipelineSupportsReportBoundFunctionGeneration(t *te
 	document, err := managedtest.ParseDocument(source, int64(len(source)), 4096)
 	if err != nil || len(document.Blocks) == 0 {
 		t.Fatalf("function generation did not render maintainable cases: blocks=%d err=%v", len(document.Blocks), err)
+	}
+}
+
+func TestProductionGenerationPipelineGeneratesFileFunctionsAtomicallyWithinSharedBudget(t *testing.T) {
+	pipeline, target, analyzer, oracle := productionPipelineFixture(t)
+	second := analyzer.program.Functions[0]
+	second.SymbolID = strings.Repeat("e", 64)
+	second.Name = "classify_other"
+	second.Parameters = []analysis.Parameter{{Name: "y", Type: analysis.Type{Kind: analysis.TypeInteger, Spelling: "int", BitWidth: 32, Signed: true}}}
+	second.Branches = nil
+	second.OracleProofs = nil
+	analyzer.program.Functions = append(analyzer.program.Functions, second)
+
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	target.request.Scope = testgendomain.ScopeFile
+	target.request.ManagedTargetID = target.fileID
+	target.request.ManagedGapID = ""
+	target.functionID, target.gapID = "", ""
+	target.gap = solver.CoverageGap{}
+	target.functions = []generationFunctionTarget{
+		{functionID: strings.Repeat("3", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("c", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+		{functionID: strings.Repeat("4", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("e", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+	}
+
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := exactGeneratedSource(result.editSet.Files)
+	if !ok {
+		t.Fatal("file generation source missing")
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 4096)
+	if err != nil || len(document.Blocks) != len(result.vectors) || len(result.functions) != 2 {
+		t.Fatalf("blocks=%d vectors=%d functions=%d err=%v\n%s", len(document.Blocks), len(result.vectors), len(result.functions), err, source)
+	}
+	functionIDs := map[string]bool{}
+	caseIDs := map[string]bool{}
+	for _, block := range document.Blocks {
+		functionIDs[block.FunctionID] = true
+		if caseIDs[block.CaseID] {
+			t.Fatalf("duplicate case %s", block.CaseID)
+		}
+		caseIDs[block.CaseID] = true
+	}
+	if !functionIDs[target.functions[0].functionID] || !functionIDs[target.functions[1].functionID] || len(functionIDs) != 2 {
+		t.Fatalf("generated functions=%v", functionIDs)
+	}
+	if analyzer.calls != 1 || oracle.calls != 2 || !reflect.DeepEqual(result.stages, []string{"analyze", "solve", "assert", "render"}) {
+		t.Fatalf("analyze=%d oracle=%d stages=%v", analyzer.calls, oracle.calls, result.stages)
+	}
+}
+
+func TestProductionGenerationPipelineRejectsFileScopeWhenSharedBudgetCannotCoverEveryFunction(t *testing.T) {
+	pipeline, target, analyzer, _ := productionPipelineFixture(t)
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.request.Scope = testgendomain.ScopeFile
+	target.request.ManagedTargetID = target.fileID
+	target.request.ManagedGapID = ""
+	target.functionID, target.gapID = "", ""
+	target.gap = solver.CoverageGap{}
+	target.candidateLimit = 1
+	target.request.Budgets.CandidateCount = 1
+	target.functions = []generationFunctionTarget{
+		{functionID: strings.Repeat("3", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("c", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+		{functionID: strings.Repeat("4", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("e", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+	}
+	if _, err := pipeline.Generate(context.Background(), target); err == nil {
+		t.Fatal("file generation exceeded shared candidate budget")
+	}
+	if analyzer.calls != 0 {
+		t.Fatalf("analyzer calls=%d", analyzer.calls)
 	}
 }
