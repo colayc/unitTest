@@ -1304,12 +1304,7 @@ func fileAPIIdentity(reply cmake.FileAPIReply) string {
 }
 
 func cloneTargets(values []cmake.Target) []cmake.Target {
-	result := make([]cmake.Target, len(values))
-	for index := range values {
-		result[index] = values[index]
-		result[index].Artifacts = append([]string(nil), values[index].Artifacts...)
-	}
-	return result
+	return cmake.CloneTargets(values)
 }
 
 func resolveAllowedBuildPath(path string, roots ...string) (string, bool) {
