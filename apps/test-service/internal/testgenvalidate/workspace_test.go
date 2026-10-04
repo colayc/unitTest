@@ -9,6 +9,29 @@ import (
 	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
+func TestWorkspaceSnapshotDigestUsesValidatorIdentity(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "source.c")
+	if err := os.WriteFile(path, []byte("int value(void) { return 1; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, internal, err := sourceFingerprint(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := WorkspaceSnapshotDigest(root)
+	if err != nil || public != internal {
+		t.Fatalf("WorkspaceSnapshotDigest() = %q, %v; want %q", public, err, internal)
+	}
+	if err := os.WriteFile(path, []byte("int value(void) { return 2; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WorkspaceSnapshotDigest(root)
+	if err != nil || changed == public {
+		t.Fatalf("changed WorkspaceSnapshotDigest() = %q, %v; original %q", changed, err, public)
+	}
+}
+
 func TestValidateRejectsEscapingAndHardLinkedSnapshotFiles(t *testing.T) {
 	for _, kind := range []string{"symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {

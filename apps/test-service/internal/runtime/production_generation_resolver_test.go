@@ -103,6 +103,29 @@ func TestProductionGenerationResolverRejectsChangedOrUnsupportedAuthority(t *tes
 	}
 }
 
+func TestProductionManagedProtocolSelectionRejectsAmbiguousSelectors(t *testing.T) {
+	fileID := strings.Repeat("1", 32)
+	functionID := strings.Repeat("2", 32)
+	gapID := strings.Repeat("3", 32)
+	reportID := strings.Repeat("4", 32)
+	targetID := strings.Repeat("5", 32)
+
+	tests := []generationv16.TestGenerationStartRequestV16{
+		{Scope: generationv16.File, FileID: &fileID, FunctionID: &functionID, CoverageReportID: &reportID},
+		{Scope: generationv16.File, FileID: &fileID, CoverageGapID: &gapID, CoverageReportID: &reportID},
+		{Scope: generationv16.Symbol, FileID: &fileID, FunctionID: &functionID, CoverageReportID: &reportID},
+		{Scope: generationv16.Symbol, FunctionID: &functionID, CoverageGapID: &gapID, CoverageReportID: &reportID},
+		{Scope: generationv16.TestGenerationScopeV16CoverageGap, FileID: &fileID, CoverageGapID: &gapID, CoverageReportID: &reportID},
+		{Scope: generationv16.TestGenerationScopeV16CoverageGap, FunctionID: &functionID, CoverageGapID: &gapID, CoverageReportID: &reportID},
+		{Scope: generationv16.File, FileID: &fileID, TargetID: &targetID, CoverageReportID: &reportID},
+	}
+	for index, input := range tests {
+		if _, _, ok := productionManagedProtocolSelection(input); ok {
+			t.Fatalf("ambiguous selector %d accepted: %+v", index, input)
+		}
+	}
+}
+
 func productionResolverFixture(t *testing.T) (*productionGenerationTargetResolver, *productionResolverAuthorityFixture, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) {
 	t.Helper()
 	root, target := productionCompileBindingFixture(t)

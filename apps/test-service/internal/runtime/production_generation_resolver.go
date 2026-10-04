@@ -243,17 +243,26 @@ func productionSelectedFunctions(index coveragedetail.Index, selected testgendom
 }
 
 func productionManagedProtocolSelection(input generationv16.TestGenerationStartRequestV16) (testgendomain.Scope, string, bool) {
-	if input.CoverageReportID == nil {
+	if input.CoverageReportID == nil || input.TargetID != nil {
 		return "", "", false
 	}
 	switch input.Scope {
 	case generationv16.Symbol:
+		if input.FileID != nil || input.CoverageGapID != nil {
+			return "", "", false
+		}
 		value, ok := productionOptionalString(input.FunctionID)
 		return testgendomain.ScopeSymbol, value, ok
 	case generationv16.File:
+		if input.FunctionID != nil || input.CoverageGapID != nil {
+			return "", "", false
+		}
 		value, ok := productionOptionalString(input.FileID)
 		return testgendomain.ScopeFile, value, ok
 	case generationv16.TestGenerationScopeV16CoverageGap:
+		if input.FileID != nil || input.FunctionID != nil {
+			return "", "", false
+		}
 		value, ok := productionOptionalString(input.CoverageGapID)
 		return testgendomain.ScopeCoverageGap, value, ok
 	default:

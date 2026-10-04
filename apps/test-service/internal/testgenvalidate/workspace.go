@@ -23,6 +23,16 @@ const maxEditBytes = 4 << 20
 
 type Roots struct{ Source, Build, Artifacts, SnapshotDigest string }
 
+// WorkspaceSnapshotDigest returns the exact source-tree identity consumed by
+// Validator. Production authorities must use this function instead of
+// reimplementing the fingerprint algorithm, otherwise a candidate could be
+// prepared against a different workspace identity than the isolated validator
+// later enforces.
+func WorkspaceSnapshotDigest(root string) (string, error) {
+	_, digest, err := sourceFingerprint(root)
+	return digest, err
+}
+
 func sourceFingerprint(root string) (map[string]string, string, error) {
 	if !directDirectory(root) {
 		return nil, "", errIsolation
