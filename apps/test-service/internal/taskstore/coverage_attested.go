@@ -51,6 +51,13 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 	if _, err := validateCoverageReportForRun(report, run, run.TaskID); err != nil || run.Request.ProjectID != q.ProjectID || run.Request.WorkspaceGeneration != q.WorkspaceGeneration {
 		return coveragedetail.Index{}, storageError("validate attested CoverageReport owner", err)
 	}
+	testRun, err := scanTestRun(tx.QueryRowContext(ctx, testRunSelect+` WHERE run_id=?`, run.TestRunID))
+	if err != nil {
+		return coveragedetail.Index{}, storageError("read attested TestRun", err)
+	}
+	if testRun.RunID != run.TestRunID || testRun.TaskID != run.TaskID || testRun.ProjectID != q.ProjectID {
+		return coveragedetail.Index{}, storageError("validate attested TestRun owner", nil)
+	}
 	h, err := readDetailHeader(ctx, tx, report)
 	if err != nil {
 		return coveragedetail.Index{}, err
@@ -64,7 +71,7 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 	if h.projectValue.Status != coveragedetail.StatusCurrent {
 		return coveragedetail.Index{}, coveragedetail.ErrStale
 	}
-	index := coveragedetail.Index{ProjectID: h.project, ReportID: report.ID, RunID: h.runID, WorkspaceGeneration: h.workspace, Toolchain: report.Toolchain, Project: h.projectValue}
+	index := coveragedetail.Index{ProjectID: h.project, ReportID: report.ID, RunID: h.runID, WorkspaceGeneration: h.workspace, ToolchainID: testRun.ToolchainID, Toolchain: report.Toolchain, Project: h.projectValue}
 	if err := loadAttestedFiles(ctx, tx, &index); err != nil {
 		return coveragedetail.Index{}, err
 	}

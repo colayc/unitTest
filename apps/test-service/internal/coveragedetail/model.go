@@ -80,10 +80,14 @@ type Index struct {
 	ProjectID           string
 	ReportID            string
 	RunID               string
-	Toolchain           coveragedomain.ToolchainSnapshot
-	Project             Project
-	Files               []File
-	Gaps                []Gap
+	// ToolchainID identifies the exact test-run toolchain that produced this
+	// coverage index. Toolchain contains the normalized coverage snapshot;
+	// managed generation needs both bindings and must not infer this ID.
+	ToolchainID string
+	Toolchain   coveragedomain.ToolchainSnapshot
+	Project     Project
+	Files       []File
+	Gaps        []Gap
 }
 
 type BuildInput struct {
