@@ -13,14 +13,14 @@ import (
 	"unit-test-ide.local/test-service/internal/probe"
 )
 
-const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","id":"param-x","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"param-x","kind":"ParmVarDecl","name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
+const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","mangledName":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","id":"param-x","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"param-x","kind":"ParmVarDecl","name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
 
 func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	first, err := decodeAST(strings.NewReader(scalarAST), 1<<20, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Functions) != 1 || first.Functions[0].Name != "choose" || len(first.Functions[0].Parameters) != 1 || len(first.Functions[0].Branches) != 1 {
+	if len(first.Functions) != 1 || first.Functions[0].Name != "choose" || first.Functions[0].LinkageName != "choose" || len(first.Functions[0].Parameters) != 1 || len(first.Functions[0].Branches) != 1 {
 		t.Fatalf("unexpected model: %#v", first)
 	}
 	if first.Functions[0].Branches[0].Kind != BranchIf || first.Functions[0].Branches[0].Predicate.Operator != ">" {

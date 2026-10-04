@@ -268,7 +268,7 @@ func productionValidationBindingFor(run testgendomain.Run, target generationTarg
 	if len(targetFunctions) == 0 {
 		return productionValidationBinding{}, errProductionValidationUnavailable
 	}
-	targetSymbol := "fn:" + target.primarySymbolID()
+	targetSymbol := "fn:" + pipeline.primarySymbolID()
 	if target.request.Scope == testgendomain.ScopeFile {
 		targetSymbol = "file:" + target.fileID
 	}
@@ -351,7 +351,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	set := testgenpublish.CandidateSet{
 		RunID: run.ID, SnapshotDigest: binding.SnapshotDigest, CaseIDs: []string{caseID},
 		TestTarget: target.renderTarget.TestTarget, ProductionTarget: target.renderTarget.ProductionTarget,
-		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: target.primarySymbolID(),
+		FrameworkTarget: target.renderTarget.FrameworkTarget, SymbolID: pipeline.primarySymbolID(),
 		Files: append([]testgenrender.StagedFile(nil), pipeline.editSet.Files...), Diff: pipeline.editSet.Diff,
 	}
 	if binding.Kind == testgendomain.KindCharacterization {

@@ -185,11 +185,40 @@ func TestProductionGenerationPipelineSupportsReportBoundFunctionGeneration(t *te
 	}
 }
 
+func TestProductionGenerationPipelineBindsReportFunctionByExactLinkageIdentity(t *testing.T) {
+	pipeline, target, analyzer, _ := productionPipelineFixture(t)
+	analyzer.program.Functions[0].LinkageName = "_Z8classifyi"
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.request.Scope = testgendomain.ScopeSymbol
+	target.request.ManagedTargetID = target.functionID
+	target.request.ManagedGapID = ""
+	target.gapID = ""
+	target.gap.Kind = solver.GapFunction
+	target.gap.BranchID = ""
+	target.gap.Outcome = ""
+	target.gap.SymbolID = ""
+	target.linkageName = "_Z8classifyi"
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.functions) != 1 || result.functions[0].symbolID != analyzer.program.Functions[0].SymbolID {
+		t.Fatalf("functions=%+v", result.functions)
+	}
+	analyzer.program.Functions = append(analyzer.program.Functions, analyzer.program.Functions[0])
+	if _, err := pipeline.Generate(context.Background(), target); err == nil {
+		t.Fatal("ambiguous linkage identity accepted")
+	}
+}
+
 func TestProductionGenerationPipelineGeneratesFileFunctionsAtomicallyWithinSharedBudget(t *testing.T) {
 	pipeline, target, analyzer, oracle := productionPipelineFixture(t)
 	second := analyzer.program.Functions[0]
 	second.SymbolID = strings.Repeat("e", 64)
 	second.Name = "classify_other"
+	second.LinkageName = "_Z14classify_otheri"
 	second.Parameters = []analysis.Parameter{{Name: "y", Type: analysis.Type{Kind: analysis.TypeInteger, Spelling: "int", BitWidth: 32, Signed: true}}}
 	second.Branches = nil
 	second.OracleProofs = nil
@@ -203,9 +232,10 @@ func TestProductionGenerationPipelineGeneratesFileFunctionsAtomicallyWithinShare
 	target.request.ManagedGapID = ""
 	target.functionID, target.gapID = "", ""
 	target.gap = solver.CoverageGap{}
+	analyzer.program.Functions[0].LinkageName = "_Z8classifyi"
 	target.functions = []generationFunctionTarget{
-		{functionID: strings.Repeat("3", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("c", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
-		{functionID: strings.Repeat("4", 32), gap: solver.CoverageGap{Kind: solver.GapFunction, SymbolID: strings.Repeat("e", 64), CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+		{functionID: strings.Repeat("3", 32), linkageName: "_Z8classifyi", gap: solver.CoverageGap{Kind: solver.GapFunction, CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
+		{functionID: strings.Repeat("4", 32), linkageName: "_Z14classify_otheri", gap: solver.CoverageGap{Kind: solver.GapFunction, CompileSnapshot: target.compileSnapshotDigest, AnalyzerVersion: "clang-ir-v1"}},
 	}
 
 	result, err := pipeline.Generate(context.Background(), target)

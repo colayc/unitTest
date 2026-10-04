@@ -28,6 +28,7 @@ type generationTarget struct {
 	analyzerBundleDigest                        string
 	language                                    render.Language
 	headerPath                                  string
+	linkageName                                 string
 	managed                                     bool
 	sourceRelativePath                          string
 	analysis                                    analysis.AnalysisRequest
@@ -41,9 +42,10 @@ type generationTarget struct {
 }
 
 type generationFunctionTarget struct {
-	functionID string
-	gapID      string
-	gap        solver.CoverageGap
+	functionID  string
+	gapID       string
+	linkageName string
+	gap         solver.CoverageGap
 }
 
 type productionAnalyzer interface {
@@ -73,6 +75,13 @@ type productionPipelineFunction struct {
 	cases                []render.Case
 }
 
+func (result productionPipelineResult) primarySymbolID() string {
+	if len(result.functions) == 0 {
+		return ""
+	}
+	return result.functions[0].symbolID
+}
+
 type productionGenerationPipeline struct {
 	analyzer productionAnalyzer
 	oracle   productionOracle
@@ -99,15 +108,27 @@ func validProductionObjectID(value string) bool {
 	return len(value) == 32 && validProductionDigest(value+value)
 }
 
+func validProductionLinkage(value string) bool {
+	if value == "" || len(value) > 8192 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character < 0x21 || character > 0x7e || character == '/' || character == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 func (target generationTarget) validResolvedScope() bool {
 	if !target.managed {
-		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) && validProductionGap(target.gap, target.compileSnapshotDigest)
+		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) && validProductionGap(target.gap, target.linkageName, target.compileSnapshotDigest)
 	}
 	switch target.request.Scope {
 	case testgendomain.ScopeSymbol:
 		return validProductionObjectID(target.functionID) && target.gapID == "" &&
 			target.request.ManagedTargetID == target.functionID && target.gap.Kind == solver.GapFunction &&
-			validProductionGap(target.gap, target.compileSnapshotDigest) && len(target.functions) == 0
+			validProductionGap(target.gap, target.linkageName, target.compileSnapshotDigest) && len(target.functions) == 0
 	case testgendomain.ScopeFile:
 		if target.functionID != "" || target.gapID != "" || target.request.ManagedTargetID != target.fileID ||
 			len(target.functions) == 0 || len(target.functions) > target.candidateLimit {
@@ -116,7 +137,7 @@ func (target generationTarget) validResolvedScope() bool {
 		previous := ""
 		for _, function := range target.functions {
 			if !validProductionObjectID(function.functionID) || function.functionID <= previous || function.gapID != "" ||
-				function.gap.Kind != solver.GapFunction || !validProductionGap(function.gap, target.compileSnapshotDigest) {
+				function.gap.Kind != solver.GapFunction || !validProductionGap(function.gap, function.linkageName, target.compileSnapshotDigest) {
 				return false
 			}
 			previous = function.functionID
@@ -124,21 +145,21 @@ func (target generationTarget) validResolvedScope() bool {
 		return true
 	case testgendomain.ScopeCoverageGap:
 		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) &&
-			target.request.ManagedGapID == target.gapID && validProductionGap(target.gap, target.compileSnapshotDigest) && len(target.functions) == 0
+			target.request.ManagedGapID == target.gapID && validProductionGap(target.gap, target.linkageName, target.compileSnapshotDigest) && len(target.functions) == 0
 	default:
 		return false
 	}
 }
 
-func validProductionGap(gap solver.CoverageGap, compileSnapshot string) bool {
-	return gap.CompileSnapshot == compileSnapshot && validProductionDigest(gap.SymbolID) && gap.AnalyzerVersion != ""
+func validProductionGap(gap solver.CoverageGap, linkageName, compileSnapshot string) bool {
+	return gap.CompileSnapshot == compileSnapshot && (validProductionDigest(gap.SymbolID) || validProductionLinkage(linkageName)) && gap.AnalyzerVersion != ""
 }
 
 func (target generationTarget) selectedFunctions() []generationFunctionTarget {
 	if target.request.Scope == testgendomain.ScopeFile {
 		return append([]generationFunctionTarget(nil), target.functions...)
 	}
-	return []generationFunctionTarget{{functionID: target.functionID, gapID: target.gapID, gap: target.gap}}
+	return []generationFunctionTarget{{functionID: target.functionID, gapID: target.gapID, linkageName: target.linkageName, gap: target.gap}}
 }
 
 func (target generationTarget) primarySymbolID() string {
@@ -147,6 +168,31 @@ func (target generationTarget) primarySymbolID() string {
 		return ""
 	}
 	return selected[0].gap.SymbolID
+}
+
+func bindProductionFunctions(program analysis.Program, selected []generationFunctionTarget) ([]generationFunctionTarget, error) {
+	result := append([]generationFunctionTarget(nil), selected...)
+	seen := map[string]bool{}
+	for index := range result {
+		match := -1
+		for functionIndex, function := range program.Functions {
+			if result[index].gap.SymbolID != "" && function.SymbolID != result[index].gap.SymbolID ||
+				result[index].linkageName != "" && function.LinkageName != result[index].linkageName {
+				continue
+			}
+			if match != -1 {
+				return nil, errProductionGenerationUnavailable
+			}
+			match = functionIndex
+		}
+		if match == -1 || !validProductionDigest(program.Functions[match].SymbolID) ||
+			program.Functions[match].Decision.Kind != analysis.DecisionSupported || seen[program.Functions[match].SymbolID] {
+			return nil, errProductionGenerationUnavailable
+		}
+		seen[program.Functions[match].SymbolID] = true
+		result[index].gap.SymbolID = program.Functions[match].SymbolID
+	}
+	return result, nil
 }
 
 func (target generationTarget) valid() bool {
@@ -257,7 +303,10 @@ func (pipeline *productionGenerationPipeline) Generate(ctx context.Context, targ
 		return productionPipelineResult{}, err
 	}
 	result := productionPipelineResult{program: program, stages: []string{"analyze"}}
-	selected := target.selectedFunctions()
+	selected, err := bindProductionFunctions(program, target.selectedFunctions())
+	if err != nil {
+		return productionPipelineResult{}, err
+	}
 	generationContext, cancel := context.WithTimeout(ctx, target.wallTime)
 	defer cancel()
 	remainingCandidates := target.candidateLimit

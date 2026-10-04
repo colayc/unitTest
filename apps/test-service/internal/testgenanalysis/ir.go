@@ -166,6 +166,7 @@ type OracleProof struct {
 type Function struct {
 	SymbolID       string        `json:"symbolId"`
 	Name           string        `json:"name"`
+	LinkageName    string        `json:"linkageName,omitempty"`
 	ReturnType     Type          `json:"returnType"`
 	Parameters     []Parameter   `json:"parameters"`
 	LocalTypes     []Type        `json:"localTypes"`
