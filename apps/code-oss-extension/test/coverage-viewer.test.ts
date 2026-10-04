@@ -24,7 +24,7 @@ test("coverage viewer rejects wrong artifact kind, invalid UTF-8, oversized data
 });
 
 test("coverage tree viewer preserves status badges and service-backed navigation coordinates", () => {
-  const item = coverageTreeItem({ kind: "function", id: "f", label: "math::add [stale]", status: "stale", metrics: { functions: { covered: 0, total: 1, percent: 0, coveredDelta: -1 }, lines: { covered: 1, total: 2, percent: 50, coveredDelta: 0 }, branches: { covered: 0, total: 0, percent: 100, coveredDelta: 0 } }, relativePath: "src/math.cpp", startLine: 8 });
+  const item = coverageTreeItem({ kind: "function", id: "f", coverageReportId: "e".repeat(32), label: "math::add [stale]", status: "stale", metrics: { functions: { covered: 0, total: 1, percent: 0, coveredDelta: -1 }, lines: { covered: 1, total: 2, percent: 50, coveredDelta: 0 }, branches: { covered: 0, total: 0, percent: 100, coveredDelta: 0 } }, relativePath: "src/math.cpp", startLine: 8 });
   assert.equal(item.label, "math::add [stale]");
   assert.equal(item.description, "stale");
   assert.equal(item.command, "unitTestIde.openCoverageDetail");

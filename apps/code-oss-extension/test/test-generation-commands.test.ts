@@ -109,12 +109,12 @@ test("managed commands use only authoritative IDs and leave the v1.5 command set
   const generation = { startManaged: async (selection: unknown) => { managedCalls.push(["generate", selection]); } };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
   registerManagedTestCommands({ subscriptions: [] }, generation, review, status, managedHost, { appendLine: (line: string) => output.push(line), dispose() {} });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "1".repeat(32) });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ fileId: "2".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "1".repeat(32), coverageReportId: "4".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ fileId: "2".repeat(32), coverageReportId: "4".repeat(32) });
   await fixture.handlers.get("unitTestIde.generateManagedTestsForCoverageGap")!({ coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) });
   assert.deepEqual(managedCalls.slice(0, 3), [
-    ["generate", { scope: "symbol", functionId: "1".repeat(32) }],
-    ["generate", { scope: "file", fileId: "2".repeat(32) }],
+    ["generate", { scope: "symbol", functionId: "1".repeat(32), coverageReportId: "4".repeat(32) }],
+    ["generate", { scope: "file", fileId: "2".repeat(32), coverageReportId: "4".repeat(32) }],
     ["generate", { scope: "coverage-gap", coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) }]
   ]);
   await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "../wrong" });
@@ -150,9 +150,12 @@ test("coverage tree context supplies authoritative file and function IDs to mana
   const review: any = { available: async () => true };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
   registerManagedTestCommands({ subscriptions: [] }, { startManaged: async (value: unknown) => { starts.push(value); } }, review, status, fixture.host, { appendLine() {}, dispose() {} });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ kind: "file", id: "1".repeat(32) });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ kind: "function", id: "2".repeat(32) });
-  assert.deepEqual(starts, [{ scope: "file", fileId: "1".repeat(32) }, { scope: "symbol", functionId: "2".repeat(32) }]);
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ kind: "file", id: "1".repeat(32), coverageReportId: "3".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ kind: "function", id: "2".repeat(32), coverageReportId: "3".repeat(32) });
+  assert.deepEqual(starts, [
+    { scope: "file", fileId: "1".repeat(32), coverageReportId: "3".repeat(32) },
+    { scope: "symbol", functionId: "2".repeat(32), coverageReportId: "3".repeat(32) }
+  ]);
 });
 
 test("a digest-only review stays visible but never arms Apply", async () => {

@@ -565,12 +565,13 @@ export function registerManagedTestCommands(
     const input = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
     const functionId = typeof input.functionId === "string" ? input.functionId : input.kind === "function" && typeof input.id === "string" ? input.id : undefined;
     const fileId = typeof input.fileId === "string" ? input.fileId : input.kind === "file" && typeof input.id === "string" ? input.id : undefined;
-    const selection = scope === "symbol" && functionId && ID32.test(functionId)
-      ? { scope, functionId } as const
-      : scope === "file" && fileId && ID32.test(fileId)
-        ? { scope, fileId } as const
-        : scope === "coverage-gap" && typeof input.coverageGapId === "string" && ID32.test(input.coverageGapId) && typeof input.coverageReportId === "string" && ID32.test(input.coverageReportId)
-          ? { scope, coverageGapId: input.coverageGapId, coverageReportId: input.coverageReportId } as const
+    const coverageReportId = typeof input.coverageReportId === "string" && ID32.test(input.coverageReportId) ? input.coverageReportId : undefined;
+    const selection = scope === "symbol" && functionId && ID32.test(functionId) && coverageReportId
+      ? { scope, functionId, coverageReportId } as const
+      : scope === "file" && fileId && ID32.test(fileId) && coverageReportId
+        ? { scope, fileId, coverageReportId } as const
+        : scope === "coverage-gap" && typeof input.coverageGapId === "string" && ID32.test(input.coverageGapId) && coverageReportId
+          ? { scope, coverageGapId: input.coverageGapId, coverageReportId } as const
           : undefined;
     if (!selection) { await host.showErrorMessage("Unit Test: Select a current, authoritative coverage function, file, or gap ID."); return; }
     try { await generation.startManaged(selection); }

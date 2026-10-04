@@ -6,6 +6,7 @@ export interface MetricLabel { readonly covered: number; readonly total: number;
 export interface CoverageTreeNode {
   readonly kind: "project" | "file" | "function" | "load-more";
   readonly id: string;
+  readonly coverageReportId: string;
   readonly label: string;
   readonly status: "current" | "stale" | "incomplete";
   readonly metrics: { readonly functions: MetricLabel; readonly lines: MetricLabel; readonly branches: MetricLabel };
@@ -117,7 +118,7 @@ export class CoverageDetailTree {
       if (!this.#current(version, binding)) return false;
       if (project.workspaceGeneration !== binding.workspaceGeneration || project.projectId !== binding.projectId || project.coverageReportId !== binding.reportId) throw new Error("Coverage detail project identity changed.");
       this.#binding = binding;
-      this.#project = { kind: "project", id: project.projectId, label: label(project.projectId, project.summary, project.status), status: project.status, metrics: metrics(project.summary) };
+      this.#project = { kind: "project", id: project.projectId, coverageReportId: binding.reportId, label: label(project.projectId, project.summary, project.status), status: project.status, metrics: metrics(project.summary) };
       return true;
     } catch {
       if (this.#current(version, binding)) this.invalidate();
@@ -163,7 +164,7 @@ export class CoverageDetailTree {
       // prove that no child regressed. Keep the file navigable and load lazily.
       return !functions || functions.nextCursor !== undefined || functions.items.some((child) => matches(child, "regressed"));
     });
-    return page.nextCursor ? [...filtered, { kind: "load-more", id, label: "Load more…", status, metrics: values, nextCursor: page.nextCursor }] : filtered;
+    return page.nextCursor ? [...filtered, { kind: "load-more", id, coverageReportId: this.#binding!.reportId, label: "Load more…", status, metrics: values, nextCursor: page.nextCursor }] : filtered;
   }
 
   async #loadFiles(cursor?: string): Promise<void> {
@@ -187,7 +188,7 @@ export class CoverageDetailTree {
   #insertFile(file: CoverageFileV16): void {
     if (this.#files.seen.has(file.fileId)) throw new Error("Duplicate coverage file.");
     this.#files.seen.add(file.fileId);
-    this.#files.items.push({ kind: "file", id: file.fileId, label: label(file.relativePath, file.summary, file.status), status: file.status, metrics: metrics(file.summary), relativePath: file.relativePath, sourceSha256: file.sourceSha256 });
+    this.#files.items.push({ kind: "file", id: file.fileId, coverageReportId: this.#binding!.reportId, label: label(file.relativePath, file.summary, file.status), status: file.status, metrics: metrics(file.summary), relativePath: file.relativePath, sourceSha256: file.sourceSha256 });
   }
 
   async #loadFunctions(fileId: string, cursor?: string): Promise<void> {
@@ -215,6 +216,6 @@ export class CoverageDetailTree {
     if (fn.fileId !== fileId || page.seen.has(fn.functionId)) throw new Error("Coverage function identity changed.");
     page.seen.add(fn.functionId);
     const file = this.#files.items.find((item) => item.id === fileId)!;
-    page.items.push({ kind: "function", id: fn.functionId, label: label(fn.qualifiedName, fn.summary, fn.status), status: fn.status, metrics: metrics(fn.summary), relativePath: file.relativePath, sourceSha256: file.sourceSha256, startLine: fn.startLine });
+    page.items.push({ kind: "function", id: fn.functionId, coverageReportId: this.#binding!.reportId, label: label(fn.qualifiedName, fn.summary, fn.status), status: fn.status, metrics: metrics(fn.summary), relativePath: file.relativePath, sourceSha256: file.sourceSha256, startLine: fn.startLine });
   }
 }
