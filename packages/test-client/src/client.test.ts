@@ -7,7 +7,7 @@ import { MAX_MESSAGE_BYTES } from "./client.js";
 import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
-import { ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
+import { ABSENT_BLOCK_DIGEST_V16, ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
 import type { TestGenerationStartRequestV16 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
@@ -435,8 +435,10 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
       },
       "managedTests/reviews/get": {
         reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, workspaceGeneration: WORKSPACE_GENERATION,
-        coverageReportId: REPORT_ID, cases: [{ caseId: CASE_ID, status: "conflicted",
-          acceptedDigest: "a".repeat(64), currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), diff: "@@" }]
+        coverageReportId: REPORT_ID, conflictKeys: [CASE_ID, "scaffold:tests/generated/src/a_test.cpp"],
+        scaffoldPreviews: [{ key: "scaffold:tests/generated/src/a_test.cpp", diff: "scaffold", diffDigest: createHash("sha256").update("scaffold").digest("hex") }],
+        cases: [{ caseId: CASE_ID, status: "conflicted", absentSides: ["accepted"],
+          acceptedDigest: ABSENT_BLOCK_DIGEST_V16, currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), diff: "@@" }]
       },
       "managedTests/reviews/apply": { reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, applied: true }
     };
@@ -450,7 +452,11 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
   assert.equal((await fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })).items[0]?.functionId, FUNCTION_ID);
   assert.equal((await fixture.client.listCoverageLines({ ...context, functionId: FUNCTION_ID })).items[0]?.baselineCount, 2);
   assert.equal((await fixture.client.listManagedTests({ ...context, projectId: "core" })).items[0]?.caseId, CASE_ID);
-  assert.equal((await fixture.client.getManagedReview({ reviewId: REVIEW_ID })).cases[0]?.status, "conflicted");
+  const managedReview = await fixture.client.getManagedReview({ reviewId: REVIEW_ID });
+  assert.equal(managedReview.cases[0]?.status, "conflicted");
+  assert.deepEqual(managedReview.cases[0]?.absentSides, ["accepted"]);
+  assert.deepEqual(managedReview.conflictKeys, [CASE_ID, "scaffold:tests/generated/src/a_test.cpp"]);
+  assert.equal(managedReview.scaffoldPreviews?.[0]?.diff, "scaffold");
   assert.equal((await fixture.client.applyManagedReview({ reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
     resolutions: [{ caseId: CASE_ID, choice: ManagedConflictChoiceV16.KeepCurrent }] })).applied, true);
   assert.deepEqual(fixture.requests.filter((request) => String(request.method).includes("details/") || String(request.method).startsWith("managedTests/"))
@@ -485,8 +491,8 @@ test("protocol 1.6 generation start sends stable function, file and coverage-gap
     budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
   };
   for (const coordinates of [
-    { scope: "symbol", functionId: FUNCTION_ID },
-    { scope: "file", fileId: FILE_ID },
+    { scope: "symbol", functionId: FUNCTION_ID, coverageReportId: REPORT_ID },
+    { scope: "file", fileId: FILE_ID, coverageReportId: REPORT_ID },
     { scope: "coverage-gap", coverageGapId: FUNCTION_ID, coverageReportId: REPORT_ID }
   ]) {
     const input = { ...base, ...coordinates } as unknown as TestGenerationStartRequestV16;

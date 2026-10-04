@@ -580,9 +580,28 @@ class ExtensionController {
     const review = this.#managedReview;
     const generation = this.#generationController;
     if (!review || !generation || this.#deactivating || !await review.available() || epoch !== this.#managedRefreshEpoch || this.#deactivating) return;
-    this.#managedCommands = registerManagedTestCommands(this.host.context, generation, review, this.#status, this.host, this.#output);
+    this.#managedCommands = registerManagedTestCommands(
+      this.host.context,
+      generation,
+      review,
+      this.#status,
+      this.host,
+      this.#output,
+      () => this.#refreshAfterManagedApply()
+    );
     await this.host.setManagedTestsAvailable?.(true);
     if (epoch !== this.#managedRefreshEpoch || this.#deactivating) this.#clearManagedCommands();
+  }
+
+  async #refreshAfterManagedApply(): Promise<void> {
+    if (this.#deactivating || this.#testingTrust() !== "trusted" || !this.#coverageController) {
+      throw new Error("The trusted testing session is no longer available.");
+    }
+    await this.#refreshTesting();
+    const state = await this.#coverageController.startCurrent();
+    if (state.state !== "available" || !state.reportId || !state.summary) {
+      throw new Error("The generated tests did not produce a current coverage report.");
+    }
   }
 
   #filterCoverageDetails(value: CoverageFilter): void {

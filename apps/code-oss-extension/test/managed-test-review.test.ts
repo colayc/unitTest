@@ -54,6 +54,53 @@ test("review records closed choices but cannot Apply without authoritative previ
   assert.equal(f.applied.length, 0);
 });
 
+test("durable generation-run preview authorizes an explicitly displayed managed review", async () => {
+  const f = fixture();
+  const authoritativeDiff = "--- a/tests/generated/src/a_test.cpp\n+++ b/tests/generated/src/a_test.cpp\n+TEST(foo)\n";
+  const preview = {
+    candidateSetDigest: "7".repeat(64),
+    diff: authoritativeDiff,
+    diffDigest: digest(authoritativeDiff),
+    confirmationDigest: "8".repeat(64)
+  };
+  f.client.getTestGenerationRun = async (id: string) => ({
+    runId: id,
+    taskId: "9".repeat(32),
+    projectId: "core",
+    workspaceGeneration: generation,
+    state: "awaiting_confirmation",
+    createdAt: new Date(),
+    lastSequence: 1,
+    preview
+  });
+
+  const loaded = await f.controller.load(reviewId);
+  assert.equal(loaded.previewAvailable, true);
+  assert.deepEqual(loaded.authoritativePreview, preview);
+  f.controller.markDisplayed(reviewDigest);
+  f.controller.choose(caseId, "use-generated");
+  assert.equal(f.controller.getState().canApply, true);
+  const applied = await f.controller.apply(reviewDigest);
+  assert.equal(applied.state, "confirmed");
+  assert.equal(f.applied.length, 1);
+});
+
+test("changed or mismatched durable generation-run preview never authorizes Apply", async () => {
+  const f = fixture();
+  f.client.getTestGenerationRun = async (id: string) => ({
+    runId: id,
+    taskId: "9".repeat(32),
+    projectId: "other",
+    workspaceGeneration: generation,
+    state: "awaiting_confirmation",
+    createdAt: new Date(),
+    lastSequence: 1,
+    preview: { candidateSetDigest: "7".repeat(64), diff: "forged", diffDigest: digest("forged"), confirmationDigest: "8".repeat(64) }
+  });
+  await assert.rejects(() => f.controller.load(reviewId), /preview|project|stale/i);
+  assert.equal(f.applied.length, 0);
+});
+
 test("stale digest, trust revocation and changed workspace or session cannot publish", async () => {
   const f = fixture();
   await f.controller.load(reviewId);

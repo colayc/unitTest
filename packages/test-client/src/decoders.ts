@@ -315,19 +315,47 @@ export function decodeManagedReviewV16(value: unknown): ManagedReviewV16 {
   const wire = record(value, "managed review");
   const cases = uniqueItems(wireArray(wire.cases, "managed review cases").map((entry) => {
     const item = record(entry, "managed review case");
+    const absentSides = item.absentSides === undefined ? undefined : uniqueItems(
+      wireArray(item.absentSides, "managed review absent sides")
+        .map((side) => wireEnum(side, ["accepted", "current", "generated"] as const, "managed review absent side")),
+      (side) => side,
+      "managed review absent side",
+    );
     return {
       caseId: wireString(item.caseId, "case id"),
       status: wireEnum(item.status, Object.values(ManagedTestStatusV16), "managed test status"),
       acceptedDigest: wireString(item.acceptedDigest, "accepted digest"),
       currentDigest: wireString(item.currentDigest, "current digest"),
       generatedDigest: wireString(item.generatedDigest, "generated digest"),
+      ...(absentSides === undefined ? {} : { absentSides }),
       ...(item.diff === undefined ? {} : { diff: wireString(item.diff, "review diff") })
     };
   }), (item) => item.caseId, "managed review case id");
+  const conflictKeys = wire.conflictKeys === undefined ? undefined : uniqueItems(
+    wireArray(wire.conflictKeys, "managed review conflict keys")
+      .map((key) => wireString(key, "managed review conflict key")),
+    (key) => key,
+    "managed review conflict key",
+  );
+  const scaffoldPreviews = wire.scaffoldPreviews === undefined ? undefined : uniqueItems(
+    wireArray(wire.scaffoldPreviews, "managed scaffold previews").map((entry) => {
+      const preview = record(entry, "managed scaffold preview");
+      const diff = wireString(preview.diff, "managed scaffold diff");
+      const diffDigest = wireString(preview.diffDigest, "managed scaffold diff digest");
+      if (createHash("sha256").update(diff, "utf8").digest("hex") !== diffDigest) {
+        throw new Error("invalid managed scaffold diff digest");
+      }
+      return { key: wireString(preview.key, "managed scaffold key"), diff, diffDigest };
+    }),
+    (preview) => preview.key,
+    "managed scaffold preview key",
+  );
   return {
     reviewId: wireString(wire.reviewId, "review id"), reviewDigest: wireString(wire.reviewDigest, "review digest"),
     workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
     coverageReportId: wireString(wire.coverageReportId, "coverage report id"), cases,
+    ...(conflictKeys === undefined ? {} : { conflictKeys }),
+    ...(scaffoldPreviews === undefined ? {} : { scaffoldPreviews }),
     ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "review cursor") })
   };
 }
