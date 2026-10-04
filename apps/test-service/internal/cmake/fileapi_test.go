@@ -291,6 +291,13 @@ func TestFileAPIReplyBindsCanonicalCompileUnitsToTargets(t *testing.T) {
 	if !reflect.DeepEqual(support.CompileUnits, want) {
 		t.Fatalf("support compile units = %#v, want %#v", support.CompileUnits, want)
 	}
+	wantSources := []TargetSource{
+		{Path: filepath.Join(fixture.sourceDir, "include", "choose.h")},
+		{Path: filepath.Join(fixture.sourceDir, "src", "choose.c"), Compiled: true},
+	}
+	if !reflect.DeepEqual(support.Sources, wantSources) {
+		t.Fatalf("support sources = %#v, want %#v", support.Sources, wantSources)
+	}
 	if len(reply.Targets[0].CompileUnits) != 0 {
 		t.Fatalf("app compile units = %#v, want none", reply.Targets[0].CompileUnits)
 	}
