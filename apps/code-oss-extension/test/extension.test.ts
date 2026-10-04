@@ -304,11 +304,14 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     statusText: ""
   };
   const manager = options.manager ?? new FakeServiceManager();
+  const extensionPath = process.platform === "win32"
+    ? "C:\\Program Files\\Unit Test IDE\\app\\extensions\\unit-test-ide"
+    : "/opt/unit-test-ide/app/extensions/unit-test-ide";
 
   const disposable = (dispose: () => void) => ({ dispose });
   const host: ExtensionHost = {
     context: { subscriptions },
-    extensionPath: "C:\\extension",
+    extensionPath,
     dataDirectory: "C:\\extension-data",
     developmentMode: options.developmentMode ?? false,
     workspaceSnapshot: () => ({
@@ -884,7 +887,20 @@ test("default activation resolves an empty executable setting to the bundled ser
 
   assert.ok(captured);
   assert.notEqual(captured.serviceExecutable, "");
-  assert.match(captured.serviceExecutable, /bin[\\/]+unit-test-service(?:\.exe)?$/);
+  assert.match(captured.serviceExecutable, /service[\\/]+unit-test-service(?:\.exe)?$/);
+  assert.deepEqual(captured.productLayout, {
+    productRoot: process.platform === "win32" ? "C:\\Program Files\\Unit Test IDE" : "/opt/unit-test-ide",
+    serviceExecutable: captured.serviceExecutable,
+    cmakeBundleRoot: process.platform === "win32"
+      ? "C:\\Program Files\\Unit Test IDE\\bundles\\cmake"
+      : "/opt/unit-test-ide/bundles/cmake",
+    coverageBundleRoot: process.platform === "win32"
+      ? "C:\\Program Files\\Unit Test IDE\\bundles\\coverage"
+      : "/opt/unit-test-ide/bundles/coverage",
+    testgenBundleRoot: process.platform === "win32"
+      ? "C:\\Program Files\\Unit Test IDE\\bundles\\testgen"
+      : "/opt/unit-test-ide/bundles/testgen"
+  });
   assert.equal(manager.startCalls, 1);
 });
 

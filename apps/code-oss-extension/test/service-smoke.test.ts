@@ -238,6 +238,9 @@ function createRealOperations(
   expected: Pick<ServiceManagerOptions, "serviceExecutable" | "workspaceRoot" | "dataDirectory">
 ): ServiceOperations {
   return {
+    async validateProductLayout() {
+      throw new Error("legacy service smoke does not use a packaged product layout");
+    },
     async prepareTokenFile(binary, tokenFile, token) {
       observations.order.push("prepare");
       observations.tokens.push(token);
