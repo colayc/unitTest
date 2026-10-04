@@ -90,6 +90,10 @@ export interface NativeManagedGenerationReceipt {
   readonly managedRecordCount: number;
   readonly baseline: CoverageSummaryV16;
   readonly final: CoverageSummaryV16;
+  readonly fileBaseline: CoverageSummaryV16;
+  readonly fileFinal: CoverageSummaryV16;
+  readonly functionBaseline: CoverageSummaryV16;
+  readonly functionFinal: CoverageSummaryV16;
 }
 
 const nativeBudgets = Object.freeze({
@@ -238,6 +242,10 @@ export async function executeNativeManagedGeneration(
     managedRecordCount: records.items.length,
     baseline: project.summary,
     final: finalProject.summary,
+    fileBaseline: file.summary,
+    fileFinal: finalFile.summary,
+    functionBaseline: fn.summary,
+    functionFinal: finalFunction.summary,
   });
 }
 

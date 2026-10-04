@@ -5,7 +5,7 @@
 TEST_GROUP(Classifier) {};
 
 TEST(Classifier, ExistingPositivePath) {
-  CHECK_EQUAL(static_cast<int>(Classification::positive), static_cast<int>(classify(1)));
+  CHECK_EQUAL(1, classify(1));
 }
 
 int main(int argc, char** argv) {

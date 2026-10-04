@@ -388,6 +388,12 @@ jobs:
           pnpm exec tsc -b tools/service-probe/tsconfig.json --force
           node C:\utide\tools\service-probe\dist\native-run.js --platform win32
           Pop-Location
+      - name: Run production Windows managed test generation
+        shell: pwsh
+        run: |
+          Push-Location C:\utide
+          node C:\utide\tools\service-probe\dist\native-test-generation.js --platform win32
+          Pop-Location
       - name: Upload failed Windows matrix diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -401,6 +407,13 @@ jobs:
         with:
           name: native-framework-windows
           path: C:\utide\.native-e2e\artifacts\windows\framework-report.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Windows managed test-generation report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-test-generation-windows
+          path: C:\utide\.native-e2e\artifacts\windows\test-generation-report.json
           if-no-files-found: error
           retention-days: 14
       - name: Remove short Windows workspace
@@ -537,6 +550,11 @@ jobs:
           UTIDE_DEBUG_FRAMEWORK: '1'
           UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
+      - name: Run production Linux managed test generation offline
+        run: >-
+          node tools/linux-offline/run.mjs --allow-sudo-root --
+          pnpm --filter @unit-test-ide/service-probe
+          test:e2e:native:test-generation -- --platform linux
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -548,6 +566,13 @@ jobs:
         with:
           name: native-framework-linux
           path: .native-e2e/artifacts/linux/framework-report.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Linux managed test-generation report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-test-generation-linux
+          path: .native-e2e/artifacts/linux/test-generation-report.json
           if-no-files-found: error
           retention-days: 14
       - name: Upload failed Linux framework diagnostics

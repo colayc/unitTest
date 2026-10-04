@@ -104,3 +104,20 @@ test("Windows native generation matrix prepares both production bundles before t
   assert.ok(testgenPrepare >= 0 && testgenCheck > testgenPrepare && shortCopy > testgenCheck);
   assert.ok(nativeRun > shortCopy, "native generation must consume the verified short-workspace bundle copies");
 });
+
+test("foundation runs and publishes real managed generation coverage closure on Windows and Linux", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  const windows = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];
+  const linux = workflow.split("  verify-linux:\n")[1]?.split("  verify-framework-matrix:\n")[0];
+  assert.ok(windows && linux, "native framework jobs are missing");
+  const windowsMatrix = windows.indexOf("native-run.js --platform win32");
+  const windowsGeneration = windows.indexOf("native-test-generation.js --platform win32");
+  assert.ok(windowsGeneration > windowsMatrix, "Windows managed generation must run after the required native matrix");
+  assert.match(windows, /name: native-test-generation-windows/u);
+  assert.match(windows, /test-generation-report\.json/u);
+  const linuxMatrix = linux.indexOf("pnpm test:e2e:native");
+  const linuxGeneration = linux.indexOf("test:e2e:native:test-generation -- --platform linux");
+  assert.ok(linuxGeneration > linuxMatrix, "Linux managed generation must run after the required native matrix");
+  assert.match(linux, /name: native-test-generation-linux/u);
+  assert.match(linux, /test-generation-report\.json/u);
+});

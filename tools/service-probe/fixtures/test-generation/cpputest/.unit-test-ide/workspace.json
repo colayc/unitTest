@@ -3,6 +3,7 @@
   "projects": [{
     "id": "classifier",
     "sourceDir": ".",
+    "fallback": { "configurations": ["Debug"], "preferredGenerator": "Ninja" },
     "tests": { "containers": [{ "ctestName": "classifier-tests", "framework": "cpputest" }] }
   }]
 }

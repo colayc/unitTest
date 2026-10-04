@@ -5,7 +5,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 void test_classifier_existing_positive_path(void) {
-  TEST_ASSERT_EQUAL(CLASSIFICATION_POSITIVE, classify(1));
+  TEST_ASSERT_EQUAL(1, classify(1));
 }
 
 int main(void) {

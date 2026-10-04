@@ -150,18 +150,25 @@ test("native managed executor uses only report-bound IDs and closes review publi
   assert.equal(receipt.managedRecordCount, 1);
   assert.deepEqual(receipt.baseline, summary);
   assert.deepEqual(receipt.final, refreshedSummary);
+  assert.deepEqual(receipt.fileBaseline, summary);
+  assert.deepEqual(receipt.fileFinal, refreshedSummary);
+  assert.deepEqual(receipt.functionBaseline, summary);
+  assert.deepEqual(receipt.functionFinal, refreshedSummary);
 });
 
 test("committed CppUTest and Unity fixtures are deterministic and do not use mock libraries", async () => {
   for (const [framework, files] of Object.entries({
-    cpputest: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.hpp", "src/classifier.cpp", "tests/CMakeLists.txt", "tests/classifier_test.cpp"],
-    unity: ["CMakeLists.txt", "unit-test-ide.json", "include/classifier.h", "src/classifier.c", "tests/CMakeLists.txt", "tests/classifier_test.c"],
+    cpputest: ["CMakeLists.txt", ".unit-test-ide/workspace.json", "include/classifier.hpp", "src/classifier.cpp", "tests/CMakeLists.txt", "tests/classifier_test.cpp"],
+    unity: ["CMakeLists.txt", ".unit-test-ide/workspace.json", "include/classifier.h", "src/classifier.c", "tests/CMakeLists.txt", "tests/classifier_test.c"],
   })) {
     const contents = await Promise.all(files.map((file) => readFile(join(fixtureRoot, framework, file), "utf8")));
     assert.doesNotMatch(contents.join("\n"), /mock|stub/iu);
     assert.doesNotMatch(contents.join("\n"), /[A-Za-z]:\\|(?:^|\s)\//u);
     const config = JSON.parse(contents[1]!);
     assert.equal(config.projects[0].tests.containers[0].framework, framework);
+    assert.match(contents[2]!, /int classify\(int value\)/u);
+    assert.match(contents[3]!, /return -1[\s\S]*return 0[\s\S]*return 1/u);
+    assert.doesNotMatch(contents[2]! + contents[3]!, /enum/iu);
     assert.match(contents[0]!, /add_subdirectory\(tests\)/u);
     const testsCMake = contents[4]!;
     assert.match(testsCMake, /add_executable\(classifier-tests classifier_test\.(?:c|cpp)\)/u);
