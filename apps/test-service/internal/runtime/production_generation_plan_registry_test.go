@@ -54,7 +54,7 @@ func TestProductionValidationPlanRegistryBindsCandidateTaskAndRoots(t *testing.T
 	registration := productionValidationPlanRegistration{candidateID: candidateID, processTaskID: taskID, target: target, build: productionBuildSnapshot{
 		generation: target.workspaceGeneration, project: productionBuildProjectFixture(target), profile: productionBuildProfileFixture(target),
 		toolchain: productionBuildToolchainFixture(target), targets: productionBuildTargetsFixture(target),
-	}}
+	}, baseline: []byte("baseline")}
 	if err := registry.RegisterValidationPlan(registration); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestProductionValidationPlanRegistryRejectsReplacementAndWrongOwner(t *test
 	registration := productionValidationPlanRegistration{candidateID: candidateID, processTaskID: taskID, target: target, build: productionBuildSnapshot{
 		generation: target.workspaceGeneration, project: productionBuildProjectFixture(target), profile: productionBuildProfileFixture(target),
 		toolchain: productionBuildToolchainFixture(target), targets: productionBuildTargetsFixture(target),
-	}}
+	}, baseline: []byte("baseline")}
 	if err := registry.RegisterValidationPlan(registration); err != nil {
 		t.Fatal(err)
 	}

@@ -108,6 +108,8 @@ type productionGenerationValidation struct {
 	validator testgenvalidate.Validator
 	authority productionValidationAuthority
 	artifacts productionGenerationArtifactStore
+	builds    *productionBuildAuthority
+	plans     *productionValidationPlanRegistry
 	mu        sync.Mutex
 	records   map[string]productionValidatedRecord
 }
@@ -116,8 +118,17 @@ func newProductionGenerationValidation(validator testgenvalidate.Validator, auth
 	return &productionGenerationValidation{validator: validator, authority: authority, artifacts: artifacts, records: make(map[string]productionValidatedRecord)}
 }
 
+func (adapter *productionGenerationValidation) bindProductionPlans(builds *productionBuildAuthority, plans *productionValidationPlanRegistry) error {
+	if adapter == nil || builds == nil || plans == nil || adapter.builds != nil || adapter.plans != nil {
+		return task.ErrStorageUnavailable
+	}
+	adapter.builds, adapter.plans = builds, plans
+	return nil
+}
+
 func (adapter *productionGenerationValidation) Ready() bool {
-	return adapter != nil && adapter.authority != nil && adapter.authority.Ready() && adapter.artifacts != nil && adapter.validator.Ready()
+	return adapter != nil && adapter.authority != nil && adapter.authority.Ready() && adapter.artifacts != nil && adapter.validator.Ready() &&
+		(adapter.builds == nil) == (adapter.plans == nil)
 }
 
 func productionValidationDigest(value any) string {
@@ -323,6 +334,19 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	input, err := adapter.authority.Prepare(ctx, binding)
 	if err != nil {
 		return GenerationStageResult{}, err
+	}
+	if adapter.plans != nil {
+		buildSnapshot, err := adapter.builds.ResolveProductionBuild(ctx, target)
+		if err != nil {
+			return GenerationStageResult{}, err
+		}
+		if err := adapter.plans.RegisterValidationPlan(productionValidationPlanRegistration{
+			candidateID: binding.ValidationID, processTaskID: run.TaskID, target: target,
+			build: buildSnapshot, baseline: append([]byte(nil), input.BaselineCoverage...),
+		}); err != nil {
+			return GenerationStageResult{}, err
+		}
+		defer adapter.plans.ReleaseValidationPlan(binding.ValidationID, run.TaskID)
 	}
 	evidence, projectedAssertion, err := assertionEvidence(binding.Kind, binding.AssertionDigest)
 	if err != nil {

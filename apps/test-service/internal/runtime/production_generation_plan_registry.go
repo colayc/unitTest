@@ -22,6 +22,10 @@ type productionValidationStageCompiler interface {
 	CompileValidationStage(context.Context, productionValidationPlanRegistration, testgenvalidate.Stage, testgenvalidate.Roots) (productionValidationProcessPlan, error)
 }
 
+type productionValidationStageReleaser interface {
+	ReleaseValidationStage(string, string)
+}
+
 type productionValidationPlanRegistry struct {
 	compiler productionValidationStageCompiler
 	mu       sync.Mutex
@@ -38,7 +42,7 @@ func newProductionValidationPlanRegistry(compiler productionValidationStageCompi
 func (registry *productionValidationPlanRegistry) RegisterValidationPlan(registration productionValidationPlanRegistration) error {
 	if registry == nil || registry.compiler == nil || !validProductionDigest(registration.candidateID) ||
 		!validProductionObjectID(registration.processTaskID) || !registration.target.valid() ||
-		!validProductionBuildSnapshot(registration.build, registration.target) || len(registration.baseline) > 32<<20 {
+		!validProductionBuildSnapshot(registration.build, registration.target) || len(registration.baseline) == 0 || len(registration.baseline) > 32<<20 {
 		return errProductionValidationUnavailable
 	}
 	registration = cloneProductionValidationPlanRegistration(registration)
@@ -69,11 +73,18 @@ func (registry *productionValidationPlanRegistry) ReleaseValidationPlan(candidat
 	if registry == nil {
 		return
 	}
+	released := false
 	registry.mu.Lock()
 	if existing, ok := registry.records[candidateID]; ok && existing.processTaskID == taskID {
 		delete(registry.records, candidateID)
+		released = true
 	}
 	registry.mu.Unlock()
+	if released {
+		if compiler, ok := registry.compiler.(productionValidationStageReleaser); ok {
+			compiler.ReleaseValidationStage(candidateID, taskID)
+		}
+	}
 }
 
 func validProductionValidationStage(stage testgenvalidate.Stage) bool {
