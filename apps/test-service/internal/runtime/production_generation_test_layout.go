@@ -143,6 +143,7 @@ func (authority *ctestProductionTestLayoutAuthority) ResolveProductionTestLayout
 	}
 	return productionTestLayout{
 		framework: wantFramework, frameworkDigest: authority.config.frameworkDigests[wantFramework], ctestName: ctestName,
+		testTargetID: descriptor.TargetID,
 		renderTarget: testgenrender.TargetMetadata{
 			TestTarget: testTarget.Name, ProductionTarget: binding.target.Name, FrameworkTarget: frameworkTarget,
 			CMakePath: cmakeRelative, TestPath: testPath, ExistingCMake: string(existing),

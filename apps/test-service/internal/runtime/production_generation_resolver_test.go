@@ -49,7 +49,8 @@ func TestProductionGenerationResolverBuildsReportBoundFileTarget(t *testing.T) {
 	}
 	if !target.valid() || target.request.Scope != testgendomain.ScopeFile || target.request.ManagedTargetID != selected.FileID ||
 		target.cmakeTargetDigest == target.toolchainID || target.cmakeTargetDigest != strings.Repeat("c", 64) ||
-		target.toolchainID != authority.context.index.ToolchainID || target.headerPath != "include/choose.h" ||
+		target.toolchainID != authority.context.index.ToolchainID || target.buildProfileID != strings.Repeat("d", 64) ||
+		target.testTargetID != strings.Repeat("1", 64) || target.headerPath != "include/choose.h" ||
 		target.ctestName != "unit" || target.renderTarget.TestPath != "tests/generated/src/choose.c_test.c" || len(target.functions) != 2 {
 		t.Fatalf("resolved target = %+v", target)
 	}
@@ -165,7 +166,7 @@ func productionResolverFixture(t *testing.T) (*productionGenerationTargetResolve
 		baselineReportDigest: strings.Repeat("6", 64),
 	}}
 	layout := productionTestLayout{
-		framework: testgendomain.FrameworkUnity, frameworkDigest: strings.Repeat("7", 64), ctestName: "unit",
+		framework: testgendomain.FrameworkUnity, frameworkDigest: strings.Repeat("7", 64), ctestName: "unit", testTargetID: strings.Repeat("1", 64),
 		renderTarget: testgenrender.TargetMetadata{
 			TestTarget: "unit_tests", ProductionTarget: "core", FrameworkTarget: "unity",
 			CMakePath: "tests/CMakeLists.txt", TestPath: "tests/generated/src/choose.c_test.c",

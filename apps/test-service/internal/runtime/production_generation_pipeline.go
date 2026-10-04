@@ -25,6 +25,7 @@ type generationTarget struct {
 	fileID, functionID, gapID, coverageReportID string
 	sourceDigest, compileSnapshotDigest         string
 	cmakeTargetDigest, toolchainID              string
+	buildProfileID, testTargetID                string
 	framework, frameworkDigest                  string
 	ctestName                                   string
 	analyzerBundleDigest                        string
@@ -211,6 +212,7 @@ func (target generationTarget) valid() bool {
 		!validProductionDigest(target.workspaceGeneration) || !validProductionObjectID(target.fileID) || !target.validResolvedScope() ||
 		!validProductionObjectID(target.coverageReportID) || !validProductionDigest(target.sourceDigest) ||
 		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.cmakeTargetDigest) || !validProductionDigest(target.toolchainID) ||
+		!validProductionDigest(target.buildProfileID) || !validProductionDigest(target.testTargetID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		!validProductionCTestName(target.ctestName) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||

@@ -27,6 +27,7 @@ func TestCTestProductionTestLayoutResolvesConfiguredExecutableAndCMake(t *testin
 		t.Fatalf("ResolveProductionTestLayout() error = %v", err)
 	}
 	if layout.framework != testgendomain.FrameworkUnity || layout.frameworkDigest != strings.Repeat("7", 64) || layout.ctestName != "unit" ||
+		layout.testTargetID != strings.Repeat("1", 64) ||
 		layout.renderTarget.TestTarget != "unit_tests" || layout.renderTarget.ProductionTarget != "core" ||
 		layout.renderTarget.FrameworkTarget != "unity" || layout.renderTarget.CMakePath != "tests/CMakeLists.txt" ||
 		layout.renderTarget.TestPath != "tests/generated/src/choose.c_test.c" || layout.renderTarget.ExistingCMake == "" {

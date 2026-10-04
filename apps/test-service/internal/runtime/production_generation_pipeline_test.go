@@ -76,6 +76,7 @@ func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, gen
 		fileID: strings.Repeat("2", 32), functionID: strings.Repeat("3", 32), gapID: strings.Repeat("4", 32),
 		coverageReportID: strings.Repeat("5", 32), sourceDigest: strings.Repeat("d", 64),
 		compileSnapshotDigest: strings.Repeat("a", 64), cmakeTargetDigest: strings.Repeat("6", 64), toolchainID: strings.Repeat("6", 64),
+		buildProfileID: strings.Repeat("5", 64), testTargetID: strings.Repeat("4", 64),
 		framework: "cpputest", frameworkDigest: strings.Repeat("7", 64), analyzerBundleDigest: strings.Repeat("8", 64),
 		ctestName: "unit",
 		language:  render.LanguageCPP, headerPath: "include/classify.h",
