@@ -124,16 +124,16 @@ func managedReviewStatus(operation managedtest.Operation) (managedtest.Status, b
 // retained for the later selected-output publication plan.
 func buildProductionManagedReview(input productionManagedReviewInput) (managedtest.ReviewDraft, []managedtest.ReconcileInput, error) {
 	run := input.Run
-	if testgendomain.ValidateRun(run) != nil || run.State != testgendomain.StateAwaitingConfirmation || run.Request.Scope != testgendomain.ScopeCoverageGap || run.Request.ManagedGapID == "" ||
+	if testgendomain.ValidateRun(run) != nil || run.State != testgendomain.StateAwaitingConfirmation || run.Request.ManagedSelectionID() == "" ||
 		input.Set.RunID != run.ID || input.Set.SnapshotDigest != testgendomain.NewGenerationRecord(run.Request).SnapshotDigest || input.Set.Managed != nil || len(input.Set.CaseIDs) != 1 ||
 		!validProductionObjectID(input.SourceArtifactID) || input.Index.ToolchainID == "" {
 		return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 	}
 	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
 		ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
-		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedGapID,
+		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID(),
 	}, input.Index)
-	if err != nil || target.SourceDigest != run.Request.SourceDigest || target.FunctionID == "" || target.GapID != run.Request.ManagedGapID {
+	if err != nil || target.SourceDigest != run.Request.SourceDigest || target.FunctionID == "" || target.SelectionID(run.Request.Scope) != run.Request.ManagedSelectionID() {
 		return managedtest.ReviewDraft{}, nil, errProductionManagedUnavailable
 	}
 	path, generated, ok := productionManagedSource(input.Set)
@@ -266,7 +266,7 @@ func (materializer *productionManagedMaterializer) acceptedAncestors(ctx context
 // FinalizeManagedReview runs only after the awaiting-confirmation checkpoint.
 // Replaying it after a crash verifies and accepts the exact existing draft.
 func (materializer *productionManagedMaterializer) FinalizeManagedReview(ctx context.Context, run testgendomain.Run) error {
-	if ctx == nil || !materializer.ready() || testgendomain.ValidateRun(run) != nil || run.State != testgendomain.StateAwaitingConfirmation || run.Request.ManagedGapID == "" {
+	if ctx == nil || !materializer.ready() || testgendomain.ValidateRun(run) != nil || run.State != testgendomain.StateAwaitingConfirmation || run.Request.ManagedSelectionID() == "" {
 		return errProductionManagedUnavailable
 	}
 	candidates, err := materializer.candidates.ListGenerationCandidates(ctx, run.ID)
@@ -289,7 +289,7 @@ func (materializer *productionManagedMaterializer) FinalizeManagedReview(ctx con
 	}
 	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
 		ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
-		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedGapID,
+		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID(),
 	}, index)
 	if err != nil {
 		return err
@@ -341,7 +341,7 @@ func (materializer *productionManagedMaterializer) PrepareManaged(ctx context.Co
 	if err != nil {
 		return testgendomain.Request{}, err
 	}
-	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner || request.SourceDigest != target.SourceDigest || request.ManagedGapID != target.GapID {
+	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner || request.SourceDigest != target.SourceDigest || request.ManagedSelectionID() != target.SelectionID(request.Scope) {
 		return testgendomain.Request{}, errProductionManagedUnavailable
 	}
 	return request, nil
@@ -384,7 +384,7 @@ func (materializer *productionManagedMaterializer) ManagedCandidateSet(ctx conte
 	}
 	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{
 		ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
-		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedGapID,
+		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID(),
 	}, index)
 	if err != nil {
 		return testgenpublish.CandidateSet{}, err

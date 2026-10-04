@@ -162,8 +162,8 @@ func (p *ManagedRuntimeProvider) StartManaged(ctx context.Context, owner string,
 	if request.SourceDigest != target.SourceDigest {
 		return generationv16.TestGenerationRunV16{}, testgendomain.ErrStaleSnapshot
 	}
-	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner || request.Scope != testgendomain.ScopeCoverageGap ||
-		request.CoverageReportID != *input.CoverageReportID || request.ManagedGapID != target.GapID ||
+	if testgendomain.ValidateRequest(request) != nil || request.SessionOwnerDigest != owner ||
+		request.CoverageReportID != *input.CoverageReportID || request.ManagedSelectionID() == "" || request.ManagedSelectionID() != target.SelectionID(request.Scope) ||
 		request.IdempotencyKey != input.IdempotencyKey || request.ProjectID != input.ProjectID ||
 		request.WorkspaceGeneration != input.WorkspaceGeneration || request.Framework != testgendomain.Framework(input.Framework) ||
 		request.Budgets != (testgendomain.Budgets{WallTimeMS: input.Budgets.WallTimeMS, CandidateCount: input.Budgets.CandidateCount, MemoryMiB: input.Budgets.MemoryMiB, Concurrency: input.Budgets.Concurrency}) ||
@@ -176,7 +176,7 @@ func (p *ManagedRuntimeProvider) StartManaged(ctx context.Context, owner string,
 	if err != nil {
 		return generationv16.TestGenerationRunV16{}, err
 	}
-	currentTarget, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: target.GapID}, latest)
+	currentTarget, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: request.Scope, ID: request.ManagedSelectionID()}, latest)
 	if err != nil {
 		return generationv16.TestGenerationRunV16{}, err
 	}
@@ -351,8 +351,7 @@ func (p *ManagedRuntimeProvider) ApplyManagedReview(ctx context.Context, request
 		return testgendomain.Run{}, err
 	}
 	if run.Revision != binding.RunRevision || run.State != testgendomain.StateAwaitingConfirmation ||
-		run.Request.Scope != testgendomain.ScopeCoverageGap || run.Request.CoverageReportID != binding.ReportID ||
-		run.Request.ManagedGapID == "" || run.Request.ProjectID != binding.ProjectID ||
+		run.Request.CoverageReportID != binding.ReportID || run.Request.ManagedSelectionID() == "" || run.Request.ProjectID != binding.ProjectID ||
 		run.Request.WorkspaceGeneration != binding.WorkspaceGeneration || run.Request.SourceDigest != draft.Manifest.SourceDigest {
 		return testgendomain.Run{}, task.ErrConflict
 	}
@@ -360,7 +359,7 @@ func (p *ManagedRuntimeProvider) ApplyManagedReview(ctx context.Context, request
 	if err != nil {
 		return testgendomain.Run{}, err
 	}
-	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: binding.ProjectID, WorkspaceGeneration: binding.WorkspaceGeneration, CoverageReportID: binding.ReportID, Scope: testgendomain.ScopeCoverageGap, ID: run.Request.ManagedGapID}, index)
+	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: binding.ProjectID, WorkspaceGeneration: binding.WorkspaceGeneration, CoverageReportID: binding.ReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID()}, index)
 	if err != nil {
 		return testgendomain.Run{}, err
 	}

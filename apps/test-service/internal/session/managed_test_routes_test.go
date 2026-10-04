@@ -279,7 +279,7 @@ func TestV16StartRejectsCallerSymbolPathAndGapCoordinates(t *testing.T) {
 	}))
 	base := map[string]any{
 		"idempotencyKey": strings.Repeat("1", 32), "workspaceGeneration": strings.Repeat("2", 64),
-		"projectId": "core", "scope": "symbol", "functionId": strings.Repeat("3", 32),
+		"projectId": "core", "scope": "symbol", "functionId": strings.Repeat("3", 32), "coverageReportId": strings.Repeat("4", 32),
 		"framework": "auto",
 		"goals":     map[string]any{"functionPercent": 70, "linePercent": 80, "branchPercent": 60},
 		"budgets":   map[string]any{"wallTimeMs": 60000, "candidateCount": 2, "memoryMiB": 64, "concurrency": 1},
@@ -301,7 +301,7 @@ func TestV16StartRejectsCallerSymbolPathAndGapCoordinates(t *testing.T) {
 	}{
 		{"wrong function ID", func(p map[string]any) { p["functionId"] = "fn:forged" }},
 		{"mixed selectors", func(p map[string]any) { p["fileId"] = strings.Repeat("5", 32) }},
-		{"extra report", func(p map[string]any) { p["coverageReportId"] = strings.Repeat("4", 32) }},
+		{"missing report", func(p map[string]any) { delete(p, "coverageReportId") }},
 	} {
 		payload := make(map[string]any, len(base))
 		for k, v := range base {

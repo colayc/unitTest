@@ -161,6 +161,22 @@ func TestProductionManagedMaterializerPersistsReviewIdempotently(t *testing.T) {
 	}
 }
 
+func TestProductionManagedReviewAcceptsReportBoundFunctionRun(t *testing.T) {
+	run, index, set, _, target, _ := productionManagedFixture(t)
+	run.Request.Scope = testgendomain.ScopeSymbol
+	run.Request.ManagedTargetID = target.functionID
+	run.Request.ManagedGapID = ""
+	run.Record = testgendomain.NewGenerationRecord(run.Request)
+	run.Record.MinimizedCaseIDs = []string{run.ID}
+	set.SnapshotDigest = run.Record.SnapshotDigest
+	draft, _, err := buildProductionManagedReview(productionManagedReviewInput{
+		Run: run, Index: index, Set: set, SourceArtifactID: run.ArtifactDigests[0].ID, Current: []byte{},
+	})
+	if err != nil || !managedtest.ValidReviewDraft(draft) || draft.Manifest.RunID != run.ID {
+		t.Fatalf("function review=%+v err=%v", draft, err)
+	}
+}
+
 func TestProductionManagedCandidateSetUsesExecutableCaseIDsAndEvidence(t *testing.T) {
 	run, index, set, generated, target, result := productionManagedFixture(t)
 	candidate := testgendomain.Candidate{CaseID: set.CaseIDs[0], Kind: testgendomain.KindVerified, StagedSourceArtifact: run.ArtifactDigests[0]}

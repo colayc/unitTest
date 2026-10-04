@@ -88,9 +88,9 @@ func validManagedStart(input generationv16.TestGenerationStartRequestV16) bool {
 	}
 	switch input.Scope {
 	case generationv16.Symbol:
-		return input.FunctionID != nil && validID(*input.FunctionID) && ids(input.FileID, input.CoverageGapID, input.TargetID, input.CoverageReportID)
+		return input.FunctionID != nil && validID(*input.FunctionID) && input.CoverageReportID != nil && validID(*input.CoverageReportID) && ids(input.FileID, input.CoverageGapID, input.TargetID)
 	case generationv16.File:
-		return input.FileID != nil && validID(*input.FileID) && ids(input.FunctionID, input.CoverageGapID, input.TargetID, input.CoverageReportID)
+		return input.FileID != nil && validID(*input.FileID) && input.CoverageReportID != nil && validID(*input.CoverageReportID) && ids(input.FunctionID, input.CoverageGapID, input.TargetID)
 	case generationv16.TestGenerationScopeV16CoverageGap:
 		return input.CoverageGapID != nil && validID(*input.CoverageGapID) && input.CoverageReportID != nil && validID(*input.CoverageReportID) && ids(input.FunctionID, input.FileID, input.TargetID)
 	case generationv16.Target:

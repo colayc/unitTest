@@ -29,6 +29,19 @@ type ManagedTarget struct {
 	File, FunctionName, SourceDigest string
 }
 
+func (target ManagedTarget) SelectionID(scope Scope) string {
+	switch scope {
+	case ScopeSymbol:
+		return target.FunctionID
+	case ScopeFile:
+		return target.FileID
+	case ScopeCoverageGap:
+		return target.GapID
+	default:
+		return ""
+	}
+}
+
 // ResolveManagedTarget requires an already source-attested current index from
 // the trusted coverage provider. IDs alone do not authorize stale reads.
 func ResolveManagedTarget(selector ManagedSelector, index coveragedetail.Index) (ManagedTarget, error) {
@@ -144,6 +157,9 @@ type Request struct {
 	File                string `json:"file,omitempty"`
 	TargetID            string `json:"targetId,omitempty"`
 	CoverageReportID    string `json:"coverageReportId,omitempty"`
+	// ManagedTargetID binds a v1.6 report-scoped function or file selection to
+	// the durable run. It is never populated from display text or a host path.
+	ManagedTargetID string `json:"managedTargetId,omitempty"`
 	// ManagedGapID binds a v1.6 report-gap selection to the durable run. It is
 	// optional for legacy v1.5 coverage-gap requests and absent in other scopes.
 	ManagedGapID           string    `json:"managedGapId,omitempty"`
@@ -161,6 +177,19 @@ type Request struct {
 	// Bound to the authenticated service credential at creation. Legacy rows
 	// without an owner remain readable internally but are not route-accessible.
 	SessionOwnerDigest string `json:"sessionOwnerDigest,omitempty"`
+}
+
+// ManagedSelectionID returns the service-issued selector bound to this run.
+// Legacy v1.5 requests have no managed selection and return an empty string.
+func (r Request) ManagedSelectionID() string {
+	switch r.Scope {
+	case ScopeSymbol, ScopeFile:
+		return r.ManagedTargetID
+	case ScopeCoverageGap:
+		return r.ManagedGapID
+	default:
+		return ""
+	}
 }
 
 func (r Request) SnapshotIdentity() SnapshotIdentity {
@@ -198,23 +227,27 @@ func ValidateRequest(r Request) error {
 	}
 	switch r.Scope {
 	case ScopeSymbol:
-		if !validSymbol(r.SymbolID) || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
+		legacy := validSymbol(r.SymbolID) && r.CoverageReportID == "" && r.ManagedTargetID == ""
+		managed := r.SymbolID == "" && validID(r.CoverageReportID) && validID(r.ManagedTargetID)
+		if (!legacy && !managed) || r.File != "" || r.TargetID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeFile:
-		if !validRelativePath(r.File) || r.SymbolID != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
+		legacy := validRelativePath(r.File) && r.CoverageReportID == "" && r.ManagedTargetID == ""
+		managed := r.File == "" && validID(r.CoverageReportID) && validID(r.ManagedTargetID)
+		if (!legacy && !managed) || r.SymbolID != "" || r.TargetID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeTarget:
-		if !validDigest(r.TargetID) || r.SymbolID != "" || r.File != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
+		if !validDigest(r.TargetID) || r.SymbolID != "" || r.File != "" || r.CoverageReportID != "" || r.ManagedTargetID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeWorkspace:
-		if r.SymbolID != "" || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedGapID != "" {
+		if r.SymbolID != "" || r.File != "" || r.TargetID != "" || r.CoverageReportID != "" || r.ManagedTargetID != "" || r.ManagedGapID != "" {
 			return ErrInvalid
 		}
 	case ScopeCoverageGap:
-		if !validID(r.CoverageReportID) || r.ManagedGapID != "" && !validID(r.ManagedGapID) || r.SymbolID != "" || r.File != "" || r.TargetID != "" {
+		if !validID(r.CoverageReportID) || r.ManagedGapID != "" && !validID(r.ManagedGapID) || r.SymbolID != "" || r.File != "" || r.TargetID != "" || r.ManagedTargetID != "" {
 			return ErrInvalid
 		}
 	default:

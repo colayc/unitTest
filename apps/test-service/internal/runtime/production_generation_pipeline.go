@@ -84,6 +84,24 @@ func validProductionObjectID(value string) bool {
 	return len(value) == 32 && validProductionDigest(value+value)
 }
 
+func (target generationTarget) validResolvedScope() bool {
+	if !target.managed {
+		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID)
+	}
+	switch target.request.Scope {
+	case testgendomain.ScopeSymbol:
+		return validProductionObjectID(target.functionID) && target.gapID == "" &&
+			target.request.ManagedTargetID == target.functionID && target.gap.Kind == solver.GapFunction
+	case testgendomain.ScopeCoverageGap:
+		return validProductionObjectID(target.functionID) && validProductionObjectID(target.gapID) &&
+			target.request.ManagedGapID == target.gapID
+	default:
+		// File generation needs a bounded multi-function execution plan. It must
+		// stay unavailable until that plan is implemented atomically.
+		return false
+	}
+}
+
 func (target generationTarget) valid() bool {
 	if testgendomain.ValidateRequest(target.request) != nil ||
 		target.request.ProjectID != target.projectID || target.request.WorkspaceGeneration != target.workspaceGeneration ||
@@ -91,14 +109,13 @@ func (target generationTarget) valid() bool {
 		target.request.CMakeTargetDigest != target.toolchainID || target.request.FrameworkBundleDigest != target.frameworkDigest ||
 		target.request.AnalyzerBundleDigest != target.analyzerBundleDigest ||
 		target.projectID == "" || len(target.projectID) > 128 ||
-		!validProductionDigest(target.workspaceGeneration) || !validProductionObjectID(target.fileID) ||
-		!validProductionObjectID(target.functionID) || !validProductionObjectID(target.gapID) ||
+		!validProductionDigest(target.workspaceGeneration) || !validProductionObjectID(target.fileID) || !target.validResolvedScope() ||
 		!validProductionObjectID(target.coverageReportID) || !validProductionDigest(target.sourceDigest) ||
 		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.toolchainID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		target.analysis.SourceDigest != target.sourceDigest || target.analysis.CompileSnapshotDigest != target.compileSnapshotDigest ||
 		target.gap.CompileSnapshot != target.compileSnapshotDigest || target.gap.SymbolID == "" ||
-		target.managed && (target.request.ManagedGapID != target.gapID || target.sourceRelativePath == "") ||
+		target.managed && target.sourceRelativePath == "" ||
 		target.wallTime <= 0 || target.wallTime > 24*time.Hour || target.candidateLimit < 1 || target.candidateLimit > 1000 ||
 		target.memoryBytes < 1024 || target.memoryBytes > 1<<30 || target.concurrency < 1 || target.concurrency > 16 {
 		return false

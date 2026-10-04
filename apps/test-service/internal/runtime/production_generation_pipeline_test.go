@@ -146,3 +146,29 @@ func TestProductionGenerationPipelineRendersMaintainableManagedCases(t *testing.
 		}
 	}
 }
+
+func TestProductionGenerationPipelineSupportsReportBoundFunctionGeneration(t *testing.T) {
+	pipeline, target, _, _ := productionPipelineFixture(t)
+	target.managed = true
+	target.sourceRelativePath = "src/classify.cpp"
+	target.request.Scope = testgendomain.ScopeSymbol
+	target.request.ManagedTargetID = target.functionID
+	target.request.ManagedGapID = ""
+	target.gapID = ""
+	target.gap.Kind = solver.GapFunction
+	target.gap.BranchID = ""
+	target.gap.Outcome = ""
+	target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+	result, err := pipeline.Generate(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := exactGeneratedSource(result.editSet.Files)
+	if !ok {
+		t.Fatal("function generation source missing")
+	}
+	document, err := managedtest.ParseDocument(source, int64(len(source)), 4096)
+	if err != nil || len(document.Blocks) == 0 {
+		t.Fatalf("function generation did not render maintainable cases: blocks=%d err=%v", len(document.Blocks), err)
+	}
+}
