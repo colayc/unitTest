@@ -260,7 +260,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         if (wireSize > 64 * 1024 * 1024) { wireOverflow = true; return; }
         wire.push(bytes);
       };
-      manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
+      manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, handshakeSupportedProtocolVersions: ["1.4", "1.3", "1.2", "1.1", "1.0"], operations: {
         spawnService(binary, args) {
           const child = spawn(binary, [
             ...args,

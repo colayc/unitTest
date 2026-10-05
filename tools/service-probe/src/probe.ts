@@ -517,7 +517,7 @@ export class TaskServiceFixture {
     return this.#instance.connector.pauseNext();
   }
 
-  connectClient(): Promise<ProtocolClient> {
+  connectClient(supportedProtocolVersions = this.#options.handshakeSupportedProtocolVersions): Promise<ProtocolClient> {
     this.#assertAvailable();
     return this.#enqueueLifecycle(async () => {
       this.#assertAvailable();
@@ -533,7 +533,7 @@ export class TaskServiceFixture {
             instance.token,
             "service-probe-secondary",
             "0.1.0",
-            this.#options.handshakeSupportedProtocolVersions
+            supportedProtocolVersions
           ),
           timeoutMs
         );

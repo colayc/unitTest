@@ -10,7 +10,8 @@ import {
   ProtocolError,
   type ProtocolClient,
   type ProtocolTaskEvent,
-  type ProtocolTaskSnapshot
+  type ProtocolTaskSnapshot,
+  type WorkspaceSnapshot
 } from "@unit-test-ide/test-client";
 import { TestSelectionModeV13 } from "@unit-test-ide/protocol-models";
 import { endpointForDirectory } from "./endpoint.js";
@@ -36,6 +37,30 @@ const V12_EVENT_NAMES = new Set([
   "task.step_finished",
   "task.diagnostic"
 ]);
+
+async function inspectWorkspaceUntilProfile(
+  client: ProtocolClient,
+  projectId: string,
+  timeoutMs: number,
+  label: string,
+): Promise<{ workspace: WorkspaceSnapshot; project: WorkspaceSnapshot["projects"][number]; profile: NonNullable<WorkspaceSnapshot["projects"][number]["buildProfiles"][number]> }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot: WorkspaceSnapshot | undefined;
+  for (;;) {
+    const remaining = Math.max(1, deadline - Date.now());
+    lastSnapshot = await withNamedTimeout(`${label} inspection`, client.inspectWorkspace(), remaining);
+    const project = lastSnapshot.projects.find((candidate) => candidate.projectId === projectId);
+    const profile = project?.buildProfiles[0];
+    if (project && profile) return { workspace: lastSnapshot, project, profile };
+    if (Date.now() >= deadline) {
+      throw new Error(`${label} did not expose a verified build profile after bounded discovery wait: ${JSON.stringify({
+        projects: lastSnapshot.projects.map((item) => ({ projectId: item.projectId, profiles: item.buildProfiles.length })),
+        diagnostics: lastSnapshot.diagnostics,
+      })}`);
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  }
+}
 
 test("Unix endpoint stays within sockaddr_un when the workspace path is long", async () => {
   const longWorkspace = `/home/runner/work/${"repository-".repeat(16)}/${"repository-".repeat(16)}/build`;
@@ -637,11 +662,12 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       devCMakeExecutable: cmakeFixture
     });
     stage = "inspect workspace";
-    let workspace = await withNamedTimeout(
-      "deterministic workspace inspection",
-      fixture.client.inspectWorkspace(),
-      WORKSPACE_INSPECTION_TIMEOUT_MS
-    );
+    let workspace = (await inspectWorkspaceUntilProfile(
+      fixture.client,
+      "root",
+      WORKSPACE_INSPECTION_TIMEOUT_MS,
+      "deterministic workspace",
+    )).workspace;
     const selectFixtureProfile = (snapshot: typeof workspace) => {
       const selectedProject = snapshot.projects.find((candidate) => candidate.projectId === "root");
       const selectedProfile = selectedProject?.buildProfiles[0];
@@ -680,11 +706,12 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
         throw error;
       }
       stage = "refresh workspace after stale generation";
-      workspace = await withNamedTimeout(
-        "stale-generation workspace refresh",
-        fixture.client.inspectWorkspace(),
-        WORKSPACE_INSPECTION_TIMEOUT_MS
-      );
+      workspace = (await inspectWorkspaceUntilProfile(
+        fixture.client,
+        "root",
+        WORKSPACE_INSPECTION_TIMEOUT_MS,
+        "stale-generation workspace",
+      )).workspace;
       selected = selectFixtureProfile(workspace);
       stage = "retry first build";
       first = await startFirstBuild();
@@ -849,17 +876,13 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
       devCMakeExecutable: cmakeFixture
     });
     stage = "inspect test workspace";
-    const workspace = await withNamedTimeout(
-      "test workspace inspection",
-      fixture.client.inspectWorkspace(),
-      WORKSPACE_INSPECTION_TIMEOUT_MS
+    const inspected = await inspectWorkspaceUntilProfile(
+      fixture.client,
+      "root",
+      WORKSPACE_INSPECTION_TIMEOUT_MS,
+      "test workspace",
     );
-    const project = workspace.projects.find(
-      (candidate) => candidate.projectId === "root"
-    );
-    const profile = project?.buildProfiles[0];
-    assert.ok(project, "test fixture project must be inspectable");
-    assert.ok(profile, "test fixture must expose a build profile");
+    const { workspace, project, profile } = inspected;
 
     stage = "subscribe test events";
     const subscription = await withNamedTimeout(

@@ -27,6 +27,7 @@ import {
   ProtocolError,
   type EventSubscription,
   type ProtocolClient,
+  type ProtocolVersion,
   type ProtocolTaskEvent,
   type ProtocolTaskSnapshot,
 } from "@unit-test-ide/test-client";
@@ -73,6 +74,7 @@ const nativeLivenessReconnectBackoffMs = 250;
 const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
+const LATEST_PROTOCOL_VERSIONS = ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] as const satisfies ReadonlyArray<ProtocolVersion>;
 
 async function requireProductionGenerationCapabilities(client: ProtocolClient): Promise<void> {
   const capabilities = await client.getCapabilities();
@@ -256,11 +258,20 @@ async function runNativeMatrixWithDependencies(
         trustedWorkspace: true,
         ...productionBundleRoots(dependencies.repositoryRoot, options.platform),
       });
-      await withNamedTimeout(
-        `${family} production generation capability`,
-        requireProductionGenerationCapabilities(fixture.client),
-        nativeTimeoutMs,
-      );
+      // Keep the main fixture on the legacy task projection used by the
+      // native build/test scenarios. Probe the Phase 10 capability on a
+      // separate v1.6 session because v1.5/v1.6 intentionally do not expose
+      // the owner-less task routes used by these scenarios.
+      const generationClient = await fixture.connectClient(LATEST_PROTOCOL_VERSIONS);
+      try {
+        await withNamedTimeout(
+          `${family} production generation capability`,
+          requireProductionGenerationCapabilities(generationClient),
+          nativeTimeoutMs,
+        );
+      } finally {
+        generationClient.close();
+      }
       const snapshot = await withNamedTimeout(
         `${family} workspace inspection`,
         fixture.client.inspectWorkspace(),
