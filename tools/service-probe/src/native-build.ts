@@ -262,7 +262,9 @@ async function runNativeMatrixWithDependencies(
       // native build/test scenarios. Probe the Phase 10 capability on a
       // separate v1.6 session because v1.5/v1.6 intentionally do not expose
       // the owner-less task routes used by these scenarios.
-      const generationClient = await fixture.connectClient(LATEST_PROTOCOL_VERSIONS);
+      const generationClient = typeof fixture.connectClient === "function"
+        ? await fixture.connectClient(LATEST_PROTOCOL_VERSIONS)
+        : fixture.client;
       try {
         await withNamedTimeout(
           `${family} production generation capability`,
@@ -270,7 +272,7 @@ async function runNativeMatrixWithDependencies(
           nativeTimeoutMs,
         );
       } finally {
-        generationClient.close();
+        if (generationClient !== fixture.client) generationClient.close();
       }
       const snapshot = await withNamedTimeout(
         `${family} workspace inspection`,
