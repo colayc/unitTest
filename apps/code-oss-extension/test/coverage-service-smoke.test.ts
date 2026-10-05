@@ -64,6 +64,8 @@ const coverageFixtureRoot = join(
   "coverage"
 );
 const cmakeBundleRoot = join(repositoryRoot, ".bundled-tools", "cmake");
+const coverageBundleRoot = join(repositoryRoot, ".superpowers", "runtime", "coverage-bundle", "windows-x64");
+const testgenBundleRoot = join(repositoryRoot, ".superpowers", "cache", "testgen-bundle", "22.1.8", "windows-x64");
 const evidencePath = join(
   repositoryRoot,
   ".native-e2e",
@@ -349,7 +351,12 @@ function coverageOperations(
     },
     spawnService(binary, args): ChildProcessWithoutNullStreams {
       const launchArguments = useCMakeBundle
-        ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
+        ? [
+            ...args,
+            "--cmake-bundle-root", cmakeBundleRoot,
+            "--coverage-bundle-root", coverageBundleRoot,
+            "--testgen-bundle-root", testgenBundleRoot
+          ]
         : [...args];
       return spawn(binary, launchArguments, {
         windowsHide: true,
@@ -706,7 +713,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       fixture.toolsetPreflightBinary,
       fixture.guardianBinary,
       fixture.goCache,
-      cmakeBundleRoot
+      cmakeBundleRoot,
+      coverageBundleRoot,
+      testgenBundleRoot
     );
     await buildService(fixture);
     const gate = await runAfterVerifiedCoverageToolsetPreflight({

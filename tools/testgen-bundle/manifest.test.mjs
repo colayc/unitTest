@@ -90,6 +90,19 @@ test("foundation verification prepares and checks the offline Clang bundle befor
   }
 });
 
+test("coverage smoke jobs prepare and check both product bundles before starting Service", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  for (const job of ["coverage-linux-gcc", "coverage-windows-clang-cl"]) {
+    const section = workflow.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    const testgenPrepare = section.indexOf("pnpm prepare:testgen-bundle");
+    const testgenCheck = section.indexOf("pnpm check:testgen-bundle");
+    const smoke = section.indexOf("test:coverage-service-smoke");
+    assert.ok(testgenPrepare >= 0 && testgenCheck > testgenPrepare && smoke > testgenCheck,
+      `${job} must prepare and check test-generation roots before coverage smoke`);
+  }
+});
+
 test("Windows native generation matrix prepares both production bundles before the short workspace copy", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
   const section = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];

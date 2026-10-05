@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test from "node:test";
 import { discoverFrameworkCatalog } from "./native-framework-matrix.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import { startService } from "./probe.js";
 import {
   hashCompiledFrameworkExecutable,
@@ -28,10 +29,12 @@ const FIXTURE_FILES = {
 } as const;
 
 test("actual Service inspection binds staged profiles to the requested compiler", async (t) => {
+  const serviceOptions = await cmakeServiceOptions(t);
+  if (serviceOptions === undefined) return;
   const input = await realServiceWorkspace(t);
   const service = await startService(input.binary, input.staged.serviceDirectory, {
     workspaceRoot: input.staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000,
-    ...await cmakeServiceOptions(),
+    ...serviceOptions,
   });
   try {
     const snapshot = await service.client.inspectWorkspace();
@@ -56,10 +59,12 @@ test("actual Service discovers staged Unity and hashes its generated-profile exe
   const { verifyPreparedFrameworkBundle } = await import("../../framework-bundle/prepare.mjs");
   const locked = await readFrameworkManifest();
   await verifyPreparedFrameworkBundle({ root: bundleRoot, ...locked });
+  const serviceOptions = await cmakeServiceOptions(t);
+  if (serviceOptions === undefined) return;
   const input = await realServiceWorkspace(t, bundleRoot);
   const service = await startService(input.binary, input.staged.serviceDirectory, {
     workspaceRoot: input.staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000,
-    ...await cmakeServiceOptions(),
+    ...serviceOptions,
   });
   try {
     const discovered = await discoverFrameworkCatalog({
@@ -336,10 +341,21 @@ async function cmakeExecutable(): Promise<string> {
   throw new Error("real Service workspace tests require CMake on PATH or an absolute CMAKE");
 }
 
-async function cmakeServiceOptions() {
-  return process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE
+async function cmakeServiceOptions(t: test.TestContext) {
+  const repository = resolve(import.meta.dirname, "../../..");
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const roots = productionBundleRoots(repository, platform);
+  for (const root of [roots.coverageBundleRoot, roots.testgenBundleRoot]) {
+    const info = await lstat(root).catch(() => undefined);
+    if (info === undefined || !info.isDirectory() || info.isSymbolicLink()) {
+      t.skip("requires explicitly prepared production coverage and test-generation bundles");
+      return undefined;
+    }
+  }
+  const cmake = process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE
     ? { cmakeBundleRoot: process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE }
     : { devCMakeExecutable: await cmakeExecutable() };
+  return { ...cmake, coverageBundleRoot: roots.coverageBundleRoot, testgenBundleRoot: roots.testgenBundleRoot };
 }
 
 function matrixContent(name: typeof MATRIX_FILES[number]): string {

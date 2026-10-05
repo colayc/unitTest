@@ -328,6 +328,11 @@ class FakeProtocolClient {
     this.#state.compilerIdentity = { version, compilerSha256 };
   }
 
+  async getCapabilities() {
+    this.calls.push({ method: "getCapabilities" });
+    return { coverageDetails: true, testGeneration: true, managedTests: true };
+  }
+
   artifact(taskId: string, kind: string): Record<string, unknown> | undefined {
     return this.#state.artifactsByTask.get(taskId)?.find((value) => value.kind === kind);
   }
