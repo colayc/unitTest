@@ -49,6 +49,23 @@ const cmakeFixture = join(
   "build",
   process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture"
 );
+const productBundleRoot = join(
+  repositoryRoot,
+  ".superpowers",
+  "runtime",
+  "product-bundles",
+  process.platform === "win32" ? "windows-x64" : "linux-x64",
+  "bundles"
+);
+
+function stagedBundleArguments(): string[] {
+  return [
+    "--cmake-bundle-root", join(productBundleRoot, "cmake"),
+    "--coverage-bundle-root", join(productBundleRoot, "coverage"),
+    "--testgen-bundle-root", join(productBundleRoot, "testgen"),
+    "--dev-cmake-executable", cmakeFixture
+  ];
+}
 
 interface Fixture {
   readonly root: string;
@@ -264,7 +281,10 @@ function createRealOperations(
         "--workspace-root", expected.workspaceRoot,
         "--trusted-workspace=true"
       ]);
-      const child = spawn(binary, args, { windowsHide: true, stdio: "pipe" });
+      const child = spawn(binary, [...args, ...stagedBundleArguments()], {
+        windowsHide: true,
+        stdio: "pipe"
+      });
       const observed = { process: child, exited: false };
       observations.children.push(observed);
       child.once("exit", () => { observed.exited = true; });

@@ -43,7 +43,7 @@ const foundationTrustPathJobs = [
 ];
 const foundationTrustPathActionCounts = new Map([
   ["verify-windows", 9],
-  ["verify-linux", 11],
+  ["verify-linux", 13],
   ["verify-release-input-run", 3],
   ["package-windows", 6],
   ["package-linux", 7],
@@ -73,7 +73,7 @@ function assertFoundationP8TrustPathPinned(workflow) {
       assert.equal(match[2], foundationTrustPathActionPins.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
     }
   }
-  assert.equal(invocationCount, 61, "foundation P8 trust path action invocation count");
+  assert.equal(invocationCount, 63, "foundation P8 trust path action invocation count");
 }
 
 const lifecyclePass = Object.freeze({
