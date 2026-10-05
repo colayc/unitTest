@@ -141,7 +141,9 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 		return &ProductBundles{roots: roots, testgen: fakeVerifiedTestgenBundle{}}, nil
 	}
 	installation := cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}
-	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+	var capturedResolver cmake.ResolverConfig
+	deps.resolveCMake = func(_ context.Context, _ probe.Runner, config cmake.ResolverConfig) (cmake.Installation, error) {
+		capturedResolver = config
 		return installation, nil
 	}
 	buildCoordinator := &fakeRuntimeCoordinator{}
@@ -194,6 +196,9 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 	}
 	if openedProductBundles != 1 || active.productBundles == nil {
 		t.Fatalf("opened product bundles = %d, retained = %#v", openedProductBundles, active.productBundles)
+	}
+	if capturedResolver.BundleRoot != "" || capturedResolver.DevExecutable != os.Args[0] {
+		t.Fatalf("development CMake resolver config = %#v", capturedResolver)
 	}
 	if _, ok := active.CoverageBackend().(*queuedCoverageBackend); !ok {
 		t.Fatalf("trusted coverage backend = %T", active.CoverageBackend())
