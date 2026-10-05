@@ -29,16 +29,6 @@ const maxProfiles = 4096
 
 var ErrInspectorInvariant = errors.New("workspace inspector invariant failed")
 
-// debugDiscovery is deliberately opt-in because discovery runs on each
-// workspace inspection. The emitted markers contain no workspace paths,
-// command lines, or probe output, and are used only to localize a stalled
-// trusted-service inspection in native E2E diagnostics.
-func debugDiscovery(marker string) {
-	if os.Getenv("UNIT_TEST_IDE_DEBUG_DISCOVERY") == "1" {
-		_, _ = fmt.Fprintf(os.Stderr, "service-discovery-debug: %s\n", marker)
-	}
-}
-
 type Snapshot struct {
 	WorkspaceID      string
 	WorkspaceURI     string
@@ -135,7 +125,6 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	if i == nil || ctx == nil {
 		return Snapshot{}, errors.New("invalid workspace inspector")
 	}
-	debugDiscovery("inspect-start")
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
@@ -178,8 +167,6 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	debugDiscovery("foundations-complete")
-
 	projects := cloneProjects(loaded.Config.Projects)
 	diagnostics := make([]diagnostic.Diagnostic, 0)
 	for _, issue := range loaded.Issues {
@@ -216,12 +203,10 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	profiles := make([]cmake.BuildProfile, 0)
 	inputGenerations := make([]string, 0, len(validProjects))
 	if cmakeErr == nil {
-		debugDiscovery("preset-discovery-start")
 		presetResults, err := i.discoverProjectPresets(ctx, installation, validProjects)
 		if err != nil {
 			return Snapshot{}, err
 		}
-		debugDiscovery("preset-discovery-complete")
 		for _, result := range presetResults {
 			project := result.project
 			discovered, discoverErr := result.discovery, result.err
@@ -285,7 +270,6 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	generation := cmake.WorkspaceGeneration(
 		loaded.Config, installation, profiles, toolchainDescriptors, inputGenerations...,
 	)
-	debugDiscovery("inspect-complete")
 	return Snapshot{
 		WorkspaceID: i.root.ID, WorkspaceURI: i.root.URI, Generation: generation,
 		Projects: projects, Profiles: cloneProfiles(profiles),
@@ -318,18 +302,14 @@ func (i *Inspector) discoverFoundations(
 	cmakeResults := make(chan cmakeDiscoveryResult, 1)
 	toolchainResults := make(chan toolchainDiscoveryResult, 1)
 	go func() {
-		debugDiscovery("cmake-resolution-start")
 		result := i.resolve(ctx, resolverConfig)
-		debugDiscovery("cmake-resolution-complete")
 		select {
 		case cmakeResults <- result:
 		case <-ctx.Done():
 		}
 	}()
 	go func() {
-		debugDiscovery("toolchain-discovery-start")
 		result := i.discoverToolchains(ctx)
-		debugDiscovery("toolchain-discovery-complete")
 		select {
 		case toolchainResults <- result:
 		case <-ctx.Done():

@@ -75,15 +75,6 @@ async function inspectWorkspaceUntilProfile(
   }
 }
 
-function enableDiscoveryDiagnostics(): () => void {
-  const previous = process.env.UNIT_TEST_IDE_DEBUG_DISCOVERY;
-  process.env.UNIT_TEST_IDE_DEBUG_DISCOVERY = "1";
-  return () => {
-    if (previous === undefined) delete process.env.UNIT_TEST_IDE_DEBUG_DISCOVERY;
-    else process.env.UNIT_TEST_IDE_DEBUG_DISCOVERY = previous;
-  };
-}
-
 test("Unix endpoint stays within sockaddr_un when the workspace path is long", async () => {
   const longWorkspace = `/home/runner/work/${"repository-".repeat(16)}/${"repository-".repeat(16)}/build`;
   const resource = await endpointForDirectory(longWorkspace, "linux", async () => "/tmp/utide-123456");
@@ -644,7 +635,6 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
   const workspaceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-workspace-"));
   const serviceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-service-"));
   const cmakeEventTimeoutMs = process.platform === "win32" ? 30_000 : 15_000;
-  const restoreDiscoveryDiagnostics = enableDiscoveryDiagnostics();
   let fixture: Awaited<ReturnType<typeof startService>> | undefined;
   let stage = "prepare workspace";
   try {
@@ -865,11 +855,10 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     );
   } catch (error) {
     throw new Error(
-      `deterministic CMake E2E failed during ${stage}; ${fixture?.debugDiagnostics ?? "service was not started"}`,
+      `deterministic CMake E2E failed during ${stage}`,
       { cause: error }
     );
   } finally {
-    restoreDiscoveryDiagnostics();
     await fixture?.dispose();
     await rm(workspaceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(serviceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -893,7 +882,6 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
   const EVENT_TIMEOUT_MS = 30_000;
   const DISCOVERY_TIMEOUT_MS = process.platform === "win32" ? 120_000 : EVENT_TIMEOUT_MS;
   const TEST_RUN_TIMEOUT_MS = process.platform === "win32" ? 120_000 : EVENT_TIMEOUT_MS;
-  const restoreDiscoveryDiagnostics = enableDiscoveryDiagnostics();
   try {
     await prepareTestFrameworkWorkspace(workspaceDirectory);
     stage = "start trusted test service";
@@ -1150,11 +1138,10 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
     );
   } catch (error) {
     throw new Error(
-      `deterministic Protocol v1.3 E2E failed during ${stage}; ${fixture?.debugDiagnostics ?? "service was not started"}`,
+      `deterministic Protocol v1.3 E2E failed during ${stage}`,
       { cause: error }
     );
   } finally {
-    restoreDiscoveryDiagnostics();
     secondary?.close();
     await fixture?.dispose();
     await rm(

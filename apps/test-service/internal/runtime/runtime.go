@@ -381,10 +381,11 @@ func Open(config Config) (*Runtime, error) {
 		}
 		cmakeBundleRoot := config.CMakeBundleRoot
 		// An explicit development executable is used by deterministic fixture
-		// tests. Keep the verified coverage/test-generation roots available for
-		// the production capability, but do not let the product CMake bundle
-		// silently override the requested fixture executable.
-		if config.ProductBundleRoots.CMake != "" && config.DevCMakeExecutable == "" {
+		// tests. It takes precedence over both direct and product-bundle CMake
+		// roots; coverage and test-generation roots remain verified separately.
+		if config.DevCMakeExecutable != "" {
+			cmakeBundleRoot = ""
+		} else if config.ProductBundleRoots.CMake != "" {
 			cmakeBundleRoot = config.ProductBundleRoots.CMake
 		}
 		resolverConfig := cmake.ResolverConfig{

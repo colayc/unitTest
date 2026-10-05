@@ -175,7 +175,7 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 	active, err := Open(Config{
 		DataDir: dataDir, ServiceExecutable: os.Args[0], WorkspaceRoot: workspaceRoot,
 		TrustedWorkspace: true, DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
-		ProductBundleRoots: productBundles,
+		ProductBundleRoots: productBundles, CMakeBundleRoot: productBundles.CMake,
 		dependencies:       deps,
 	})
 	if err != nil {
