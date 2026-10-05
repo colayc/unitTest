@@ -15,6 +15,7 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import { __testing as reportTesting, parseNativeLLVMFixtureLog } from "./native-report.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 
@@ -164,17 +165,12 @@ test("native matrix uses only the verified bundle and explicit trusted workspace
   assert.equal(results[1]?.scenarios.discovery, "skipped");
   assert.equal(reportResults, results);
   assert.equal(launches.length, 2);
+  const roots = productionBundleRoots(root, "linux");
   for (const launch of launches) {
     assert.equal(launch.options.trustedWorkspace, true);
-    assert.equal(launch.options.cmakeBundleRoot, bundle.bundleRoot);
-    assert.equal(
-      launch.options.coverageBundleRoot,
-      join(root, ".superpowers", "runtime", "coverage-bundle", "linux-x64"),
-    );
-    assert.equal(
-      launch.options.testgenBundleRoot,
-      join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", "linux-x64"),
-    );
+    assert.equal(launch.options.cmakeBundleRoot, roots.cmakeBundleRoot);
+    assert.equal(launch.options.coverageBundleRoot, roots.coverageBundleRoot);
+    assert.equal(launch.options.testgenBundleRoot, roots.testgenBundleRoot);
     assert.equal("devCMakeExecutable" in launch.options, false);
     assert.equal(launch.disposed, true);
   }

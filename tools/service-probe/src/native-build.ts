@@ -254,7 +254,6 @@ async function runNativeMatrixWithDependencies(
         timeoutMs: nativeTimeoutMs,
         workspaceRoot: workspace.workspaceRoot,
         trustedWorkspace: true,
-        cmakeBundleRoot: bundle.bundleRoot,
         ...productionBundleRoots(dependencies.repositoryRoot, options.platform),
       });
       await withNamedTimeout(
@@ -843,7 +842,6 @@ async function runPresetBuildScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
       ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectPresetProfile(
@@ -1048,7 +1046,6 @@ async function runWorkspaceRejectionScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
       ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const snapshot = await withNamedTimeout(
@@ -1093,7 +1090,6 @@ async function runFailureScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
       ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectEstablishedFamily(

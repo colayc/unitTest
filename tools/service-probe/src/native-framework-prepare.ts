@@ -120,7 +120,6 @@ async function prepareFrameworkRuntimeInternal(
             workspaceRoot: staged.workspaceRoot,
             trustedWorkspace: true,
             timeoutMs: 120_000,
-            cmakeBundleRoot: join(repositoryRoot, ".bundled-tools/cmake"),
             ...productionBundleRoots(repositoryRoot, options.platform),
           },
         );

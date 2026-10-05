@@ -127,7 +127,6 @@ async function loadLockedFrameworkRuntime(
           timeoutMs: 120_000,
           workspaceRoot: join(workspaceBase, "workspace"),
           trustedWorkspace: true,
-          cmakeBundleRoot: bundleRoot,
           ...productionBundleRoots(repositoryRoot, platform),
         });
         fixtures.push(fixture);

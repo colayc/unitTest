@@ -63,9 +63,10 @@ const coverageFixtureRoot = join(
   "fixtures",
   "coverage"
 );
-const cmakeBundleRoot = join(repositoryRoot, ".bundled-tools", "cmake");
-const coverageBundleRoot = join(repositoryRoot, ".superpowers", "runtime", "coverage-bundle", "windows-x64");
-const testgenBundleRoot = join(repositoryRoot, ".superpowers", "cache", "testgen-bundle", "22.1.8", "windows-x64");
+const productBundleRoot = join(repositoryRoot, ".superpowers", "runtime", "product-bundles", "windows-x64", "bundles");
+const cmakeBundleRoot = join(productBundleRoot, "cmake");
+const coverageBundleRoot = join(productBundleRoot, "coverage");
+const testgenBundleRoot = join(productBundleRoot, "testgen");
 const evidencePath = join(
   repositoryRoot,
   ".native-e2e",

@@ -12,6 +12,7 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 import { buildCoverageBackendReport, verifyRequiredFrameworkReport } from "./native-report.js";
 
@@ -98,14 +99,10 @@ test("required Windows native run binds both real framework executables and publ
       return { root: familyRoot, workspaceRoot, serviceDirectory };
     },
     launchService: async (_binary, _directory, options) => {
-      assert.equal(
-        options.coverageBundleRoot,
-        join(root, ".superpowers", "runtime", "coverage-bundle", "windows-x64"),
-      );
-      assert.equal(
-        options.testgenBundleRoot,
-        join(root, ".superpowers", "cache", "testgen-bundle", "22.1.8", "windows-x64"),
-      );
+      const roots = productionBundleRoots(root, "win32");
+      assert.equal(options.cmakeBundleRoot, roots.cmakeBundleRoot);
+      assert.equal(options.coverageBundleRoot, roots.coverageBundleRoot);
+      assert.equal(options.testgenBundleRoot, roots.testgenBundleRoot);
       const family = (["msvc", "clang-cl"] as const)[launchIndex++]!;
       return {
         client: { getCapabilities: async () => productionCapabilities(), inspectWorkspace: async () => workspaceSnapshot(family) },

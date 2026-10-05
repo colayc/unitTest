@@ -355,7 +355,12 @@ async function cmakeServiceOptions(t: test.TestContext) {
   const cmake = process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE
     ? { cmakeBundleRoot: process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE }
     : { devCMakeExecutable: await cmakeExecutable() };
-  return { ...cmake, coverageBundleRoot: roots.coverageBundleRoot, testgenBundleRoot: roots.testgenBundleRoot };
+  return {
+    ...cmake,
+    cmakeBundleRoot: roots.cmakeBundleRoot,
+    coverageBundleRoot: roots.coverageBundleRoot,
+    testgenBundleRoot: roots.testgenBundleRoot,
+  };
 }
 
 function matrixContent(name: typeof MATRIX_FILES[number]): string {

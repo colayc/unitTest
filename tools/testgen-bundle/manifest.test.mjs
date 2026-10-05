@@ -103,6 +103,21 @@ test("coverage smoke jobs prepare and check both product bundles before starting
   }
 });
 
+test("real Service workflows stage all three sibling product roots before probes", async () => {
+  const foundation = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  for (const job of ["verify-linux", "verify-windows", "verify-framework-windows", "coverage-linux-gcc", "coverage-windows-clang-cl"]) {
+    const section = foundation.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    assert.ok(section.includes("stage-production-bundles.mjs"), `${job} must stage sibling production roots`);
+  }
+  const phase9 = await readFile(new URL("../../.github/workflows/phase9-gates.yml", source), "utf8");
+  for (const job of ["phase9-matrix-e2e", "phase9-fault-injection"]) {
+    const section = phase9.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    assert.ok(section.includes("stage-production-bundles.mjs"), `${job} must stage sibling production roots`);
+  }
+});
+
 test("Windows native generation matrix prepares both production bundles before the short workspace copy", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
   const section = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];

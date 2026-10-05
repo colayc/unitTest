@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -16,6 +16,7 @@ import type {
 } from "@unit-test-ide/protocol-models";
 import { ProtocolClient, type ConnectionConnector, type HandshakeResult } from "@unit-test-ide/test-client";
 import { endpointForDirectory, type EndpointResource } from "./endpoint.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
 const execFile = promisify(execFileCallback);
@@ -656,7 +657,16 @@ export async function startService(
   directory: string,
   options: StartServiceOptions = {}
 ): Promise<TaskServiceFixture> {
-  return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory, options), options);
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const productionRoots = productionBundleRoots(repositoryRoot, platform);
+  const effectiveOptions: StartServiceOptions = {
+    ...options,
+    cmakeBundleRoot: options.cmakeBundleRoot ?? productionRoots.cmakeBundleRoot,
+    coverageBundleRoot: options.coverageBundleRoot ?? productionRoots.coverageBundleRoot,
+    testgenBundleRoot: options.testgenBundleRoot ?? productionRoots.testgenBundleRoot,
+  };
+  return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory, effectiveOptions), effectiveOptions);
 }
 
 export async function startTaskService(

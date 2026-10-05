@@ -307,7 +307,6 @@ async function runFramework(
     trustedWorkspace: true,
     timeoutMs: operationTimeoutMs,
     startupTimeoutMs: 120_000,
-    cmakeBundleRoot: join(root, ".bundled-tools/cmake"),
     ...productionBundleRoots(root, platform),
   });
   try {

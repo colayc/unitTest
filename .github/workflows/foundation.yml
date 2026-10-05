@@ -128,9 +128,6 @@ jobs:
           $cmakeBin = Split-Path -Parent $result.executable
           $cmakeBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - run: pnpm prepare:testgen-bundle
-      - run: pnpm check:testgen-bundle
-      - run: pnpm verify
       - id: coverage-manifest
         shell: pwsh
         run: |
@@ -143,9 +140,17 @@ jobs:
           # intentionally excluded because smoke/tests can create __pycache__
           # files inside it and poison a later cache hit.
           path: .superpowers/cache/coverage-bundle
-          # Bump the recipe epoch when bundle layout/normalization changes; the
-          # source manifest digest alone cannot invalidate a cached old layout.
           key: coverage-bundle-windows-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
+      - run: pnpm verify
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
       - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
@@ -312,6 +317,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle preparation failed' }
           pnpm check:testgen-bundle
           if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle verification failed' }
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
       - id: framework-manifest
         shell: pwsh
         run: |
@@ -525,6 +535,10 @@ jobs:
       # Bootstrap/download/cache work completes before the fail-closed native namespace.
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
+          echo "UNIT_TEST_IDE_TEST_PRODUCT_BUNDLE_ROOT=$GITHUB_WORKSPACE/.superpowers/runtime/product-bundles/linux-x64" >> "$GITHUB_ENV"
       - name: Prepare Go module cache before Linux offline namespace
         working-directory: apps/test-service
         shell: bash
@@ -731,6 +745,10 @@ jobs:
         run: |
           pnpm prepare:coverage-bundle
           pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
+          echo "UNIT_TEST_IDE_TEST_PRODUCT_BUNDLE_ROOT=$GITHUB_WORKSPACE/.superpowers/runtime/product-bundles/linux-x64" >> "$GITHUB_ENV"
       - name: Prepare Go modules before namespace entry
         working-directory: apps/test-service
         env:
@@ -758,7 +776,7 @@ jobs:
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test
       - name: Run required offline Linux GCC framework smoke
         env:
-          UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/coverage-bundle/linux-x64
+          UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/product-bundles/linux-x64/bundles/coverage
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:coverage-service-smoke:linux
       - name: Validate and close Linux GCC coverage evidence
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux
@@ -902,6 +920,11 @@ jobs:
       - run: pnpm check:testgen-bundle
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
       - name: Run required real Windows clang-cl coverage
         env:
           GOENV: 'off'

@@ -175,9 +175,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
   await rm(backendEvidencePath, { force: true });
   const startedAt = new Date().toISOString();
   const bundleInput = process.env.UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT;
-  const lockedBundle = join(root, ".superpowers/runtime/coverage-bundle/linux-x64");
-  const lockedTestgenBundle = join(root, ".superpowers/cache/testgen-bundle/22.1.8/linux-x64");
-  assert.equal(bundleInput, lockedBundle, "an explicit, exact locked test-only coverage bundle input is required");
+  const productBundleRoot = join(root, ".superpowers/runtime/product-bundles/linux-x64/bundles");
+  const lockedBundle = join(productBundleRoot, "coverage");
+  const lockedTestgenBundle = join(productBundleRoot, "testgen");
+  assert.equal(bundleInput, lockedBundle, "an explicit, exact staged coverage bundle input is required");
   // Real namespace/socket/DNS proof; an environment variable cannot bypass it.
   await execFile(process.execPath, [join(root, "tools/linux-offline/probe.mjs")], { timeout: 30_000 });
   await execFile(process.execPath, [join(root, "tools/coverage-bundle/prepare.mjs"), "--check"], { cwd: root, timeout });
@@ -263,7 +264,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         spawnService(binary, args) {
           const child = spawn(binary, [
             ...args,
-            "--cmake-bundle-root", join(root, ".bundled-tools/cmake"),
+            "--cmake-bundle-root", join(productBundleRoot, "cmake"),
             "--coverage-bundle-root", lockedBundle,
             "--testgen-bundle-root", lockedTestgenBundle
           ], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: "1" } });
