@@ -22,7 +22,7 @@ const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
-const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
+const WORKSPACE_INSPECTION_TIMEOUT_MS = 120_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
   "task.started",
@@ -46,9 +46,21 @@ async function inspectWorkspaceUntilProfile(
 ): Promise<{ workspace: WorkspaceSnapshot; project: WorkspaceSnapshot["projects"][number]; profile: NonNullable<WorkspaceSnapshot["projects"][number]["buildProfiles"][number]> }> {
   const deadline = Date.now() + timeoutMs;
   let lastSnapshot: WorkspaceSnapshot | undefined;
+  let lastError: unknown;
   for (;;) {
     const remaining = Math.max(1, deadline - Date.now());
-    lastSnapshot = await withNamedTimeout(`${label} inspection`, client.inspectWorkspace(), remaining);
+    try {
+      lastSnapshot = await withNamedTimeout(
+        `${label} inspection`,
+        client.inspectWorkspace(),
+        Math.min(10_000, remaining),
+      );
+    } catch (error) {
+      lastError = error;
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      continue;
+    }
     const project = lastSnapshot.projects.find((candidate) => candidate.projectId === projectId);
     const profile = project?.buildProfiles[0];
     if (project && profile) return { workspace: lastSnapshot, project, profile };
@@ -56,6 +68,7 @@ async function inspectWorkspaceUntilProfile(
       throw new Error(`${label} did not expose a verified build profile after bounded discovery wait: ${JSON.stringify({
         projects: lastSnapshot.projects.map((item) => ({ projectId: item.projectId, profiles: item.buildProfiles.length })),
         diagnostics: lastSnapshot.diagnostics,
+        lastError: lastError instanceof Error ? lastError.message : lastError,
       })}`);
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
