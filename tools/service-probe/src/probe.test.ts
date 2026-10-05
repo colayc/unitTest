@@ -53,7 +53,7 @@ async function inspectWorkspaceUntilProfile(
       lastSnapshot = await withNamedTimeout(
         `${label} inspection`,
         client.inspectWorkspace(),
-        Math.min(10_000, remaining),
+        remaining,
       );
     } catch (error) {
       lastError = error;
