@@ -307,6 +307,7 @@ async function runFramework(
     trustedWorkspace: true,
     timeoutMs: operationTimeoutMs,
     startupTimeoutMs: 120_000,
+    handshakeSupportedProtocolVersions: ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"],
     ...productionBundleRoots(root, platform),
   });
   try {
