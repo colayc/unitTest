@@ -27,6 +27,7 @@ type Layout struct {
 	Build          string
 	Coverage       string
 	Controls       string
+	TestControls   string
 	Lock           string
 	CoverageAnchor serviceanchor.Anchor
 }
@@ -65,13 +66,14 @@ func prepareDataDirGuardWithPin(root string, pin func(string) (io.Closer, error)
 		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	layout := Layout{
-		Root:      absolute,
-		Database:  filepath.Join(absolute, "history.sqlite3"),
-		Artifacts: filepath.Join(absolute, "artifacts"),
-		Build:     filepath.Join(absolute, "build"),
-		Coverage:  filepath.Join(absolute, "coverage"),
-		Controls:  filepath.Join(absolute, "controls"),
-		Lock:      filepath.Join(absolute, "service.lock"),
+		Root:         absolute,
+		Database:     filepath.Join(absolute, "history.sqlite3"),
+		Artifacts:    filepath.Join(absolute, "artifacts"),
+		Build:        filepath.Join(absolute, "build"),
+		Coverage:     filepath.Join(absolute, "coverage"),
+		Controls:     filepath.Join(absolute, "controls"),
+		TestControls: filepath.Join(absolute, "controls", "test-execution"),
+		Lock:         filepath.Join(absolute, "service.lock"),
 	}
 	anchor, err := newServiceAnchor(absolute)
 	if err != nil {
@@ -90,7 +92,7 @@ func prepareDataDirGuardWithPin(root string, pin func(string) (io.Closer, error)
 			guard.Close(),
 		)
 	}
-	coverageGuard, err := pin(layout.Coverage)
+	testControlGuard, err := pin(layout.TestControls)
 	if err != nil {
 		return Layout{}, nil, errors.Join(
 			ErrUnsafeDataDir,
@@ -99,8 +101,19 @@ func prepareDataDirGuardWithPin(root string, pin func(string) (io.Closer, error)
 			guard.Close(),
 		)
 	}
+	coverageGuard, err := pin(layout.Coverage)
+	if err != nil {
+		return Layout{}, nil, errors.Join(
+			ErrUnsafeDataDir,
+			testControlGuard.Close(),
+			controlGuard.Close(),
+			buildGuard.Close(),
+			guard.Close(),
+		)
+	}
 	return layout, directoryGuardSet{
 		coverageGuard,
+		testControlGuard,
 		controlGuard,
 		buildGuard,
 		guard,

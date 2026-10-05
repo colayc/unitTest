@@ -36,6 +36,7 @@ func TestPrepareDataDirReturnsFixedAbsoluteLayout(t *testing.T) {
 		layout.Build != filepath.Join(absolute, "build") ||
 		layout.Coverage != filepath.Join(absolute, "coverage") ||
 		layout.Controls != filepath.Join(absolute, "controls") ||
+		layout.TestControls != filepath.Join(absolute, "controls", "test-execution") ||
 		layout.Lock != filepath.Join(absolute, "service.lock") {
 		t.Fatalf("layout = %#v", layout)
 	}
@@ -44,6 +45,7 @@ func TestPrepareDataDirReturnsFixedAbsoluteLayout(t *testing.T) {
 		layout.Build,
 		layout.Coverage,
 		layout.Controls,
+		layout.TestControls,
 	} {
 		info, err := os.Stat(directory)
 		if err != nil || !info.IsDir() {
@@ -97,10 +99,10 @@ func TestPrepareDataDirGuardCoverageFailureCleansUpInReverseOrder(t *testing.T) 
 	if guard != nil {
 		t.Fatal("coverage failure returned a cleanup guard")
 	}
-	if got, want := calls, []string{"service-data", "build", "controls", "coverage"}; !slices.Equal(got, want) {
+	if got, want := calls, []string{"service-data", "build", "controls", "test-execution", "coverage"}; !slices.Equal(got, want) {
 		t.Fatalf("pin calls = %#v, want %#v", got, want)
 	}
-	if got, want := closeCalls, []string{"controls", "build", "service-data"}; !slices.Equal(got, want) {
+	if got, want := closeCalls, []string{"test-execution", "controls", "build", "service-data"}; !slices.Equal(got, want) {
 		t.Fatalf("cleanup order = %#v, want %#v", got, want)
 	}
 	for name, guard := range guards {

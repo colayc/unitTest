@@ -448,7 +448,7 @@ func Open(config Config) (*Runtime, error) {
 				WorkspaceRoot: workspaceRoot,
 				BuildDataRoot: layout.Build,
 				CoverageRoot:  layout.Coverage,
-				ControlRoot:   layout.Controls,
+				ControlRoot:   layout.TestControls,
 				Clock:         config.Clock,
 				NewID:         newID,
 			},
