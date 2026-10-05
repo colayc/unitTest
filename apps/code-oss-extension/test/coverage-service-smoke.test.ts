@@ -756,6 +756,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
           dataDirectory: installedFixture.dataDirectory,
           timeoutMs: 120_000,
           trusted: () => true,
+          // This smoke intentionally exercises the v1.4 coverage/task projection.
+          // The production client still offers the newest protocol by default.
+          handshakeSupportedProtocolVersions: ["1.4", "1.3", "1.2", "1.1", "1.0"],
           operations: coverageOperations(
             installedFixture,
             wire,

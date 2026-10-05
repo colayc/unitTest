@@ -868,6 +868,23 @@ test("client prefers protocol 1.6 and accepts negotiated downgrades", async () =
   }
 });
 
+test("client can pin a legacy handshake ceiling for a coverage-only session", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.4",
+    serviceVersion: "0.5.0"
+  }, "1.4"));
+  const result = await fixture.client.handshake(
+    "0123456789abcdef",
+    "test",
+    "0.5.0",
+    ["1.4", "1.3", "1.2", "1.1", "1.0"]
+  );
+  assert.equal(result.negotiatedProtocolVersion, "1.4");
+  assert.equal(fixture.requests[0]?.protocolVersion, "1.4");
+  assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+  fixture.client.close();
+});
+
 test("client retries legacy services from the v1.6 ceiling", async () => {
   const fixture = scriptedClient((request) => request.protocolVersion === "1.2"
     ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")

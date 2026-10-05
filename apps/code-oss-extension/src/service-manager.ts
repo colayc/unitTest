@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { ProtocolClient } from "@unit-test-ide/test-client";
+import { ProtocolClient, type ProtocolVersion } from "@unit-test-ide/test-client";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   createEndpointResource,
@@ -48,6 +48,7 @@ export interface ServiceManagerOptions {
   dataDirectory: string;
   timeoutMs: number;
   trusted: () => boolean;
+  handshakeSupportedProtocolVersions?: ReadonlyArray<ProtocolVersion>;
   operations?: Partial<ServiceOperations>;
 }
 
@@ -358,7 +359,7 @@ export class ServiceManager {
       requireChildAlive();
       await withTimeout(
         "task protocol handshake",
-        whileChildAlive(client.handshake(token, CLIENT_NAME, CLIENT_VERSION)),
+        whileChildAlive(client.handshake(token, CLIENT_NAME, CLIENT_VERSION, this.#options.handshakeSupportedProtocolVersions)),
         this.#options.timeoutMs
       );
       this.#assertTrusted();
