@@ -549,6 +549,7 @@ export class ProtocolClient {
   #connection: Connection;
   readonly #connector: ConnectionConnector | undefined;
   #credentials: Credentials | undefined;
+  #supportedProtocolVersions: ReadonlyArray<ProtocolVersion> | undefined;
   #negotiatedVersion: ProtocolVersion | undefined;
   #activeSubscription: EventSubscription | undefined;
   #unsubscribeEvent: (() => void) | undefined;
@@ -575,6 +576,9 @@ export class ProtocolClient {
     const credentials = { token, clientName, clientVersion };
     const result = await this.#authenticate(this.#connection, credentials, supportedProtocolVersions);
     this.#credentials = credentials;
+    this.#supportedProtocolVersions = supportedProtocolVersions === undefined
+      ? undefined
+      : [...supportedProtocolVersions];
     this.#negotiatedVersion = result.negotiatedProtocolVersion;
     this.#reviewBindings.clear();
     return result;
@@ -1148,7 +1152,7 @@ export class ProtocolClient {
       candidate = new Connection(candidateStream);
       candidateStream = undefined;
       this.#reconnectCandidate = candidate;
-      const negotiated = await this.#authenticate(candidate, credentials);
+      const negotiated = await this.#authenticate(candidate, credentials, this.#supportedProtocolVersions);
       this.#requireCurrentReconnect(generation, candidate);
       if (subscription && negotiated.negotiatedProtocolVersion === "1.0") {
         throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 or newer was not negotiated", false);
