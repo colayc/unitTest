@@ -1336,6 +1336,16 @@ func (s *Session) legacyEventFilter(ctx context.Context, event task.Event) bool 
 	if event.TaskID == "00000000000000000000000000000000" {
 		return true
 	}
+	if event.Type == task.EventTestGenerationStateChanged {
+		return false
+	}
+	// Domain events for ordinary discovery, execution, and coverage tasks do
+	// not carry generation rows. Keep them flowing even when their parent task
+	// has already reached a terminal cleanup state; the client needs these
+	// events to converge its catalog/run UI.
+	if strings.HasPrefix(string(event.Type), "test.") || strings.HasPrefix(string(event.Type), "coverage.") {
+		return true
+	}
 	value, err := s.backend.Get(ctx, event.TaskID)
 	if err != nil {
 		return false
