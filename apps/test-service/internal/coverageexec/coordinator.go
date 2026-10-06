@@ -991,6 +991,12 @@ func (execution *execution) ExecuteServiceAction(
 			os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
 			return task.StepResult{Verdict: task.StepVerdictFailed}, nil
 		}
+		if execution.terminalOutcome == task.OutcomeCommandFailed {
+			return task.StepResult{
+				Process: task.ProcessResult{Err: execution.terminalErr},
+				Verdict: task.StepVerdictFailed,
+			}, nil
+		}
 		return task.StepResult{}, execution.terminalErr
 	}
 	if err := execution.revalidate(ctx, true); err != nil {

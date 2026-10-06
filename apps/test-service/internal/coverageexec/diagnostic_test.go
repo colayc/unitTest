@@ -23,11 +23,14 @@ func TestExecuteServiceActionExposesPreparationCommandFailureInDebugMode(t *test
 		current,
 		task.ExecutionStep{Action: task.ServiceActionCoverageNormalize},
 	)
-	if !errors.Is(err, terminalErr) {
-		t.Fatalf("debug preparation error = %v, want %v", err, terminalErr)
+	if err != nil {
+		t.Fatalf("debug preparation error = %v, want nil", err)
 	}
-	if result.Verdict != task.StepVerdictDefault {
-		t.Fatalf("debug preparation verdict = %v, want default", result.Verdict)
+	if result.Verdict != task.StepVerdictFailed {
+		t.Fatalf("debug preparation verdict = %v, want failed", result.Verdict)
+	}
+	if !errors.Is(result.Process.Err, terminalErr) {
+		t.Fatalf("debug preparation process error = %v, want %v", result.Process.Err, terminalErr)
 	}
 }
 
