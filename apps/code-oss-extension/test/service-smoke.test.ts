@@ -220,7 +220,10 @@ function nestedItems(collection: SmokeCollection): TestingTestItem[] {
 
 async function eventually(assertion: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 600; attempt++) {
+  // The first real catalog request performs a cold CMake configure/build on
+  // hosted Linux runners. Keep the bound finite, but allow that one-time
+  // native startup to finish before reporting a false discovery failure.
+  for (let attempt = 0; attempt < 2400; attempt++) {
     try {
       assertion();
       return;

@@ -314,7 +314,11 @@ async function realServiceWorkspace(t: test.TestContext, bundleRoot?: string) {
     }
   }
   const platform = process.platform === "win32" ? "win32" : "linux";
-  const family = platform === "win32" ? "msvc" : "gcc";
+  // The general hosted service smoke must remain runnable on both Windows
+  // runner generations. clang-cl is the stable public-runner profile; the
+  // dedicated Windows framework matrix still exercises the MSVC profile on
+  // the pinned windows-2022 producer.
+  const family = platform === "win32" ? "clang-cl" : "gcc";
   const binary = join(input.repositoryRoot, `unit-test-service${platform === "win32" ? ".exe" : ""}`);
   const unityRunnerGenerator = join(input.repositoryRoot, `unity-runner-generator${platform === "win32" ? ".exe" : ""}`);
   for (const [output, pkg] of [[binary, "unit-test-service"], [unityRunnerGenerator, "unity-runner-generator"]]) {
