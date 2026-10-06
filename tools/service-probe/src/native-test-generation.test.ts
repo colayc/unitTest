@@ -7,6 +7,7 @@ import {
   buildNativeGenerationToolchainConfig,
   formatNativeCoverageFailure,
   formatNativeTaskFailure,
+  nativeGenerationFailureServiceDirectory,
   parseNativeTestGenerationArguments,
   selectNativeGenerationProfile,
   selectNativeGenerationTarget,
@@ -26,6 +27,14 @@ test("native generation preserves the failure workspace only under the explicit 
     if (previous === undefined) delete process.env.UT_DEBUG_PROCESS_HOST_FAILURES;
     else process.env.UT_DEBUG_PROCESS_HOST_FAILURES = previous;
   }
+});
+
+test("native generation keeps service diagnostics beside the preserved failure workspace", () => {
+  assert.equal(
+    nativeGenerationFailureServiceDirectory("C:\\native-work", "cpputest"),
+    "C:\\native-work\\cpputest\\service-debug",
+  );
+  assert.throws(() => nativeGenerationFailureServiceDirectory("C:\\native-work", "invalid" as never), /framework/u);
 });
 
 test("native coverage failure diagnostics retain bounded task and compiler context", () => {

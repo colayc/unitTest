@@ -34,6 +34,11 @@ export function shouldPreserveNativeGenerationFailureWorkspace(): boolean {
   return process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1";
 }
 
+export function nativeGenerationFailureServiceDirectory(workRoot: string, framework: Framework): string {
+  if (framework !== "cpputest" && framework !== "unity") throw new Error("native test-generation framework is invalid");
+  return join(workRoot, framework, "service-debug");
+}
+
 export function parseNativeTestGenerationArguments(arguments_: readonly string[]): { platform: NativePlatform } {
   if (arguments_.length !== 2 || arguments_[0] !== "--platform" ||
       arguments_[1] !== "linux" && arguments_[1] !== "win32") {
@@ -539,6 +544,14 @@ async function runFramework(
       }
       throw error;
     }
+  } catch (error) {
+    if (shouldPreserveNativeGenerationFailureWorkspace()) {
+      await cp(serviceDirectory, nativeGenerationFailureServiceDirectory(workRoot, framework), {
+        recursive: true,
+        force: true,
+      }).catch(() => undefined);
+    }
+    throw error;
   } finally {
     await fixture.dispose();
   }
