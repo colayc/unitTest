@@ -93,6 +93,8 @@ interface Observations {
     errorCode?: string;
     errorMessage?: string;
   };
+  discoveryResponseKeys?: string;
+  discoveryError?: string;
 }
 
 function createObservations(): Observations {
@@ -321,6 +323,7 @@ function createRealOperations(
             const result = Reflect.apply(value, target, args) as unknown;
             if (label === "discoverTests" && result && typeof (result as Promise<unknown>).then === "function") {
               return (result as Promise<Record<string, unknown>>).then((snapshot) => {
+                observations.discoveryResponseKeys = Object.keys(snapshot).sort().join(",");
                 if (typeof snapshot.taskId === "string") observations.discoveryTaskId = snapshot.taskId;
                 observations.discoveryTask = {
                   status: typeof snapshot.status === "string" ? snapshot.status : undefined,
@@ -329,6 +332,9 @@ function createRealOperations(
                   errorMessage: typeof snapshot.errorMessage === "string" ? snapshot.errorMessage : undefined
                 };
                 return snapshot;
+              }, (error: unknown) => {
+                observations.discoveryError = error instanceof Error ? error.message : String(error);
+                throw error;
               });
             }
             if (label === "task" && result && typeof (result as Promise<unknown>).then === "function") {
@@ -524,11 +530,11 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
       failingItem = items.find((item) => item.label === "fails");
       assert.ok(
         passingItem,
-        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; task:${JSON.stringify(observations.discoveryTask)})`
+        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; response:${observations.discoveryResponseKeys ?? ""}; error:${observations.discoveryError ?? ""}; task:${JSON.stringify(observations.discoveryTask)})`
       );
       assert.ok(
         failingItem,
-        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; task:${JSON.stringify(observations.discoveryTask)})`
+        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; response:${observations.discoveryResponseKeys ?? ""}; error:${observations.discoveryError ?? ""}; task:${JSON.stringify(observations.discoveryTask)})`
       );
     });
     const discoveredPassingItem = passingItem;
