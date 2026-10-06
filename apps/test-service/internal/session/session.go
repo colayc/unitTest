@@ -33,7 +33,9 @@ import (
 	taskv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task"
 	testv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test"
 	taskv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task"
+	taskv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/task"
 	capabilitiesv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/capabilities"
+	taskv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/task"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 	"unit-test-ide.local/test-service/internal/toolchain"
@@ -111,6 +113,10 @@ type TestRunStart struct {
 type HandleResult struct {
 	protocol.Response
 	Subscription *eventbroker.Subscription
+	// EventFilter is applied by the connection forwarder before an event is
+	// projected onto the negotiated protocol. It is used by newer sessions to
+	// keep legacy global subscriptions from exposing generation-owned rows.
+	EventFilter func(context.Context, task.Event) bool
 }
 
 type Session struct {
@@ -554,11 +560,6 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "task service is unavailable", true))
 		}
-		if (s.negotiatedVersion == protocol.Version15 || s.negotiatedVersion == protocol.Version16) && request.Method == "events/subscribe" {
-			// The event broker is workspace-global and cannot prove generation
-			// ownership for the legacy subscription route.
-			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped event routes are unavailable", false))
-		}
 		return s.handlePhase2(ctx, responseVersion, request)
 	}
 	return handled(protocol.Failure(responseVersion, request, "METHOD_NOT_FOUND", "method is not supported", false))
@@ -643,6 +644,20 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			}
 			return handled(protocol.Success(version, request, projected))
 		}
+		if version == protocol.Version15 {
+			projected, projectErr := toProtocolTaskV15(value, run)
+			if projectErr != nil {
+				return backendFailure(version, request, projectErr)
+			}
+			return handled(protocol.Success(version, request, projected))
+		}
+		if version == protocol.Version16 {
+			projected, projectErr := toProtocolTaskV16(value, run)
+			if projectErr != nil {
+				return backendFailure(version, request, projectErr)
+			}
+			return handled(protocol.Success(version, request, projected))
+		}
 		if version == protocol.Version13 {
 			projected, projectErr :=
 				toProtocolTaskV13(value, run)
@@ -695,7 +710,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
+		if version == protocol.Version14 {
 			testBackend, ok := s.backend.(TestBackend)
 			if !ok {
 				return backendFailure(
@@ -745,6 +760,56 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 					NextCursor: page.NextCursor,
 				},
 			))
+		}
+		if version == protocol.Version15 {
+			testBackend, ok := s.backend.(TestBackend)
+			if !ok {
+				return backendFailure(version, request, task.ErrStorageUnavailable)
+			}
+			items := make([]taskv15.TaskSnapshotV15, len(page.Items))
+			for index := range page.Items {
+				var run *testdomain.TestRun
+				if page.Items[index].Kind == task.KindTestRun || page.Items[index].Kind == task.KindCoverageRun {
+					persisted, runErr := testBackend.GetTestRunForTask(ctx, page.Items[index].ID)
+					if runErr != nil {
+						return backendFailure(version, request, runErr)
+					}
+					run = &persisted
+				}
+				items[index], err = toProtocolTaskV15(page.Items[index], run)
+				if err != nil {
+					return backendFailure(version, request, err)
+				}
+			}
+			return handled(protocol.Success(version, request, struct {
+				Items      []taskv15.TaskSnapshotV15 `json:"items"`
+				NextCursor string                    `json:"nextCursor,omitempty"`
+			}{Items: items, NextCursor: page.NextCursor}))
+		}
+		if version == protocol.Version16 {
+			testBackend, ok := s.backend.(TestBackend)
+			if !ok {
+				return backendFailure(version, request, task.ErrStorageUnavailable)
+			}
+			items := make([]taskv16.TaskSnapshotV16, len(page.Items))
+			for index := range page.Items {
+				var run *testdomain.TestRun
+				if page.Items[index].Kind == task.KindTestRun || page.Items[index].Kind == task.KindCoverageRun {
+					persisted, runErr := testBackend.GetTestRunForTask(ctx, page.Items[index].ID)
+					if runErr != nil {
+						return backendFailure(version, request, runErr)
+					}
+					run = &persisted
+				}
+				items[index], err = toProtocolTaskV16(page.Items[index], run)
+				if err != nil {
+					return backendFailure(version, request, err)
+				}
+			}
+			return handled(protocol.Success(version, request, struct {
+				Items      []taskv16.TaskSnapshotV16 `json:"items"`
+				NextCursor string                    `json:"nextCursor,omitempty"`
+			}{Items: items, NextCursor: page.NextCursor}))
 		}
 		if version == protocol.Version13 {
 			testBackend, ok := s.backend.(TestBackend)
@@ -798,7 +863,11 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		return HandleResult{Response: protocol.Success(version, request, map[string]int64{"afterSequence": *payload.AfterSequence}), Subscription: subscription}
+		result := HandleResult{Response: protocol.Success(version, request, map[string]int64{"afterSequence": *payload.AfterSequence}), Subscription: subscription}
+		if version == protocol.Version15 || version == protocol.Version16 {
+			result.EventFilter = s.legacyEventFilter
+		}
+		return result
 	case "artifacts/list":
 		payload, err := decodeStrict[artifactListPayload](request.Payload)
 		if err != nil || !validID(payload.TaskID) {
@@ -1236,6 +1305,20 @@ func (s *Session) handleV13TaskStart(
 	if err != nil {
 		return backendFailure(version, request, err)
 	}
+	if version == protocol.Version15 {
+		projected, projectErr := toProtocolTaskV15(started, run)
+		if projectErr != nil {
+			return backendFailure(version, request, projectErr)
+		}
+		return handled(protocol.Success(version, request, projected))
+	}
+	if version == protocol.Version16 {
+		projected, projectErr := toProtocolTaskV16(started, run)
+		if projectErr != nil {
+			return backendFailure(version, request, projectErr)
+		}
+		return handled(protocol.Success(version, request, projected))
+	}
 	projected, err := toProtocolTaskV13(started, run)
 	if err != nil {
 		return backendFailure(version, request, err)
@@ -1244,6 +1327,21 @@ func (s *Session) handleV13TaskStart(
 }
 
 func handled(response protocol.Response) HandleResult { return HandleResult{Response: response} }
+
+// legacyEventFilter preserves the v1.5/v1.6 subscription surface while
+// preventing generation-owned task rows from crossing the legacy, workspace-
+// global event broker. Unknown task rows are suppressed conservatively; the
+// broker may still carry redacted cursor tombstones whose zero task id is safe.
+func (s *Session) legacyEventFilter(ctx context.Context, event task.Event) bool {
+	if event.TaskID == "00000000000000000000000000000000" {
+		return true
+	}
+	value, err := s.backend.Get(ctx, event.TaskID)
+	if err != nil {
+		return false
+	}
+	return value.Kind != task.KindTestGeneration
+}
 
 func invalidPayload(version string, request protocol.Request) HandleResult {
 	return handled(protocol.Failure(version, request, "INVALID_MESSAGE", "invalid method payload", false))

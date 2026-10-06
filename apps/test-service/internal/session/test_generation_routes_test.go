@@ -323,7 +323,7 @@ func TestV15GenerationRoutesRequireReadyBackendAndClosedPayloads(t *testing.T) {
 	}
 }
 
-func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testing.T) {
+func TestV15GlobalEventSubscriptionFiltersGenerationRows(t *testing.T) {
 	active := session.NewWithGeneration("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &coverageBackend{fakeBackend: &fakeBackend{}}, &generationBackend{ready: true})
 	result := active.Handle(context.Background(), requestVersion(t, protocol.Version15, "handshake", map[string]any{
 		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
@@ -333,7 +333,7 @@ func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testin
 		t.Fatal(result.Response.Error)
 	}
 	result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, "events/subscribe", map[string]any{"afterSequence": 0}))
-	if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" || result.Subscription != nil {
+	if result.Response.Error != nil || result.EventFilter == nil {
 		t.Fatalf("global event subscription = %+v", result)
 	}
 	for _, route := range []struct {
@@ -347,12 +347,6 @@ func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testin
 		{"artifacts/read", map[string]any{"artifactId": strings.Repeat("a", 32), "offset": 0, "length": 1}},
 	} {
 		result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, route.method, route.payload))
-		if route.method == "events/subscribe" {
-			if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
-				t.Fatalf("v1.5 %s must fail closed: %+v", route.method, result.Response)
-			}
-			continue
-		}
 		if result.Response.Error != nil && result.Response.Error.Message == "owner-scoped task routes are unavailable" {
 			t.Fatalf("v1.5 %s unexpectedly used the removed blanket guard: %+v", route.method, result.Response)
 		}
