@@ -453,6 +453,10 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
     managerFactory: (options): LifecycleManager => {
       manager = new ServiceManager({
         ...options,
+        // This adapter test launches the real built service through the
+        // fixture operations below; its source-tree development layout does
+        // not contain the packaged bin/unit-test-service path.
+        productLayout: undefined,
         operations: createRealOperations(observations, options)
       });
       return manager;
@@ -570,6 +574,7 @@ test("host deactivation after trust loss stops the real child and makes its old 
     managerFactory: (options): LifecycleManager => {
       manager = new ServiceManager({
         ...options,
+        productLayout: undefined,
         operations: createRealOperations(observations, options)
       });
       return manager;
