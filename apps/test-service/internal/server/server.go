@@ -413,10 +413,10 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	}
 	eventType := event.Type
 	payload := event.Payload
-	if version != protocol.Version14 && coverageDomainEvent(event.Type) {
+	if legacyCoverageEventVersion(version) && coverageDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
-	} else if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
+	} else if legacyTestEventVersion(version) && testDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
 	} else if (version == protocol.Version13 || version == protocol.Version14 ||
@@ -463,6 +463,14 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 		projected.MessageID = event.ID
 	}
 	return projected, nil
+}
+
+func legacyTestEventVersion(version string) bool {
+	return version == protocol.Version10 || version == protocol.Version11 || version == protocol.Version12
+}
+
+func legacyCoverageEventVersion(version string) bool {
+	return version == protocol.Version10 || version == protocol.Version11 || version == protocol.Version12 || version == protocol.Version13
 }
 
 func projectV13Diagnostic(
