@@ -497,7 +497,8 @@ func projectV13Diagnostic(
 }
 
 func compatibilityOutput(version string) json.RawMessage {
-	if version == protocol.Version12 || version == protocol.Version13 {
+	if version == protocol.Version12 || version == protocol.Version13 ||
+		version == protocol.Version15 || version == protocol.Version16 {
 		return json.RawMessage(
 			`{"stepId":"test-compatibility","stream":"combined","text":"","truncated":false}`,
 		)
