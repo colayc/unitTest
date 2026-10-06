@@ -601,6 +601,9 @@ jobs:
           UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
       - name: Run production Linux managed test generation offline
+        env:
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
+          UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: '1'
         run: >-
           node tools/linux-offline/run.mjs --allow-sudo-root --
           pnpm --filter @unit-test-ide/service-probe
