@@ -113,10 +113,11 @@ type TestRunStart struct {
 type HandleResult struct {
 	protocol.Response
 	Subscription *eventbroker.Subscription
-	// EventFilter is applied by the connection forwarder before an event is
-	// projected onto the negotiated protocol. It is used by newer sessions to
-	// keep legacy global subscriptions from exposing generation-owned rows.
-	EventFilter func(context.Context, task.Event) bool
+	// EventTransform is applied by the connection forwarder before an event is
+	// projected onto the negotiated protocol. Transforms must preserve the
+	// event sequence; sensitive rows are represented by redacted tombstones
+	// rather than being dropped from the global stream.
+	EventTransform func(context.Context, task.Event) task.Event
 }
 
 type Session struct {
@@ -865,7 +866,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		}
 		result := HandleResult{Response: protocol.Success(version, request, map[string]int64{"afterSequence": *payload.AfterSequence}), Subscription: subscription}
 		if version == protocol.Version15 || version == protocol.Version16 {
-			result.EventFilter = s.legacyEventFilter
+			result.EventTransform = s.legacyEventTransform
 		}
 		return result
 	case "artifacts/list":
@@ -1328,29 +1329,40 @@ func (s *Session) handleV13TaskStart(
 
 func handled(response protocol.Response) HandleResult { return HandleResult{Response: response} }
 
-// legacyEventFilter preserves the v1.5/v1.6 subscription surface while
+// legacyEventTransform preserves the v1.5/v1.6 subscription surface while
 // preventing generation-owned task rows from crossing the legacy, workspace-
-// global event broker. Unknown task rows are suppressed conservatively; the
-// broker may still carry redacted cursor tombstones whose zero task id is safe.
-func (s *Session) legacyEventFilter(ctx context.Context, event task.Event) bool {
+// global event broker. Sensitive rows become redacted cursor tombstones so
+// the client still observes every sequence number in the global stream.
+func (s *Session) legacyEventTransform(ctx context.Context, event task.Event) task.Event {
 	if event.TaskID == "00000000000000000000000000000000" {
-		return true
+		return event
 	}
-	if event.Type == task.EventTestGenerationStateChanged {
-		return false
+	hide := event.Type == task.EventTestGenerationStateChanged
+	if !hide {
+		// Domain events for ordinary discovery, execution, and coverage tasks do
+		// not carry generation rows. Keep them flowing even when their parent
+		// task has already reached a terminal cleanup state; the client needs
+		// these events to converge its catalog/run UI.
+		if strings.HasPrefix(string(event.Type), "test.") || strings.HasPrefix(string(event.Type), "coverage.") {
+			return event
+		}
 	}
-	// Domain events for ordinary discovery, execution, and coverage tasks do
-	// not carry generation rows. Keep them flowing even when their parent task
-	// has already reached a terminal cleanup state; the client needs these
-	// events to converge its catalog/run UI.
-	if strings.HasPrefix(string(event.Type), "test.") || strings.HasPrefix(string(event.Type), "coverage.") {
-		return true
+	if !hide {
+		if s.backend == nil {
+			hide = true
+		} else {
+			value, err := s.backend.Get(ctx, event.TaskID)
+			hide = err != nil || value.Kind == task.KindTestGeneration
+		}
 	}
-	value, err := s.backend.Get(ctx, event.TaskID)
-	if err != nil {
-		return false
+	if !hide {
+		return event
 	}
-	return value.Kind != task.KindTestGeneration
+	event.TaskID = "00000000000000000000000000000000"
+	event.Type = task.EventTaskOutput
+	event.At = time.Unix(0, 0).UTC()
+	event.Payload = json.RawMessage(`{"stepId":"cursor-redacted","stream":"combined","text":"","truncated":false}`)
+	return event
 }
 
 func invalidPayload(version string, request protocol.Request) HandleResult {

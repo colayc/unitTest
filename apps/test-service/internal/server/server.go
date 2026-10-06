@@ -170,17 +170,17 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			subscriptionState.Unlock()
 			activeSubscription = &runningSubscription{subscription: result.Subscription, cancel: cancelForwarder, done: forwarderDone}
 			forwarders.Add(1)
-			go func(subscription *eventbroker.Subscription, subscribeRequest protocol.Request, filter func(context.Context, task.Event) bool) {
+			go func(subscription *eventbroker.Subscription, subscribeRequest protocol.Request, transform func(context.Context, task.Event) task.Event) {
 				defer forwarders.Done()
 				defer close(forwarderDone)
-				forwardSubscription(forwarderContext, subscription, subscribeRequest, filter, outbound, writerDone, func() {
+				forwardSubscription(forwarderContext, subscription, subscribeRequest, transform, outbound, writerDone, func() {
 					subscriptionState.Lock()
 					defer subscriptionState.Unlock()
 					if subscriptionGeneration == generation {
 						closeConnection()
 					}
 				})
-			}(result.Subscription, request, result.EventFilter)
+			}(result.Subscription, request, result.EventTransform)
 			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
@@ -363,7 +363,7 @@ func sendOutbound(ctx context.Context, outbound chan<- outboundMessage, writerDo
 	}
 }
 
-func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscription, subscribeRequest protocol.Request, filter func(context.Context, task.Event) bool, outbound chan<- outboundMessage, writerDone <-chan struct{}, closeConnection func()) {
+func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscription, subscribeRequest protocol.Request, transform func(context.Context, task.Event) task.Event, outbound chan<- outboundMessage, writerDone <-chan struct{}, closeConnection func()) {
 	defer subscription.Close()
 	events, subscriptionErrors := subscription.Events, subscription.Errors
 	for events != nil || subscriptionErrors != nil {
@@ -375,8 +375,8 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 				events = nil
 				continue
 			}
-			if filter != nil && !filter(ctx, event) {
-				continue
+			if transform != nil {
+				event = transform(ctx, event)
 			}
 			projected, err := toProtocolEvent(event, subscribeRequest.ProtocolVersion)
 			if err != nil {

@@ -333,7 +333,7 @@ func TestV15GlobalEventSubscriptionFiltersGenerationRows(t *testing.T) {
 		t.Fatal(result.Response.Error)
 	}
 	result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, "events/subscribe", map[string]any{"afterSequence": 0}))
-	if result.Response.Error != nil || result.EventFilter == nil {
+	if result.Response.Error != nil || result.EventTransform == nil {
 		t.Fatalf("global event subscription = %+v", result)
 	}
 	for _, route := range []struct {
