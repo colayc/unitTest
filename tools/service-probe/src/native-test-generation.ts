@@ -88,6 +88,7 @@ export interface NativeCoverageFailureInput {
     readonly errorMessage?: string;
   };
   readonly artifacts?: readonly NativeCoverageFailureArtifact[];
+  readonly serviceDiagnostics?: string;
 }
 
 const nativeCoverageDebugArtifactKinds = new Set(["task-summary", "build-summary", "stderr", "stdout", "diagnostics"]);
@@ -111,6 +112,10 @@ export function formatNativeCoverageFailure(input: NativeCoverageFailureInput): 
     const bounded = text.slice(0, remaining);
     parts.push(`${artifact.kind}=<<<\n${bounded}\n>>>`);
     remaining -= bounded.length;
+  }
+  if (input.serviceDiagnostics !== undefined && remaining > 0) {
+    const bounded = input.serviceDiagnostics.slice(0, remaining);
+    if (bounded.length > 0) parts.push(`service=<<<\n${bounded}\n>>>`);
   }
   return parts.join("; ");
 }
@@ -452,19 +457,27 @@ async function runFramework(
     await writeFile(join(workspaceRoot, ".unit-test-ide/workspace.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
     await selectProfileEventually(fixture.client, platform, initial.snapshot.workspaceGeneration);
     const relativePath = framework === "cpputest" ? "src/classifier.cpp" : "src/classifier.c";
-    const baseline = await runCoverageCycle(fixture.client, platform, relativePath);
-    return await executeNativeManagedGeneration({
-      client: fixture.client,
-      projectId,
-      workspaceGeneration: baseline.workspaceGeneration,
-      coverageReportId: baseline.coverageReportId,
-      fileId: baseline.fileId,
-      functionId: baseline.functionId,
-      framework,
-      maxPollAttempts: 600,
-      pollIntervalMs: 500,
-      refreshCoverage: async () => runCoverageCycle(fixture.client, platform, relativePath),
-    });
+    try {
+      const baseline = await runCoverageCycle(fixture.client, platform, relativePath);
+      return await executeNativeManagedGeneration({
+        client: fixture.client,
+        projectId,
+        workspaceGeneration: baseline.workspaceGeneration,
+        coverageReportId: baseline.coverageReportId,
+        fileId: baseline.fileId,
+        functionId: baseline.functionId,
+        framework,
+        maxPollAttempts: 600,
+        pollIntervalMs: 500,
+        refreshCoverage: async () => runCoverageCycle(fixture.client, platform, relativePath),
+      });
+    } catch (error) {
+      if (process.env.UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION === "1" || process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1") {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`${message}; service=<<<\n${fixture.debugDiagnostics.slice(0, nativeCoverageDebugTextLimit)}\n>>>`);
+      }
+      throw error;
+    }
   } finally {
     await fixture.dispose();
   }

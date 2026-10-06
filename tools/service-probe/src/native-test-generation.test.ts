@@ -25,11 +25,13 @@ test("native coverage failure diagnostics retain bounded task and compiler conte
       { kind: "stdout", text: "build started\n" },
       { kind: "coverage-json", text: "must not be printed" },
     ],
+    serviceDiagnostics: "process=running; stderr=cmake: compiler failed",
   });
   assert.match(message, /build_failed/u);
   assert.match(message, /BUILD_FAILED/u);
   assert.match(message, /clang\+\+: error: missing header/u);
   assert.match(message, /build started/u);
+  assert.match(message, /cmake: compiler failed/u);
   assert.doesNotMatch(message, /must not be printed/u);
 });
 
