@@ -194,18 +194,23 @@ async function listArchiveEntries(archivePath, spec) {
     maxBuffer: 128 * 1024 * 1024,
     windowsHide: true,
   };
-  const [names, verbose] = await Promise.all([
-    execFile("tar", ["-tf", archivePath], options),
-    execFile("tar", ["-tvf", archivePath], options),
-  ]);
-  const paths = names.stdout.split(/\r?\n/u).filter(Boolean);
-  const lines = verbose.stdout.split(/\r?\n/u).filter(Boolean);
-  if (paths.length !== lines.length) throw new Error("archive type listing does not match path listing");
-  const entries = paths.map((path, index) => {
-    const line = lines[index];
+  // A verbose listing already contains every archive path and its entry type.
+  // Running `tar -tf` and `tar -tvf` in parallel decompresses the same large
+  // LLVM archive twice and can exceed the Windows job timeout. Parse one
+  // detailed listing instead while retaining the existing link/type checks.
+  const { stdout } = await execFile("tar", ["-tvf", archivePath], options);
+  const lines = stdout.split(/\r?\n/u).filter(Boolean);
+  const entries = lines.map((line) => {
     const type = line[0];
     const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
-    return { path, type, target: marker && line.includes(marker) ? line.slice(line.lastIndexOf(marker) + marker.length) : undefined };
+    const markerIndex = marker ? line.lastIndexOf(marker) : -1;
+    const metadata = markerIndex >= 0 ? line.slice(0, markerIndex) : line;
+    // GNU tar's verbose format is: mode owner size date time path. Keep the
+    // path's remaining characters intact so spaces are not silently changed.
+    const match = metadata.match(/^\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/u);
+    if (!match) throw new Error(`archive verbose listing has an unexpected format: ${line}`);
+    const path = match[1];
+    return { path, type, target: markerIndex >= 0 ? line.slice(markerIndex + marker.length) : undefined };
   });
   return validateSelectedArchiveEntries(entries, spec);
 }
