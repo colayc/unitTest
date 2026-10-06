@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ProtocolError,
@@ -41,6 +41,7 @@ export function parseNativeTestGenerationArguments(arguments_: readonly string[]
 export function buildNativeGenerationWorkspaceConfig(
   framework: Framework,
   baseBuildProfileId: string,
+  toolchain?: NativeGenerationToolchainConfig,
 ): unknown {
   if (framework !== "cpputest" && framework !== "unity") {
     throw new Error("native test-generation framework is invalid");
@@ -48,7 +49,7 @@ export function buildNativeGenerationWorkspaceConfig(
   if (!hex64.test(baseBuildProfileId)) {
     throw new Error("native test-generation base profile is invalid");
   }
-  return {
+  const config: Record<string, unknown> = {
     version: 3,
     projects: [{
       id: projectId,
@@ -63,6 +64,59 @@ export function buildNativeGenerationWorkspaceConfig(
       exclude: ["tests/**", ".unit-test-ide/**"],
     }],
   };
+  if (toolchain !== undefined) config.toolchains = [toolchain];
+  return config;
+}
+
+export interface NativeGenerationToolchainConfig {
+  readonly id: string;
+  readonly family: "clang" | "clang-cl";
+  readonly cCompiler: string;
+  readonly cppCompiler: string;
+}
+
+export function buildNativeGenerationToolchainConfig(
+  platform: NativePlatform,
+  bundleRoot: string,
+): NativeGenerationToolchainConfig {
+  const pathApi = platform === "linux" ? posix : win32;
+  if (bundleRoot.length === 0 || !pathApi.isAbsolute(bundleRoot)) {
+    throw new Error("native generation LLVM bundle root must be absolute");
+  }
+  if (platform === "linux") {
+    return {
+      id: "approved-clang-llvm",
+      family: "clang",
+      cCompiler: pathApi.join(bundleRoot, "bin", "clang"),
+      cppCompiler: pathApi.join(bundleRoot, "bin", "clang++"),
+    };
+  }
+  return {
+    id: "approved-clang-cl-llvm",
+    family: "clang-cl",
+    cCompiler: pathApi.join(bundleRoot, "bin", "clang-cl.exe"),
+    cppCompiler: pathApi.join(bundleRoot, "bin", "clang-cl.exe"),
+  };
+}
+
+export function buildNativeGenerationBootstrapConfig(
+  framework: Framework,
+  toolchain?: NativeGenerationToolchainConfig,
+): unknown {
+  if (framework !== "cpputest" && framework !== "unity") {
+    throw new Error("native test-generation framework is invalid");
+  }
+  const config: Record<string, unknown> = {
+    version: 2,
+    projects: [{
+      id: projectId,
+      sourceDir: ".",
+      fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
+      tests: { containers: [{ ctestName: "classifier-tests", framework }] },
+    }],
+  };
+  if (toolchain !== undefined) config.toolchains = [toolchain];
+  return config;
 }
 
 export interface SelectedNativeGenerationProfile {
@@ -294,6 +348,17 @@ async function runFramework(
     force: false,
     errorOnExist: true,
   });
+  const llvmBundleRoot = platform === "linux" ? process.env.UTIDE_NATIVE_LLVM_BUNDLE : undefined;
+  const toolchain = llvmBundleRoot === undefined
+    ? undefined
+    : buildNativeGenerationToolchainConfig(platform, llvmBundleRoot);
+  if (toolchain !== undefined) {
+    await writeFile(
+      join(workspaceRoot, ".unit-test-ide/workspace.json"),
+      `${JSON.stringify(buildNativeGenerationBootstrapConfig(framework, toolchain), null, 2)}\n`,
+      "utf8",
+    );
+  }
   const frameworkRoot = framework === "cpputest" ? boundary.cpputestRoot : boundary.unityRoot;
   await mkdir(join(workspaceRoot, ".unit-test-ide/inputs"), { recursive: true });
   await cp(frameworkRoot, join(workspaceRoot, ".unit-test-ide/inputs", framework), {
@@ -312,7 +377,7 @@ async function runFramework(
   });
   try {
     const initial = await selectProfileEventually(fixture.client, platform);
-    const config = buildNativeGenerationWorkspaceConfig(framework, initial.profile.buildProfileId);
+    const config = buildNativeGenerationWorkspaceConfig(framework, initial.profile.buildProfileId, toolchain);
     await writeFile(join(workspaceRoot, ".unit-test-ide/workspace.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
     await selectProfileEventually(fixture.client, platform, initial.snapshot.workspaceGeneration);
     const relativePath = framework === "cpputest" ? "src/classifier.cpp" : "src/classifier.c";

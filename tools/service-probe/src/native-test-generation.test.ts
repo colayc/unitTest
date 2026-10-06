@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildNativeGenerationBootstrapConfig,
   buildNativeGenerationWorkspaceConfig,
+  buildNativeGenerationToolchainConfig,
   parseNativeTestGenerationArguments,
   selectNativeGenerationProfile,
   selectNativeGenerationTarget,
@@ -36,6 +38,43 @@ test("workspace configuration binds one generated Debug profile and exposes one 
     }],
   });
   assert.throws(() => buildNativeGenerationWorkspaceConfig("unity", "bad"), /profile/u);
+});
+
+test("Linux generation bootstrap binds the approved LLVM toolchain before profile discovery", () => {
+	const root = "/opt/unit-test-ide/llvm-coverage-bundle";
+	const toolchain = buildNativeGenerationToolchainConfig("linux", root);
+	assert.deepEqual(toolchain, {
+		id: "approved-clang-llvm",
+		family: "clang",
+		cCompiler: `${root}/bin/clang`,
+		cppCompiler: `${root}/bin/clang++`,
+	});
+	assert.deepEqual(buildNativeGenerationBootstrapConfig("cpputest", toolchain), {
+		version: 2,
+		projects: [{
+			id: "classifier",
+			sourceDir: ".",
+			fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
+			tests: { containers: [{ ctestName: "classifier-tests", framework: "cpputest" }] },
+		}],
+		toolchains: [toolchain],
+	});
+	assert.deepEqual(buildNativeGenerationWorkspaceConfig("cpputest", digest("a"), toolchain), {
+		version: 3,
+		projects: [{
+			id: "classifier",
+			sourceDir: ".",
+			fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
+			tests: { containers: [{ ctestName: "classifier-tests", framework: "cpputest" }] },
+		}],
+		coverageProfiles: [{
+			id: "generation-coverage",
+			baseBuildProfileId: digest("a"),
+			include: ["src/**"],
+			exclude: ["tests/**", ".unit-test-ide/**"],
+		}],
+		toolchains: [toolchain],
+	});
 });
 
 test("native generation chooses only the production LLVM family and exact generated profile", () => {
