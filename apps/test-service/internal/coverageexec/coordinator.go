@@ -987,7 +987,8 @@ func (execution *execution) ExecuteServiceAction(
 		return task.StepResult{}, errors.New("coverage adapter is unavailable")
 	}
 	if execution.terminalErr != nil {
-		if execution.terminalOutcome == task.OutcomeCommandFailed {
+		if execution.terminalOutcome == task.OutcomeCommandFailed &&
+			os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
 			return task.StepResult{Verdict: task.StepVerdictFailed}, nil
 		}
 		return task.StepResult{}, execution.terminalErr
