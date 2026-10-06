@@ -86,6 +86,13 @@ interface Observations {
   readonly spawnArguments: string[][];
   readonly connectedEndpoints: string[];
   readonly children: ObservedChild[];
+  discoveryTaskId?: string;
+  discoveryTask?: {
+    status?: string;
+    outcome?: string;
+    errorCode?: string;
+    errorMessage?: string;
+  };
 }
 
 function createObservations(): Observations {
@@ -301,6 +308,7 @@ function createRealOperations(
         ["inspectWorkspace", "workspace/inspect"],
         ["discoverTests", "discoverTests"],
         ["getTestCatalog", "catalog"],
+        ["getTask", "task"],
         ["runTests", "runTests"]
       ]);
       return new Proxy(client, {
@@ -310,7 +318,31 @@ function createRealOperations(
           return (...args: unknown[]) => {
             const label = tracked.get(property);
             if (label) observations.testingCalls.push(label);
-            return Reflect.apply(value, target, args);
+            const result = Reflect.apply(value, target, args) as unknown;
+            if (label === "discoverTests" && result && typeof (result as Promise<unknown>).then === "function") {
+              return (result as Promise<Record<string, unknown>>).then((snapshot) => {
+                if (typeof snapshot.taskId === "string") observations.discoveryTaskId = snapshot.taskId;
+                observations.discoveryTask = {
+                  status: typeof snapshot.status === "string" ? snapshot.status : undefined,
+                  outcome: typeof snapshot.outcome === "string" ? snapshot.outcome : undefined,
+                  errorCode: typeof snapshot.errorCode === "string" ? snapshot.errorCode : undefined,
+                  errorMessage: typeof snapshot.errorMessage === "string" ? snapshot.errorMessage : undefined
+                };
+                return snapshot;
+              });
+            }
+            if (label === "task" && result && typeof (result as Promise<unknown>).then === "function") {
+              return (result as Promise<Record<string, unknown>>).then((snapshot) => {
+                observations.discoveryTask = {
+                  status: typeof snapshot.status === "string" ? snapshot.status : undefined,
+                  outcome: typeof snapshot.outcome === "string" ? snapshot.outcome : undefined,
+                  errorCode: typeof snapshot.errorCode === "string" ? snapshot.errorCode : undefined,
+                  errorMessage: typeof snapshot.errorMessage === "string" ? snapshot.errorMessage : undefined
+                };
+                return snapshot;
+              });
+            }
+            return result;
           };
         }
       });
@@ -478,6 +510,9 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
     await controller.activate();
     assert.ok(manager?.session);
     collectSessionSecrets(manager.session, observations, sensitive);
+    if (observations.discoveryTaskId) {
+      await manager.session.client.getTask(observations.discoveryTaskId);
+    }
 
     const profile = testing.profiles[0];
     assert.ok(profile, "the activated adapter must register a run profile");
@@ -489,11 +524,11 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
       failingItem = items.find((item) => item.label === "fails");
       assert.ok(
         passingItem,
-        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")})`
+        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; task:${JSON.stringify(observations.discoveryTask)})`
       );
       assert.ok(
         failingItem,
-        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")})`
+        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; task:${JSON.stringify(observations.discoveryTask)})`
       );
     });
     const discoveredPassingItem = passingItem;
