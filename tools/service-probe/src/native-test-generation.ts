@@ -98,6 +98,34 @@ export interface NativeCoverageFailureInput {
 const nativeCoverageDebugArtifactKinds = new Set(["task-summary", "build-summary", "stderr", "stdout", "diagnostics"]);
 const nativeCoverageDebugTextLimit = 12_000;
 
+type NativeTaskFailureTask = {
+  readonly outcome?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+};
+
+export function formatNativeTaskFailure(
+  label: string,
+  task: NativeTaskFailureTask,
+  artifacts: readonly NativeCoverageFailureArtifact[] = [],
+): string {
+  const parts = [label];
+  const detail = [task.outcome, task.errorCode, task.errorMessage]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join(" ");
+  if (detail.length > 0) parts.push(`task=${detail}`);
+  let remaining = nativeCoverageDebugTextLimit;
+  for (const artifact of artifacts) {
+    if (!nativeCoverageDebugArtifactKinds.has(artifact.kind) || remaining <= 0) continue;
+    const text = artifact.text.trim();
+    if (text.length === 0) continue;
+    const bounded = text.slice(0, remaining);
+    parts.push(`${artifact.kind}=<<<\n${bounded}\n>>>`);
+    remaining -= bounded.length;
+  }
+  return parts.join("; ");
+}
+
 export function formatNativeCoverageFailure(input: NativeCoverageFailureInput): string {
   const parts = [
     `native test-generation coverage is ${String(input.run.outcome ?? "unknown")} (${String(input.run.reason ?? "no-reason")})`,
@@ -276,12 +304,41 @@ async function selectProfileEventually(
   }
 }
 
+async function readDebugTaskArtifacts(client: ProtocolClient, taskId: string): Promise<NativeCoverageFailureArtifact[]> {
+  const artifacts: NativeCoverageFailureArtifact[] = [];
+  try {
+    const page = await client.listArtifacts(taskId, { limit: 200 });
+    for (const artifact of page.items) {
+      if (!nativeCoverageDebugArtifactKinds.has(String(artifact.kind))) continue;
+      try {
+        const bytes = await client.readArtifact(artifact.artifactId);
+        artifacts.push({ kind: String(artifact.kind), text: new TextDecoder().decode(bytes) });
+      } catch (error) {
+        artifacts.push({
+          kind: String(artifact.kind),
+          text: `artifact read failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+  } catch (error) {
+    artifacts.push({
+      kind: "diagnostics",
+      text: `task failure detail lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  return artifacts;
+}
+
 async function waitForTask(client: ProtocolClient, taskId: string, label: string): Promise<void> {
   const deadline = Date.now() + operationTimeoutMs;
   for (;;) {
     const task = await client.getTask(taskId);
     if (task.status === "finished") {
       if (task.outcome !== "succeeded") {
+        if (process.env.UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION === "1" || process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1") {
+          const artifacts = await readDebugTaskArtifacts(client, taskId);
+          throw new Error(formatNativeTaskFailure(label, task, artifacts));
+        }
         throw new Error(`${label} failed with ${String(task.outcome)} (${String(task.errorCode ?? "no-code")})`);
       }
       return;

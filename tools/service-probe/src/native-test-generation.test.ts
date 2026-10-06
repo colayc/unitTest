@@ -6,6 +6,7 @@ import {
   buildNativeGenerationWorkspaceConfig,
   buildNativeGenerationToolchainConfig,
   formatNativeCoverageFailure,
+  formatNativeTaskFailure,
   parseNativeTestGenerationArguments,
   selectNativeGenerationProfile,
   selectNativeGenerationTarget,
@@ -46,6 +47,22 @@ test("native coverage failure diagnostics retain bounded task and compiler conte
   assert.match(message, /clang\+\+: error: missing header/u);
   assert.match(message, /build started/u);
   assert.match(message, /cmake: compiler failed/u);
+  assert.doesNotMatch(message, /must not be printed/u);
+});
+
+test("native task failure diagnostics expose bounded build artifacts only when requested", () => {
+  const message = formatNativeTaskFailure("native test-generation build", {
+    outcome: "command_failed",
+    errorCode: "BUILD_FAILED",
+    errorMessage: "cmake exited with code 1",
+  }, [
+    { kind: "build-summary", text: "configure=ok\nbuild=failed\n" },
+    { kind: "stderr", text: "ninja: error: unknown target classifier-tests\n" },
+    { kind: "secret", text: "must not be printed" },
+  ]);
+  assert.match(message, /native test-generation build/u);
+  assert.match(message, /BUILD_FAILED/u);
+  assert.match(message, /unknown target classifier-tests/u);
   assert.doesNotMatch(message, /must not be printed/u);
 });
 
