@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { prepareBundle, publishCheckedBundle, validateArchiveEntries, validateSelectedArchiveEntries, validateSourceManifest, verifyExtractedSelection } from "./prepare.mjs";
+import { parseArchiveListing, prepareBundle, publishCheckedBundle, validateArchiveEntries, validateSelectedArchiveEntries, validateSourceManifest, verifyExtractedSelection } from "./prepare.mjs";
 
 async function trackedManifest() {
   return JSON.parse(await readFile(new URL("./manifest.json", import.meta.url), "utf8"));
@@ -168,6 +168,19 @@ test("archive inspection rejects nested selected links and unlisted selected fil
     { path: "root/lib/clang/", type: "l", target: "../../escape" },
     ...entries.filter(({ path }) => path !== "root/lib/clang/"),
   ], spec), /link|symlink|type/u);
+});
+
+test("archive listing parser accepts GNU tar and bsdtar metadata layouts", () => {
+  const spec = {
+    archiveRoot: "clang+llvm-22.1.8-x86_64-pc-windows-msvc",
+    executable: "bin/clang.exe",
+    resourceDir: "lib/clang/22",
+    files: [{ path: "bin/clang.exe" }],
+  };
+  const gnu = "-rwxr-xr-x runner/runner 123 2026-01-01 00:00 clang+llvm-22.1.8-x86_64-pc-windows-msvc/bin/clang.exe";
+  const bsd = "-rwxr-xr-x  1000  1000  123 Jan 01 00:00:00 2026 clang+llvm-22.1.8-x86_64-pc-windows-msvc/bin/clang.exe";
+  assert.equal(parseArchiveListing(`${gnu}\n`, spec)[0].path, `${spec.archiveRoot}/bin/clang.exe`);
+  assert.equal(parseArchiveListing(`${bsd}\n`, spec)[0].path, `${spec.archiveRoot}/bin/clang.exe`);
 });
 
 test("post-extraction inspection rejects an unlisted nested selected file", async (t) => {

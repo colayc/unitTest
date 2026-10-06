@@ -188,6 +188,28 @@ async function downloadVerifiedSource(url, destination, maximumBytes) {
   throw new Error("source redirect limit exceeded");
 }
 
+export function parseArchiveListing(stdout, spec) {
+  const lines = stdout.split(/\r?\n/u).filter(Boolean);
+  const archiveRootPrefix = `${spec.archiveRoot}/`;
+  const entries = lines.map((line) => {
+    const type = line[0];
+    // GNU tar and bsdtar use different numbers of date/owner columns. The
+    // reviewed archive root is the stable delimiter; parse from it instead of
+    // assuming one platform-specific verbose-column layout.
+    const pathStart = line.indexOf(archiveRootPrefix);
+    if (pathStart < 0) throw new Error(`archive verbose listing has no reviewed root: ${line}`);
+    const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
+    const listed = line.slice(pathStart);
+    const markerIndex = marker ? listed.lastIndexOf(marker) : -1;
+    return {
+      path: markerIndex >= 0 ? listed.slice(0, markerIndex) : listed,
+      type,
+      target: markerIndex >= 0 ? listed.slice(markerIndex + marker.length) : undefined,
+    };
+  });
+  return validateSelectedArchiveEntries(entries, spec);
+}
+
 async function listArchiveEntries(archivePath, spec) {
   const options = {
     encoding: "utf8",
@@ -199,20 +221,7 @@ async function listArchiveEntries(archivePath, spec) {
   // LLVM archive twice and can exceed the Windows job timeout. Parse one
   // detailed listing instead while retaining the existing link/type checks.
   const { stdout } = await execFile("tar", ["-tvf", archivePath], options);
-  const lines = stdout.split(/\r?\n/u).filter(Boolean);
-  const entries = lines.map((line) => {
-    const type = line[0];
-    const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
-    const markerIndex = marker ? line.lastIndexOf(marker) : -1;
-    const metadata = markerIndex >= 0 ? line.slice(0, markerIndex) : line;
-    // GNU tar's verbose format is: mode owner size date time path. Keep the
-    // path's remaining characters intact so spaces are not silently changed.
-    const match = metadata.match(/^\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/u);
-    if (!match) throw new Error(`archive verbose listing has an unexpected format: ${line}`);
-    const path = match[1];
-    return { path, type, target: markerIndex >= 0 ? line.slice(markerIndex + marker.length) : undefined };
-  });
-  return validateSelectedArchiveEntries(entries, spec);
+  return parseArchiveListing(stdout, spec);
 }
 
 async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec) {
