@@ -535,16 +535,6 @@ jobs:
       # Bootstrap/download/cache work completes before the fail-closed native namespace.
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
-      - id: llvm-coverage-manifest
-        shell: bash
-        run: |
-          digest="$(sha256sum tools/llvm-coverage-bundle/manifest.json | cut -d' ' -f1)"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - id: llvm-coverage-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .superpowers/cache/llvm-coverage-bundle
-          key: llvm-coverage-bundle-linux-x64-v1-${{ steps.llvm-coverage-manifest.outputs.digest }}
       - name: Prepare approved offline LLVM bundle for managed generation
         shell: bash
         run: |
