@@ -5,12 +5,33 @@ import {
   buildNativeGenerationBootstrapConfig,
   buildNativeGenerationWorkspaceConfig,
   buildNativeGenerationToolchainConfig,
+  formatNativeCoverageFailure,
   parseNativeTestGenerationArguments,
   selectNativeGenerationProfile,
   selectNativeGenerationTarget,
 } from "./native-test-generation.js";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
+
+test("native coverage failure diagnostics retain bounded task and compiler context", () => {
+  const message = formatNativeCoverageFailure({
+    run: {
+      outcome: "unavailable" as NonNullable<import("@unit-test-ide/test-client").CoverageRun["outcome"]>,
+      reason: "build_failed" as NonNullable<import("@unit-test-ide/test-client").CoverageRun["reason"]>,
+    },
+    task: { outcome: "command_failed", errorCode: "BUILD_FAILED", errorMessage: "compiler exited with code 1" },
+    artifacts: [
+      { kind: "stderr", text: "clang++: error: missing header\n" },
+      { kind: "stdout", text: "build started\n" },
+      { kind: "coverage-json", text: "must not be printed" },
+    ],
+  });
+  assert.match(message, /build_failed/u);
+  assert.match(message, /BUILD_FAILED/u);
+  assert.match(message, /clang\+\+: error: missing header/u);
+  assert.match(message, /build started/u);
+  assert.doesNotMatch(message, /must not be printed/u);
+});
 
 test("native generation arguments are closed to the current supported platforms", () => {
   assert.deepEqual(parseNativeTestGenerationArguments(["--platform", "linux"]), { platform: "linux" });

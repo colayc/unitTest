@@ -75,6 +75,46 @@ export interface NativeGenerationToolchainConfig {
   readonly cppCompiler: string;
 }
 
+export interface NativeCoverageFailureArtifact {
+  readonly kind: string;
+  readonly text: string;
+}
+
+export interface NativeCoverageFailureInput {
+  readonly run: Pick<CoverageRun, "outcome" | "reason">;
+  readonly task?: {
+    readonly outcome?: string;
+    readonly errorCode?: string;
+    readonly errorMessage?: string;
+  };
+  readonly artifacts?: readonly NativeCoverageFailureArtifact[];
+}
+
+const nativeCoverageDebugArtifactKinds = new Set(["task-summary", "build-summary", "stderr", "stdout", "diagnostics"]);
+const nativeCoverageDebugTextLimit = 12_000;
+
+export function formatNativeCoverageFailure(input: NativeCoverageFailureInput): string {
+  const parts = [
+    `native test-generation coverage is ${String(input.run.outcome ?? "unknown")} (${String(input.run.reason ?? "no-reason")})`,
+  ];
+  if (input.task !== undefined) {
+    const task = [input.task.outcome, input.task.errorCode, input.task.errorMessage]
+      .filter((value): value is string => value !== undefined && value.length > 0)
+      .join(" ");
+    if (task.length > 0) parts.push(`task=${task}`);
+  }
+  let remaining = nativeCoverageDebugTextLimit;
+  for (const artifact of input.artifacts ?? []) {
+    if (!nativeCoverageDebugArtifactKinds.has(artifact.kind) || remaining <= 0) continue;
+    const text = artifact.text.trim();
+    if (text.length === 0) continue;
+    const bounded = text.slice(0, remaining);
+    parts.push(`${artifact.kind}=<<<\n${bounded}\n>>>`);
+    remaining -= bounded.length;
+  }
+  return parts.join("; ");
+}
+
 export function buildNativeGenerationToolchainConfig(
   platform: NativePlatform,
   bundleRoot: string,
@@ -248,7 +288,38 @@ async function waitForCoverage(client: ProtocolClient, coverageRunId: string): P
     const run = await client.getCoverageRun(coverageRunId);
     if (run.status === "finished") {
       if (run.outcome !== "available" || run.reportId === undefined) {
-        throw new Error(`native test-generation coverage is ${String(run.outcome)} (${String(run.reason ?? "no-reason")})`);
+        if (process.env.UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION === "1" || process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1") {
+          let task: NativeCoverageFailureInput["task"];
+          let artifacts: NativeCoverageFailureArtifact[] = [];
+          try {
+            const taskSnapshot = await client.getTask(run.taskId);
+            task = {
+              outcome: String(taskSnapshot.outcome ?? ""),
+              errorCode: taskSnapshot.errorCode,
+              errorMessage: taskSnapshot.errorMessage,
+            };
+            const artifactPage = await client.listArtifacts(run.taskId, { limit: 200 });
+            for (const artifact of artifactPage.items) {
+              if (!nativeCoverageDebugArtifactKinds.has(String(artifact.kind))) continue;
+              try {
+                const bytes = await client.readArtifact(artifact.artifactId);
+                artifacts.push({ kind: String(artifact.kind), text: new TextDecoder().decode(bytes) });
+              } catch (error) {
+                artifacts.push({
+                  kind: String(artifact.kind),
+                  text: `artifact read failed: ${error instanceof Error ? error.message : String(error)}`,
+                });
+              }
+            }
+          } catch (error) {
+            artifacts.push({
+              kind: "diagnostics",
+              text: `coverage failure detail lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+          throw new Error(formatNativeCoverageFailure({ run, task, artifacts }));
+        }
+        throw new Error(formatNativeCoverageFailure({ run }));
       }
       return run;
     }
