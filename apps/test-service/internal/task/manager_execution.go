@@ -1326,6 +1326,11 @@ func debugProcessErrorMessage(err error, fallback string) string {
 	}
 	message := err.Error()
 	for _, category := range []string{
+		"coverage preparation rejected: coverage input",
+		"coverage preparation rejected: instrumented build plan",
+		"coverage preparation rejected: instrumented identity",
+		"coverage preparation rejected: coverage toolset handoff",
+		"coverage preparation rejected: instrumented plan rewrite",
 		"target process group remained alive",
 		"target process group termination failed",
 		"target process group kill failed",

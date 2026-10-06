@@ -3,8 +3,10 @@ package coverageexec
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -31,6 +33,20 @@ func TestExecuteServiceActionExposesPreparationCommandFailureInDebugMode(t *test
 	}
 	if !errors.Is(result.Process.Err, terminalErr) {
 		t.Fatalf("debug preparation process error = %v, want %v", result.Process.Err, terminalErr)
+	}
+}
+
+func TestFailPreparationStageAddsOnlyStableDebugCategory(t *testing.T) {
+	t.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "1")
+	debugErr := failPreparationStage(coveragerun.PhaseBuild, "instrumented build plan", task.ErrInvalidArgument)
+	if !errors.Is(debugErr, task.ErrInvalidArgument) || !strings.Contains(debugErr.Error(), "coverage preparation rejected: instrumented build plan") {
+		t.Fatalf("debug preparation stage error = %v", debugErr)
+	}
+
+	t.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "")
+	plainErr := failPreparationStage(coveragerun.PhaseBuild, "instrumented build plan", task.ErrInvalidArgument)
+	if !errors.Is(plainErr, task.ErrInvalidArgument) || strings.Contains(plainErr.Error(), "coverage preparation rejected") {
+		t.Fatalf("plain preparation stage error = %v", plainErr)
 	}
 }
 
