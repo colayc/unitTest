@@ -478,21 +478,35 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
 
     const profile = testing.profiles[0];
     assert.ok(profile, "the activated adapter must register a run profile");
-    const items = nestedItems(testing.items);
-    const passingItem = items.find((item) => item.label === "passes");
-    const failingItem = items.find((item) => item.label === "fails");
-    assert.ok(passingItem, "real discovery must publish the passing case");
-    assert.ok(failingItem, "real discovery must publish the failing case");
+    let passingItem: TestingTestItem | undefined;
+    let failingItem: TestingTestItem | undefined;
+    await eventually(() => {
+      const items = nestedItems(testing.items);
+      passingItem = items.find((item) => item.label === "passes");
+      failingItem = items.find((item) => item.label === "fails");
+      assert.ok(
+        passingItem,
+        `real discovery must publish the passing case (labels=${items.map((item) => item.label).join(",")})`
+      );
+      assert.ok(
+        failingItem,
+        `real discovery must publish the failing case (labels=${items.map((item) => item.label).join(",")})`
+      );
+    });
+    const discoveredPassingItem = passingItem;
+    const discoveredFailingItem = failingItem;
+    assert.ok(discoveredPassingItem);
+    assert.ok(discoveredFailingItem);
 
     await profile.handler({});
     await eventually(() => {
       const run = testing.runs[0];
       assert.ok(run);
       assert.equal(run.ends, 1);
-      assert.equal(run.passed.includes(passingItem.id), true);
-      assert.equal(run.failed.includes(failingItem.id), true);
-      assert.equal(run.errored.includes(passingItem.id), false);
-      assert.equal(run.errored.includes(failingItem.id), false);
+      assert.equal(run.passed.includes(discoveredPassingItem.id), true);
+      assert.equal(run.failed.includes(discoveredFailingItem.id), true);
+      assert.equal(run.errored.includes(discoveredPassingItem.id), false);
+      assert.equal(run.errored.includes(discoveredFailingItem.id), false);
       const inspectIndex = observations.testingCalls.indexOf("workspace/inspect");
       const discoveryIndex = observations.testingCalls.indexOf("discoverTests");
       const catalogIndex = observations.testingCalls.indexOf("catalog");
