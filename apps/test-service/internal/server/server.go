@@ -419,7 +419,8 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	} else if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
-	} else if (version == protocol.Version13 || version == protocol.Version14) &&
+	} else if (version == protocol.Version13 || version == protocol.Version14 ||
+		version == protocol.Version15 || version == protocol.Version16) &&
 		event.Type == task.EventTaskDiagnostic {
 		var err error
 		payload, err = projectV13Diagnostic(event.Payload)
