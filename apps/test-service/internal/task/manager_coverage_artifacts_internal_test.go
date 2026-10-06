@@ -43,6 +43,31 @@ func TestCoverageProcessOutputIsPrivateToResultObserver(t *testing.T) {
 	}
 }
 
+func TestCoverageProcessOutputIsCapturedForExplicitDebugDiagnostics(t *testing.T) {
+	t.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "1")
+	sentinel := []byte("clang++: error: missing header\n")
+	sink := &coverageOnlyRecordingSink{}
+	manager := &Manager{clock: RealClock{}, outputFlushInterval: time.Hour}
+	current := &activeTask{
+		task: Task{ID: "22222222222222222222222222222222", Kind: KindCoverageRun,
+			Status: StatusRunning, ActiveStep: "coverage-build"},
+		plan: ExecutionPlan{Version: 1, Steps: []ExecutionStep{{
+			ID: "coverage-build", Kind: StepCoverageBuild,
+		}}},
+		resultInterpreter: &coveragePrivateObserver{},
+		artifactSink:      sink,
+		execution:         newExecutionSignal(),
+		timerStop:         make(chan struct{}),
+	}
+	manager.acceptOutput(current, ProcessOutput{
+		Source: "clang++", Stream: "stderr", Data: sentinel,
+	}, map[string]*activeTask{current.task.ID: current})
+	close(current.timerStop)
+	if len(sink.outputs) != 1 || !bytes.Equal(sink.outputs[0], sentinel) {
+		t.Fatalf("debug coverage output = %q, want bounded compiler diagnostic", sink.outputs)
+	}
+}
+
 type coveragePrivateObserver struct{ output []byte }
 
 func (*coveragePrivateObserver) Interpret(context.Context, Task, ExecutionStep, ProcessResult) (StepVerdict, error) {
