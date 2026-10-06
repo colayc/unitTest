@@ -1326,6 +1326,12 @@ func debugProcessErrorMessage(err error, fallback string) string {
 	}
 	message := err.Error()
 	for _, category := range []string{
+		"coverage preparation build plan rejected: coverage options",
+		"coverage preparation build plan rejected: coverage toolset capability",
+		"coverage preparation build plan rejected: coverage build directory",
+		"coverage preparation build plan rejected: coverage directory pin",
+		"coverage preparation build plan rejected: coverage directory collision",
+		"coverage preparation build plan rejected: coverage directory verification",
 		"coverage preparation rejected: coverage input",
 		"coverage preparation rejected: instrumented build plan",
 		"coverage preparation rejected: instrumented identity",
