@@ -9,9 +9,23 @@ import {
   parseNativeTestGenerationArguments,
   selectNativeGenerationProfile,
   selectNativeGenerationTarget,
+  shouldPreserveNativeGenerationFailureWorkspace,
 } from "./native-test-generation.js";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
+
+test("native generation preserves the failure workspace only under the explicit debug switch", () => {
+  const previous = process.env.UT_DEBUG_PROCESS_HOST_FAILURES;
+  try {
+    delete process.env.UT_DEBUG_PROCESS_HOST_FAILURES;
+    assert.equal(shouldPreserveNativeGenerationFailureWorkspace(), false);
+    process.env.UT_DEBUG_PROCESS_HOST_FAILURES = "1";
+    assert.equal(shouldPreserveNativeGenerationFailureWorkspace(), true);
+  } finally {
+    if (previous === undefined) delete process.env.UT_DEBUG_PROCESS_HOST_FAILURES;
+    else process.env.UT_DEBUG_PROCESS_HOST_FAILURES = previous;
+  }
+});
 
 test("native coverage failure diagnostics retain bounded task and compiler context", () => {
   const message = formatNativeCoverageFailure({

@@ -30,6 +30,10 @@ const operationTimeoutMs = 300_000;
 const pollIntervalMs = 100;
 const hex64 = /^[0-9a-f]{64}$/u;
 
+export function shouldPreserveNativeGenerationFailureWorkspace(): boolean {
+  return process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1";
+}
+
 export function parseNativeTestGenerationArguments(arguments_: readonly string[]): { platform: NativePlatform } {
   if (arguments_.length !== 2 || arguments_[0] !== "--platform" ||
       arguments_[1] !== "linux" && arguments_[1] !== "win32") {
@@ -492,6 +496,7 @@ export async function runNativeTestGenerationAcceptance(
   const workParent = join(root, ".native-e2e/test-generation-work");
   await mkdir(workParent, { recursive: true });
   const workRoot = await mkdtemp(join(workParent, `${platform}-`));
+  const preserveFailureWorkspace = shouldPreserveNativeGenerationFailureWorkspace();
   try {
     const results: Array<{ framework: Framework; receipt: NativeManagedGenerationReceipt }> = [];
     for (const framework of ["cpputest", "unity"] as const) {
@@ -500,7 +505,11 @@ export async function runNativeTestGenerationAcceptance(
     }
     return Object.freeze(results.map((result) => Object.freeze(result)));
   } finally {
-    await rm(workRoot, { recursive: true, force: true });
+    if (preserveFailureWorkspace) {
+      process.stderr.write(`native-test-generation: preserved failure workspace ${workRoot}\n`);
+    } else {
+      await rm(workRoot, { recursive: true, force: true });
+    }
   }
 }
 
