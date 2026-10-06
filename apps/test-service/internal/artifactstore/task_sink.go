@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -51,6 +52,14 @@ type pendingArtifact struct {
 	data []byte
 }
 
+// Coverage output is intentionally suppressed by default because it can
+// contain workspace paths and compiler details.  The hosted native-E2E probe
+// enables this explicit diagnostics switch only when it needs bounded failure
+// evidence; normal coverage runs retain the no-raw-output contract.
+func coverageDebugArtifactsEnabled() bool {
+	return os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1"
+}
+
 func (s *Store) OpenTask(
 	ctx context.Context,
 	taskID string,
@@ -92,7 +101,7 @@ func (s *taskSink) AppendOutput(
 	if s.unavailable() {
 		return ErrStoreUnavailable
 	}
-	if s.taskKind == task.KindCoverageRun {
+	if s.taskKind == task.KindCoverageRun && !coverageDebugArtifactsEnabled() {
 		return nil
 	}
 	if s.taskKind == task.KindSimulation || len(data) == 0 {
@@ -128,7 +137,7 @@ func (s *taskSink) AppendDiagnostic(
 	if s.unavailable() {
 		return ErrStoreUnavailable
 	}
-	if s.taskKind == task.KindCoverageRun {
+	if s.taskKind == task.KindCoverageRun && !coverageDebugArtifactsEnabled() {
 		return nil
 	}
 	if s.taskKind == task.KindSimulation {
@@ -521,6 +530,25 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 		}
 		if hasReport {
 			result = append(result, coverageJSON, junitXML, coverageHTML)
+		}
+		if coverageDebugArtifactsEnabled() {
+			stdoutID, err := newGeneratedID()
+			if err != nil {
+				return nil, err
+			}
+			stderrID, err := newGeneratedID()
+			if err != nil {
+				return nil, err
+			}
+			diagnosticsID, err := newGeneratedID()
+			if err != nil {
+				return nil, err
+			}
+			result = append(result,
+				pendingArtifact{id: stdoutID, kind: "stdout", data: append([]byte(nil), s.stdout.Bytes()...)},
+				pendingArtifact{id: stderrID, kind: "stderr", data: append([]byte(nil), s.stderr.Bytes()...)},
+				pendingArtifact{id: diagnosticsID, kind: "diagnostics", data: append([]byte(nil), s.diagnostics.Bytes()...)},
+			)
 		}
 	default:
 		return nil, ErrInvalidArtifact
