@@ -636,7 +636,7 @@ jobs:
           path: |
             .native-e2e/artifacts/linux/framework-debug-*.json
             .native-e2e/framework-failure/**
-            .native-e2e/test-generation-work/**/.unit-test-ide/**
+            .native-e2e/test-generation-work/**
           if-no-files-found: warn
           retention-days: 1
           include-hidden-files: true
