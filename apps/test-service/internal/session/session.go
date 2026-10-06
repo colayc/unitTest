@@ -551,14 +551,13 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
 		}
-		if s.negotiatedVersion == protocol.Version15 || s.negotiatedVersion == protocol.Version16 {
-			// The legacy task and artifact projections cannot encode generation
-			// ownership; the broker is workspace-global. Do not misproject or
-			// expose another realm's generation rows via inherited methods.
-			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped task routes are unavailable", false))
-		}
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "task service is unavailable", true))
+		}
+		if (s.negotiatedVersion == protocol.Version15 || s.negotiatedVersion == protocol.Version16) && request.Method == "events/subscribe" {
+			// The event broker is workspace-global and cannot prove generation
+			// ownership for the legacy subscription route.
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped event routes are unavailable", false))
 		}
 		return s.handlePhase2(ctx, responseVersion, request)
 	}
@@ -568,7 +567,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 func (s *Session) handlePhase2(ctx context.Context, version string, request protocol.Request) HandleResult {
 	switch request.Method {
 	case "tasks/start":
-		if version == protocol.Version13 || version == protocol.Version14 {
+		if version == protocol.Version13 || version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			backend, ok := s.backend.(TestBackend)
 			if !ok {
 				return handled(protocol.Failure(
@@ -618,8 +617,8 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return taskNotFound(version, request)
 		}
 		var run *testdomain.TestRun
-		if version == protocol.Version13 || version == protocol.Version14 {
-			if value.Kind == task.KindTestRun || version == protocol.Version14 && value.Kind == task.KindCoverageRun {
+		if version == protocol.Version13 || version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
+			if value.Kind == task.KindTestRun || (version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16) && value.Kind == task.KindCoverageRun {
 				testBackend, ok := s.backend.(TestBackend)
 				if !ok {
 					return backendFailure(version, request, task.ErrStorageUnavailable)
@@ -689,14 +688,14 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 				task.KindTestDiscovery,
 				task.KindTestRun,
 			}
-		} else if version == protocol.Version14 {
+		} else if version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			kinds = []task.Kind{task.KindSimulation, task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun}
 		}
 		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version14 {
+		if version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			testBackend, ok := s.backend.(TestBackend)
 			if !ok {
 				return backendFailure(
@@ -810,7 +809,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return invalidPayload(version, request)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			parent, getErr := s.backend.Get(ctx, payload.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
@@ -825,7 +824,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		}
 		if version == protocol.Version12 ||
 			version == protocol.Version13 ||
-			version == protocol.Version14 {
+			version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			items := make([]artifactv12.ArtifactMetadataV12, len(page.Items))
 			for index := range page.Items {
 				items[index] = toProtocolArtifactV12(page.Items[index])
@@ -847,7 +846,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return backendFailure(version, request, err)
 		}
 		if version == protocol.Version11 ||
-			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 {
+			version == protocol.Version12 || version == protocol.Version13 || version == protocol.Version14 || version == protocol.Version15 || version == protocol.Version16 {
 			parent, getErr := s.backend.Get(ctx, chunk.Metadata.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)

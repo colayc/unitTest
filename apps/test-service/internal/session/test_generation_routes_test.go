@@ -347,8 +347,14 @@ func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testin
 		{"artifacts/read", map[string]any{"artifactId": strings.Repeat("a", 32), "offset": 0, "length": 1}},
 	} {
 		result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, route.method, route.payload))
-		if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
-			t.Fatalf("v1.5 %s must fail closed: %+v", route.method, result.Response)
+		if route.method == "events/subscribe" {
+			if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" {
+				t.Fatalf("v1.5 %s must fail closed: %+v", route.method, result.Response)
+			}
+			continue
+		}
+		if result.Response.Error != nil && result.Response.Error.Message == "owner-scoped task routes are unavailable" {
+			t.Fatalf("v1.5 %s unexpectedly used the removed blanket guard: %+v", route.method, result.Response)
 		}
 	}
 }
