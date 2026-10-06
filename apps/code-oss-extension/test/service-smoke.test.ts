@@ -489,11 +489,11 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
       failingItem = items.find((item) => item.label === "fails");
       assert.ok(
         passingItem,
-        `real discovery must publish the passing case (labels=${items.map((item) => item.label).join(",")})`
+        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")})`
       );
       assert.ok(
         failingItem,
-        `real discovery must publish the failing case (labels=${items.map((item) => item.label).join(",")})`
+        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")})`
       );
     });
     const discoveredPassingItem = passingItem;
