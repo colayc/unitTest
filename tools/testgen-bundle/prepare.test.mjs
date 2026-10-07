@@ -46,11 +46,13 @@ test("preparation rejects a wrong archive digest without publishing a cache", as
   const cacheRoot = await mkdtemp(join(tmpdir(), "testgen-prepare-test-"));
   t.after(() => rm(cacheRoot, { recursive: true, force: true }));
   const manifest = await trackedManifest();
+  const progress = [];
   await assert.rejects(
     () => prepareBundle({
       manifest,
       platform: "windows-x64",
       cacheRoot,
+      onProgress: (stage) => progress.push(stage),
       downloadArchive: async (_url, destination) => {
         await writeFile(destination, "wrong archive bytes\n");
       },
@@ -58,6 +60,7 @@ test("preparation rejects a wrong archive digest without publishing a cache", as
     /SHA-256|digest/u,
   );
   assert.deepEqual(await readdir(cacheRoot), []);
+  assert.deepEqual(progress, ["download-archive", "verify-archive"]);
   assert.notEqual(
     createHash("sha256").update("wrong archive bytes\n").digest("hex"),
     manifest.platforms["windows-x64"].archive.sha256,
@@ -69,14 +72,17 @@ test("preparation rebuilds instead of returning a corrupt existing cache error",
   t.after(() => rm(cacheRoot, { recursive: true, force: true }));
   await mkdir(join(cacheRoot, "windows-x64"));
   await writeFile(join(cacheRoot, "windows-x64", "manifest.json"), "corrupt");
+  const progress = [];
   await assert.rejects(
     () => prepareBundle({
       platform: "windows-x64",
       cacheRoot,
+      onProgress: (stage) => progress.push(stage),
       downloadArchive: async () => { throw new Error("rebuild attempted"); },
     }),
     /rebuild attempted/u,
   );
+  assert.deepEqual(progress, ["verify-cache", "download-archive"]);
 });
 
 test("checked publication replaces a corrupt cache with a verified candidate", async (t) => {

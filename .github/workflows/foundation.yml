@@ -141,8 +141,26 @@ jobs:
           # files inside it and poison a later cache hit.
           path: .superpowers/cache/coverage-bundle
           key: coverage-bundle-windows-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
+      - id: testgen-manifest
+        shell: pwsh
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath 'tools/testgen-bundle/manifest.json').Hash.ToLowerInvariant()
+          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: testgen-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
       - run: pnpm prepare:testgen-bundle
       - run: pnpm check:testgen-bundle
+      # Preserve only the verified bundle before later test failures. Every
+      # restore is still checked against the complete pinned file inventory.
+      - name: Save verified Windows test-generation bundle
+        if: ${{ steps.testgen-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
       - name: Stage sibling production bundle roots
@@ -284,8 +302,8 @@ jobs:
       - id: testgen-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .superpowers/cache/testgen-bundle
-          key: testgen-bundle-windows-x64-v1-${{ steps.testgen-manifest.outputs.digest }}
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
       - name: Prepare CMake bundle and export toolchain
         shell: pwsh
         run: |
@@ -317,6 +335,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle preparation failed' }
           pnpm check:testgen-bundle
           if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle verification failed' }
+      - name: Save verified Windows test-generation bundle
+        if: ${{ steps.testgen-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
       - name: Stage sibling production bundle roots
         shell: pwsh
         run: |
