@@ -49,6 +49,9 @@ func TestValidatedCoverageIndexRejectsReportWorkspaceProjectMismatch(t *testing.
 	if err != nil || got.ProjectID != index.ProjectID || len(got.Files) != 2 || len(got.Gaps) != 3 {
 		t.Fatalf("current index = %#v, %v", got, err)
 	}
+	if got.ToolchainID != "workspace-toolchain" {
+		t.Fatalf("current index toolchain ID = %q", got.ToolchainID)
+	}
 	for _, bad := range []coveragedetail.CurrentIndexQuery{
 		{ProjectID: "wrong", ReportID: q.ReportID, WorkspaceGeneration: q.WorkspaceGeneration},
 		{ProjectID: q.ProjectID, ReportID: strings.Repeat("f", 32), WorkspaceGeneration: q.WorkspaceGeneration},

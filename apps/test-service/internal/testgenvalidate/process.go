@@ -11,11 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
 var ErrProcessRejected = errors.New("validation process rejected")
+
+const maxCoverageProcessOutput = 32 << 20
 
 // TrustedProcessPlan is resolved from fixed service/build/framework metadata,
 // never from ValidationRequest. It may produce a CMake, test or collector plan.
@@ -31,11 +34,13 @@ type PreparedProcessExecutor struct {
 	Interpret                 StageInterpreter
 	TaskID, ServiceInstanceID string
 	ToolSHA256                map[string]string
+	AllowedEnvironment        []string
+	AllowedEnvUnset           []string
 	RecordLease, ReleaseLease LeaseWriter
 }
 
 func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots Roots) (evidence StageEvidence, err error) {
-	if ctx == nil || e.Runner == nil || e.Plan == nil || e.RecordLease == nil || e.ReleaseLease == nil || !validDigest(e.TaskID) || !validDigest(e.ServiceInstanceID) {
+	if ctx == nil || e.Runner == nil || e.Plan == nil || e.RecordLease == nil || e.ReleaseLease == nil || !validProcessIdentity(e.TaskID) || !validProcessIdentity(e.ServiceInstanceID) {
 		return evidence, ErrProcessRejected
 	}
 	spec, err := e.Plan(ctx, stage, roots)
@@ -94,6 +99,10 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		return evidence, ErrProcessRejected
 	}
 	var output []byte
+	outputLimit := maxStageOutput
+	if stage == StageCoverage {
+		outputLimit = maxCoverageProcessOutput
+	}
 	gotResult := false
 	outputCh, doneCh := process.Output(), process.Done()
 	for outputCh != nil || doneCh != nil {
@@ -107,7 +116,7 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 				outputCh = nil
 				continue
 			}
-			if len(chunk.Data) > maxStageOutput-len(output) {
+			if len(chunk.Data) > outputLimit-len(output) {
 				_ = stopProcess()
 				_ = closeProcess()
 				return evidence, ErrProcessRejected
@@ -141,50 +150,154 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 		if err != nil {
 			return StageEvidence{}, ErrProcessRejected
 		}
-		if len(interpreted.Output) != 0 || interpreted.ExitCode != 0 {
+		if len(interpreted.Output) > maxStageOutput || interpreted.ExitCode != 0 {
 			return StageEvidence{}, ErrProcessRejected
+		}
+		if interpreted.Output != nil {
+			evidence.Output = append([]byte(nil), interpreted.Output...)
 		}
 		evidence.DiscoveredCaseIDs = interpreted.DiscoveredCaseIDs
 		evidence.CoverageJSON = interpreted.CoverageJSON
+		if len(interpreted.CoverageDetailJSON) > 16<<20 {
+			return StageEvidence{}, ErrProcessRejected
+		}
+		evidence.CoverageDetailJSON = append([]byte(nil), interpreted.CoverageDetailJSON...)
 	}
 	return evidence, nil
 }
 
+func validProcessIdentity(value string) bool {
+	return validDigest(value) || validObjectID(value)
+}
+
 func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Roots) bool {
-	if spec.Executable == "" || !filepath.IsAbs(spec.Executable) || filepath.Clean(spec.Executable) != spec.Executable || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) != 0 || len(spec.LaunchInputs) != 0 || !pathWithinRoots(spec.Dir, roots) || !directDirectory(spec.Dir) || !scanStageRoots(roots) {
+	if spec.Executable == "" || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) > 64 || len(spec.LaunchInputs) > 128 || !pathWithinRoots(spec.Dir, roots) || !directDirectory(spec.Dir) || !scanStageRoots(roots) {
 		return false
 	}
-	expected, ok := e.ToolSHA256[spec.Executable]
-	if !ok || !validDigest(expected) || !directRegularPath(spec.Executable) {
+	if !verifiedPinnedTool(spec.Executable, e.ToolSHA256) {
 		return false
 	}
-	file, err := os.Open(spec.Executable)
-	if err != nil {
-		return false
+	seenLaunch := make(map[string]struct{}, len(spec.LaunchPlan))
+	for _, path := range spec.LaunchPlan {
+		if _, duplicate := seenLaunch[path]; duplicate || !verifiedPinnedTool(path, e.ToolSHA256) {
+			return false
+		}
+		seenLaunch[path] = struct{}{}
 	}
-	hash := sha256.New()
-	n, err := io.Copy(hash, io.LimitReader(file, (256<<20)+1))
-	_ = file.Close()
-	if err != nil || n > 256<<20 || hex.EncodeToString(hash.Sum(nil)) != expected {
-		return false
+	seenInputs := make(map[string]struct{}, len(spec.LaunchInputs))
+	for _, state := range spec.LaunchInputs {
+		if _, duplicate := seenInputs[state.Path]; duplicate || !verifiedPinnedTool(state.Path, e.ToolSHA256) ||
+			state.SHA256 != e.ToolSHA256[state.Path] || cmake.VerifyLaunchInput(state, 256<<20) != nil {
+			return false
+		}
+		seenInputs[state.Path] = struct{}{}
 	}
 	for _, arg := range spec.Args {
 		if len(arg) > 4096 || strings.ContainsRune(arg, '\x00') {
 			return false
 		}
 	}
-	for _, entry := range spec.Env {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) || !within(roots.Artifacts, value) || !safeEnvironmentDestination(key, value) {
+	if e.AllowedEnvironment != nil || e.AllowedEnvUnset != nil {
+		if !exactTrustedEnvironment(spec.Env, spec.EnvUnset, e.AllowedEnvironment, e.AllowedEnvUnset) {
 			return false
 		}
+	} else {
+		for _, entry := range spec.Env {
+			key, value, ok := strings.Cut(entry, "=")
+			if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) || !within(roots.Artifacts, value) || !safeEnvironmentDestination(key, value) {
+				return false
+			}
+		}
+		for _, key := range spec.EnvUnset {
+			if key != "LLVM_PROFILE_FILE" && key != "GCOV_PREFIX" && key != "GCOV_PREFIX_STRIP" {
+				return false
+			}
+		}
 	}
-	for _, key := range spec.EnvUnset {
-		if key != "LLVM_PROFILE_FILE" && key != "GCOV_PREFIX" && key != "GCOV_PREFIX_STRIP" {
+	return true
+}
+
+func exactTrustedEnvironment(actual, actualUnset, allowed, allowedUnset []string) bool {
+	actualValues, ok := canonicalEnvironmentSnapshot(actual, actualUnset)
+	if !ok {
+		return false
+	}
+	allowedValues, ok := canonicalEnvironmentSnapshot(allowed, allowedUnset)
+	if !ok || len(actualValues) != len(allowedValues) {
+		return false
+	}
+	for key, value := range allowedValues {
+		if actualValues[key] != value {
 			return false
 		}
 	}
 	return true
+}
+
+func canonicalEnvironmentSnapshot(environment, unset []string) (map[string]string, bool) {
+	if len(environment)+len(unset) > 256 {
+		return nil, false
+	}
+	result := make(map[string]string, len(environment)+len(unset))
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		canonical := strings.ToUpper(key)
+		if !ok || !validEnvironmentKey(key) || len(entry) > 32767 || strings.ContainsRune(entry, '\x00') || forbiddenValidationEnvironment(canonical) {
+			return nil, false
+		}
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, false
+		}
+		result[canonical] = "set=" + value
+	}
+	for _, key := range unset {
+		canonical := strings.ToUpper(key)
+		if !validEnvironmentKey(key) || strings.ContainsRune(key, '\x00') || forbiddenValidationEnvironment(canonical) {
+			return nil, false
+		}
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, false
+		}
+		result[canonical] = "unset"
+	}
+	return result, true
+}
+
+func validEnvironmentKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character == '_' || character >= '0' && character <= '9' && index > 0 {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func forbiddenValidationEnvironment(key string) bool {
+	return key == "UNIT_TEST_SERVICE_TOKEN" || key == "UNIT_TEST_IDE_TOKEN" || key == "UNIT_TEST_IDE_STATUS_HANDLE" ||
+		key == "LD_PRELOAD" || strings.HasPrefix(key, "DYLD_")
+}
+
+func verifiedPinnedTool(path string, tools map[string]string) bool {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || !directRegularPath(path) {
+		return false
+	}
+	expected, ok := tools[path]
+	if !ok || !validDigest(expected) {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, (256<<20)+1))
+	_ = file.Close()
+	return err == nil && n <= 256<<20 && hex.EncodeToString(hash.Sum(nil)) == expected
 }
 
 func scanStageRoots(roots Roots) bool {

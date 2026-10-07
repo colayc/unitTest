@@ -13,6 +13,7 @@ import (
 
 	serviceruntime "unit-test-ide.local/test-service/internal/runtime"
 	"unit-test-ide.local/test-service/internal/server"
+	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskfixture"
 	"unit-test-ide.local/test-service/internal/transport"
@@ -33,6 +34,11 @@ var probeSupervisorEntry = func(stdin io.Reader, stdout, stderr io.Writer) int {
 var listenTransport = transport.Listen
 var prepareTokenFileForRun = prepareTokenFile
 var consumeTokenFileForRun = consumeTokenFile
+
+func productionRuntimeConfig(config serviceruntime.Config) serviceruntime.Config {
+	config.ProductionGenerationFactory = serviceruntime.NewProductionGenerationConfig
+	return config
+}
 
 type explicitBool struct{ value bool }
 
@@ -59,6 +65,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var trustedWorkspace explicitBool
 	flags.Var(&trustedWorkspace, "trusted-workspace", "allow workspace build execution (explicit true or false)")
 	cmakeBundleRoot := flags.String("cmake-bundle-root", "", "verified CMake bundle root")
+	coverageBundleRoot := flags.String("coverage-bundle-root", "", "verified coverage bundle root")
+	testgenBundleRoot := flags.String("testgen-bundle-root", "", "verified test generation bundle root")
 	devCMakeExecutable := flags.String("dev-cmake-executable", "", "development CMake executable")
 	debugProcessHostFailures := flags.Bool("debug-process-host-failures", false, "expose fixed process-host failure categories")
 	prepareTokenFilePath := flags.String("prepare-token-file", "", "create an empty owner-only authentication token file")
@@ -84,7 +92,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "prepare-token-file":
 			prepareModeFlagProvided = true
 		case "endpoint", "token-file", "data-dir", "workspace-root", "trusted-workspace",
-			"cmake-bundle-root", "dev-cmake-executable", "debug-process-host-failures":
+			"cmake-bundle-root", "coverage-bundle-root", "testgen-bundle-root",
+			"dev-cmake-executable", "debug-process-host-failures":
 			serviceModeFlagProvided = true
 		case "process-host":
 			processHostFlagProvided = true
@@ -164,6 +173,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--endpoint, --token-file, --data-dir, and --workspace-root are required")
 		return 2
 	}
+	productBundleRoots := serviceruntime.ProductBundleRoots{
+		CMake: *cmakeBundleRoot, Coverage: *coverageBundleRoot, Testgen: *testgenBundleRoot,
+	}
+	if *cmakeBundleRoot == "" || *coverageBundleRoot == "" || *testgenBundleRoot == "" {
+		fmt.Fprintln(stderr, "product bundle roots are required")
+		return 2
+	}
+	if err := productBundleRoots.Validate(); err != nil {
+		fmt.Fprintln(stderr, "product bundle roots are unavailable")
+		return 2
+	}
 	if *debugProcessHostFailures {
 		_ = os.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "1")
 	}
@@ -177,13 +197,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "service executable is unavailable")
 		return 1
 	}
-	active, err := serviceruntime.Open(serviceruntime.Config{
+	active, err := serviceruntime.Open(productionRuntimeConfig(serviceruntime.Config{
 		DataDir: *dataDir, ServiceExecutable: executable,
 		WorkspaceRoot: *workspaceRoot, TrustedWorkspace: trustedWorkspace.value,
-		CMakeBundleRoot: *cmakeBundleRoot, DevCMakeExecutable: *devCMakeExecutable,
+		ProductBundleRoots: productBundleRoots,
+		CMakeBundleRoot:    *cmakeBundleRoot, DevCMakeExecutable: *devCMakeExecutable,
 		Platform: transport.PlatformName(),
 		Clock:    task.RealClock{}, NewID: task.NewID, TerminationGrace: 2 * time.Second,
-	})
+	}))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -198,7 +219,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	service := server.NewServiceWithGeneration(listener, token, transport.PlatformName(), transport.TransportName(), active, active.CoverageBackend(), active.GenerationBackend(), server.ServiceConfig{MaxConnections: 64})
+	generation := active.GenerationBackend()
+	var managed session.ManagedTestsProvider
+	if provider, ok := generation.(session.ManagedTestsProvider); ok {
+		managed = provider
+	}
+	service := server.NewServiceWithManagedDetails(
+		listener, token, transport.PlatformName(), transport.TransportName(), active,
+		active.CoverageBackend(), generation, active.CoverageDetailsProvider(), managed,
+		server.ServiceConfig{MaxConnections: 64},
+	)
 	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
 	if err := service.Serve(); err != nil {

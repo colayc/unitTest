@@ -26,9 +26,11 @@ test("tree expands lazily, labels metrics, filters and paginates", async () => {
   assert.match(roots[0]!.label, /1\/2.*50%.*-1/);
   const files = await tree.children(roots[0]);
   assert.equal(files.length, 2);
+  assert.equal(files[0]!.coverageReportId, "report");
   assert.equal(files[0]!.status, "incomplete");
   assert.equal(files[1]!.kind, "load-more");
   const functionNode = (await tree.children(files[0]))[0]!;
+  assert.equal(functionNode.coverageReportId, "report");
   assert.equal(functionNode.label.includes("math::add"), true);
   assert.equal(functionNode.startLine, 3);
   assert.equal(tree.fileIdFor(functionNode), file.fileId);

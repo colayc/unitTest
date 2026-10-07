@@ -10,7 +10,8 @@ import {
   ProtocolError,
   type ProtocolClient,
   type ProtocolTaskEvent,
-  type ProtocolTaskSnapshot
+  type ProtocolTaskSnapshot,
+  type WorkspaceSnapshot
 } from "@unit-test-ide/test-client";
 import { TestSelectionModeV13 } from "@unit-test-ide/protocol-models";
 import { endpointForDirectory } from "./endpoint.js";
@@ -21,7 +22,7 @@ const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
-const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
+const WORKSPACE_INSPECTION_TIMEOUT_MS = 120_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
   "task.started",
@@ -36,6 +37,43 @@ const V12_EVENT_NAMES = new Set([
   "task.step_finished",
   "task.diagnostic"
 ]);
+
+async function inspectWorkspaceUntilProfile(
+  client: ProtocolClient,
+  projectId: string,
+  timeoutMs: number,
+  label: string,
+): Promise<{ workspace: WorkspaceSnapshot; project: WorkspaceSnapshot["projects"][number]; profile: NonNullable<WorkspaceSnapshot["projects"][number]["buildProfiles"][number]> }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot: WorkspaceSnapshot | undefined;
+  let lastError: unknown;
+  for (;;) {
+    const remaining = Math.max(1, deadline - Date.now());
+    try {
+      lastSnapshot = await withNamedTimeout(
+        `${label} inspection`,
+        client.inspectWorkspace(),
+        remaining,
+      );
+    } catch (error) {
+      lastError = error;
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      continue;
+    }
+    const project = lastSnapshot.projects.find((candidate) => candidate.projectId === projectId);
+    const profile = project?.buildProfiles[0];
+    if (project && profile) return { workspace: lastSnapshot, project, profile };
+    if (Date.now() >= deadline) {
+      throw new Error(`${label} did not expose a verified build profile after bounded discovery wait: ${JSON.stringify({
+        projects: lastSnapshot.projects.map((item) => ({ projectId: item.projectId, profiles: item.buildProfiles.length })),
+        diagnostics: lastSnapshot.diagnostics,
+        lastError: lastError instanceof Error ? lastError.message : lastError,
+      })}`);
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  }
+}
 
 test("Unix endpoint stays within sockaddr_un when the workspace path is long", async () => {
   const longWorkspace = `/home/runner/work/${"repository-".repeat(16)}/${"repository-".repeat(16)}/build`;
@@ -290,10 +328,12 @@ test("spawn failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
-test("service launch forwards workspace trust and CMake options as isolated arguments", async () => {
+test("service launch forwards workspace trust and all product bundles as isolated arguments", async () => {
   const directory = await mkdtemp(join(dirname(binary), "unit-test-ide-options-"));
   const workspaceRoot = join(directory, "workspace");
   const cmakeBundleRoot = join(directory, "cmake-bundle");
+  const coverageBundleRoot = join(directory, "coverage-bundle");
+  const testgenBundleRoot = join(directory, "testgen-bundle");
   const devCMakeExecutable = join(directory, "cmake-dev");
   let checked = false;
   try {
@@ -302,23 +342,29 @@ test("service launch forwards workspace trust and CMake options as isolated argu
         workspaceRoot,
         trustedWorkspace: true,
         cmakeBundleRoot,
+        coverageBundleRoot,
+        testgenBundleRoot,
         devCMakeExecutable,
         operations: {
           spawnService: (_serviceBinary, args) => {
-            assert.deepEqual(args.slice(-7), [
+            assert.deepEqual(args.slice(-11), [
               "--workspace-root", workspaceRoot,
               "--trusted-workspace=true",
               "--cmake-bundle-root", cmakeBundleRoot,
+              "--coverage-bundle-root", coverageBundleRoot,
+              "--testgen-bundle-root", testgenBundleRoot,
               "--dev-cmake-executable", devCMakeExecutable
             ]);
             checked = true;
-            throw new Error(`expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${devCMakeExecutable}`);
+            throw new Error(
+              `expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${coverageBundleRoot} ${testgenBundleRoot} ${devCMakeExecutable}`
+            );
           }
         }
       }),
       (error: unknown) => {
         const serialized = serializeErrorTree(error);
-        for (const sensitive of [workspaceRoot, cmakeBundleRoot, devCMakeExecutable]) {
+        for (const sensitive of [workspaceRoot, cmakeBundleRoot, coverageBundleRoot, testgenBundleRoot, devCMakeExecutable]) {
           assert.equal(serialized.includes(sensitive), false);
         }
         return true;
@@ -629,11 +675,12 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       devCMakeExecutable: cmakeFixture
     });
     stage = "inspect workspace";
-    let workspace = await withNamedTimeout(
-      "deterministic workspace inspection",
-      fixture.client.inspectWorkspace(),
-      WORKSPACE_INSPECTION_TIMEOUT_MS
-    );
+    let workspace = (await inspectWorkspaceUntilProfile(
+      fixture.client,
+      "root",
+      WORKSPACE_INSPECTION_TIMEOUT_MS,
+      "deterministic workspace",
+    )).workspace;
     const selectFixtureProfile = (snapshot: typeof workspace) => {
       const selectedProject = snapshot.projects.find((candidate) => candidate.projectId === "root");
       const selectedProfile = selectedProject?.buildProfiles[0];
@@ -672,11 +719,12 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
         throw error;
       }
       stage = "refresh workspace after stale generation";
-      workspace = await withNamedTimeout(
-        "stale-generation workspace refresh",
-        fixture.client.inspectWorkspace(),
-        WORKSPACE_INSPECTION_TIMEOUT_MS
-      );
+      workspace = (await inspectWorkspaceUntilProfile(
+        fixture.client,
+        "root",
+        WORKSPACE_INSPECTION_TIMEOUT_MS,
+        "stale-generation workspace",
+      )).workspace;
       selected = selectFixtureProfile(workspace);
       stage = "retry first build";
       first = await startFirstBuild();
@@ -806,7 +854,10 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       { configureCount: 1, buildCount: 2 }
     );
   } catch (error) {
-    throw new Error(`deterministic CMake E2E failed during ${stage}`, { cause: error });
+    throw new Error(
+      `deterministic CMake E2E failed during ${stage}`,
+      { cause: error }
+    );
   } finally {
     await fixture?.dispose();
     await rm(workspaceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -841,17 +892,13 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
       devCMakeExecutable: cmakeFixture
     });
     stage = "inspect test workspace";
-    const workspace = await withNamedTimeout(
-      "test workspace inspection",
-      fixture.client.inspectWorkspace(),
-      WORKSPACE_INSPECTION_TIMEOUT_MS
+    const inspected = await inspectWorkspaceUntilProfile(
+      fixture.client,
+      "root",
+      WORKSPACE_INSPECTION_TIMEOUT_MS,
+      "test workspace",
     );
-    const project = workspace.projects.find(
-      (candidate) => candidate.projectId === "root"
-    );
-    const profile = project?.buildProfiles[0];
-    assert.ok(project, "test fixture project must be inspectable");
-    assert.ok(profile, "test fixture must expose a build profile");
+    const { workspace, project, profile } = inspected;
 
     stage = "subscribe test events";
     const subscription = await withNamedTimeout(

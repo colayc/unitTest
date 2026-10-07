@@ -7,7 +7,7 @@ import { openCoverageHtml } from "./coverage-viewer.js";
 import { openCoverageSource as verifyAndOpenCoverageSource } from "./coverage-sources.js";
 import { redactServiceError } from "./service-resources.js";
 import type { GenerationPreviewBinding, GenerationSelection, ManagedGenerationSelection, TestGenerationControllerState } from "./test-generation-controller.js";
-import { createGenerationDiffReview, createManagedCaseReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
+import { createGenerationDiffReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
 import { buildGenerationResults, renderGenerationResults, renderManagedRecords } from "./test-generation-results.js";
 import type { ManagedApplyOutcome, ManagedChoice, ManagedReviewState, ManagedStatusFilter } from "./managed-test-review.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
@@ -551,7 +551,8 @@ export function registerManagedTestCommands(
   review: ManagedReviewCommandController,
   status: CommandStatus,
   host: ManagedTestCommandHost,
-  output: OutputChannelLike
+  output: OutputChannelLike,
+  afterConfirmedApply?: () => Promise<void>
 ): DisposableLike[] {
   const guard = async (): Promise<boolean> => {
     if (!status.isActive()) return false;
@@ -565,12 +566,13 @@ export function registerManagedTestCommands(
     const input = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
     const functionId = typeof input.functionId === "string" ? input.functionId : input.kind === "function" && typeof input.id === "string" ? input.id : undefined;
     const fileId = typeof input.fileId === "string" ? input.fileId : input.kind === "file" && typeof input.id === "string" ? input.id : undefined;
-    const selection = scope === "symbol" && functionId && ID32.test(functionId)
-      ? { scope, functionId } as const
-      : scope === "file" && fileId && ID32.test(fileId)
-        ? { scope, fileId } as const
-        : scope === "coverage-gap" && typeof input.coverageGapId === "string" && ID32.test(input.coverageGapId) && typeof input.coverageReportId === "string" && ID32.test(input.coverageReportId)
-          ? { scope, coverageGapId: input.coverageGapId, coverageReportId: input.coverageReportId } as const
+    const coverageReportId = typeof input.coverageReportId === "string" && ID32.test(input.coverageReportId) ? input.coverageReportId : undefined;
+    const selection = scope === "symbol" && functionId && ID32.test(functionId) && coverageReportId
+      ? { scope, functionId, coverageReportId } as const
+      : scope === "file" && fileId && ID32.test(fileId) && coverageReportId
+        ? { scope, fileId, coverageReportId } as const
+        : scope === "coverage-gap" && typeof input.coverageGapId === "string" && ID32.test(input.coverageGapId) && coverageReportId
+          ? { scope, coverageGapId: input.coverageGapId, coverageReportId } as const
           : undefined;
     if (!selection) { await host.showErrorMessage("Unit Test: Select a current, authoritative coverage function, file, or gap ID."); return; }
     try { await generation.startManaged(selection); }
@@ -593,33 +595,28 @@ export function registerManagedTestCommands(
       }
       if (!reviewId || !ID32.test(reviewId)) throw new Error("Select an authoritative managed review ID.");
       const loaded = await review.load(reviewId);
+      if (loaded.authoritativePreview) {
+        const title = `Managed test review ${loaded.review?.reviewId ?? reviewId}`;
+        const diff = redactGenerationDiffPaths(loaded.authoritativePreview.diff);
+        if (host.openManagedCaseDiff) await host.openManagedCaseDiff(title, diff);
+        else if (host.openGenerationDiff) await host.openGenerationDiff(title, diff);
+        else output.appendLine(diff);
+      }
       for (const item of loaded.review?.cases ?? []) {
-        const display = createManagedCaseReview(item, loaded.previewAvailable);
-        output.appendLine(`${display.title} [${item.status}] accepted=${display.panes.accepted} current=${display.panes.current} generated=${display.panes.generated}`);
-        if (display.previewAvailable) {
-          if (host.openManagedCaseDiff) await host.openManagedCaseDiff(display.title, redactGenerationDiffPaths(display.content));
-          else if (host.openGenerationDiff) await host.openGenerationDiff(display.title, redactGenerationDiffPaths(display.content));
-          else output.appendLine(redactGenerationDiffPaths(display.content));
-        } else {
-          output.appendLine(display.content);
-          await host.showInformationMessage?.("Unit Test: Managed review preview unavailable; Apply remains disabled.");
-        }
+        output.appendLine(`Managed test ${item.caseId} [${item.status}] accepted=${item.acceptedDigest} current=${item.currentDigest} generated=${item.generatedDigest}`);
         if (item.status !== "conflicted") continue;
         const choice = await host.pickManagedConflictChoice?.(item.caseId, MANAGED_CHOICES);
         if (choice !== undefined) review.choose(item.caseId, choice);
       }
-      for (const preview of loaded.previewAvailable ? loaded.review?.scaffoldPreviews ?? [] : []) {
-        const title = `Managed scaffold ${preview.key}`;
-        if (host.openManagedCaseDiff) await host.openManagedCaseDiff(title, redactGenerationDiffPaths(preview.diff));
-        else if (host.openGenerationDiff) await host.openGenerationDiff(title, redactGenerationDiffPaths(preview.diff));
-        else output.appendLine(redactGenerationDiffPaths(preview.diff));
-        const choice = await host.pickManagedConflictChoice?.(preview.key, MANAGED_CHOICES);
-        if (choice !== undefined) review.choose(preview.key, choice);
+      for (const scaffold of loaded.review?.scaffoldPreviews ?? []) {
+        const choice = await host.pickManagedConflictChoice?.(scaffold.key, MANAGED_CHOICES);
+        if (choice !== undefined) review.choose(scaffold.key, choice);
       }
       if (loaded.review?.conflictKeys?.some((key) => key.startsWith("scaffold:") && !loaded.review?.scaffoldPreviews?.some((preview) => preview.key === key))) {
         await host.showInformationMessage?.("Unit Test: Managed scaffold preview unavailable; Apply remains disabled.");
       }
-      if (loaded.review) review.markDisplayed(loaded.review.reviewDigest);
+      if (loaded.review && loaded.authoritativePreview) review.markDisplayed(loaded.review.reviewDigest);
+      else await host.showInformationMessage?.("Unit Test: Managed review preview unavailable; Apply remains disabled.");
       if (!review.getState().canApply) await host.showInformationMessage?.("Unit Test: Resolve every managed-test conflict and inspect every available preview before Apply; unavailable previews keep Apply disabled.");
     } catch (error) {
       try { review.reject(); } catch { /* An Apply already in flight cannot be revoked here. */ }
@@ -633,7 +630,17 @@ export function registerManagedTestCommands(
     if (!host.confirmGeneration || !await host.confirmGeneration("Apply this exact managed-test review?")) return;
     try {
       const outcome = await review.apply(state.review.reviewDigest);
-      if (outcome.state === "confirmed") await host.showInformationMessage?.("Unit Test: Managed-test review applied and confirmed by the service.");
+      if (outcome.state === "confirmed") {
+        await host.showInformationMessage?.("Unit Test: Managed-test review applied and confirmed by the service.");
+        if (afterConfirmedApply) {
+          try {
+            await afterConfirmedApply();
+            await host.showInformationMessage?.("Unit Test: Generated tests executed and coverage refreshed.");
+          } catch (error) {
+            await host.showErrorMessage(`Unit Test: Generated tests were applied, but the test and coverage refresh failed. ${redactServiceError(error, []).message}`);
+          }
+        }
+      }
       else if (outcome.state === "uncertain") await host.showInformationMessage?.("Unit Test: Apply outcome is uncertain. Reconnect and reconcile the managed-test record before retrying; the service may have committed it.");
       else await host.showInformationMessage?.("Unit Test: Managed-test Apply cancelled before dispatch; no Apply request was sent.");
     }

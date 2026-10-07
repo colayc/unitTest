@@ -153,6 +153,10 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm prepare:cmake-bundle
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm prepare:testgen-bundle
+      - run: node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
       - run: pnpm test:e2e
 
   phase9-fault-injection:
@@ -175,6 +179,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Prepare CMake bundle before namespace entry
         run: pnpm prepare:cmake-bundle
+      - name: Prepare coverage bundle before namespace entry
+        run: pnpm prepare:coverage-bundle
+      - name: Prepare testgen bundle before namespace entry
+        run: pnpm prepare:testgen-bundle
+      - name: Stage production bundles before namespace entry
+        run: node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
       - name: Prepare Go modules before namespace entry
         working-directory: apps/test-service
         env:

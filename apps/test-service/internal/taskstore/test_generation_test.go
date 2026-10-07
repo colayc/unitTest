@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,42 @@ func TestGenerationPersistenceAndRevisionCAS(t *testing.T) {
 	reopened, err := s.GetGeneration(ctx, original.ID)
 	if err != nil || reopened.State != next.State || reopened.Revision != 2 {
 		t.Fatalf("checkpoint = %+v, %v", reopened, err)
+	}
+}
+
+func TestGenerationProcessLeaseIsDurableAndOwnerBound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	run, err := s.CreateGeneration(ctx, generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := run
+	next.State = testgendomain.StateBaseline
+	next.Revision++
+	run, err = s.CheckpointGeneration(ctx, run.Revision, next, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := task.ProcessLease{TaskID: run.TaskID, HostPID: 42, HostStartIdentity: "start", ServiceInstanceID: strings.Repeat("4", 32)}
+	if err := s.PutGenerationProcessLease(ctx, lease); err != nil {
+		t.Fatalf("PutGenerationProcessLease() error = %v", err)
+	}
+	leasing, err := s.ActiveLeases(ctx)
+	if err != nil || len(leasing) != 1 || !reflect.DeepEqual(leasing[0], lease) {
+		t.Fatalf("ActiveLeases() = %+v, %v", leasing, err)
+	}
+	wrong := lease
+	wrong.ServiceInstanceID = strings.Repeat("5", 32)
+	if err := s.ReleaseGenerationProcessLease(ctx, wrong); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("wrong owner release error = %v", err)
+	}
+	if err := s.ReleaseGenerationProcessLease(ctx, lease); err != nil {
+		t.Fatalf("ReleaseGenerationProcessLease() error = %v", err)
+	}
+	leasing, err = s.ActiveLeases(ctx)
+	if err != nil || len(leasing) != 0 {
+		t.Fatalf("released ActiveLeases() = %+v, %v", leasing, err)
 	}
 }
 
@@ -220,19 +257,23 @@ func TestGenerationCandidatesAreOwnedBoundedAndUnique(t *testing.T) {
 		}
 	}
 	a := task.Artifact{ID: strings.Repeat("4", 32), TaskID: r.TaskID, Kind: "test-generation-source", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("4", 32) + ".source", MIMEType: "application/octet-stream", Size: 12, SHA256: strings.Repeat("e", 64), CreatedAt: r.CreatedAt}
+	evidence := task.Artifact{ID: strings.Repeat("9", 32), TaskID: r.TaskID, Kind: "test-generation-evidence", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("9", 32) + ".evidence", MIMEType: "application/octet-stream", Size: 128, SHA256: strings.Repeat("d", 64), CreatedAt: r.CreatedAt}
 	c := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: a.ID, Digest: a.SHA256}, CodeDigest: strings.Repeat("7", 64), PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/classify_test.c", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}}}
 	next := r
 	next.State = testgendomain.StateValidating
 	next.Revision++
 	next.CandidateCount = 1
-	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}}
-	r, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, []task.Artifact{a})
+	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}, {ID: evidence.ID, Digest: evidence.SHA256}}
+	r, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, []task.Artifact{a, evidence})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ListGenerationCandidates(ctx, r.ID)
 	if err != nil || len(got) != 1 || got[0].CaseID != c.CaseID {
 		t.Fatalf("candidates = %+v, %v", got, err)
+	}
+	if stored, err := s.GetArtifact(ctx, evidence.ID); err != nil || stored != evidence {
+		t.Fatalf("evidence artifact=%+v err=%v", stored, err)
 	}
 	got[0].PlannedEdits[0].Path = "tampered"
 	again, err := s.ListGenerationCandidates(ctx, r.ID)

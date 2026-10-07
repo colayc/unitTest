@@ -63,7 +63,10 @@ const coverageFixtureRoot = join(
   "fixtures",
   "coverage"
 );
-const cmakeBundleRoot = join(repositoryRoot, ".bundled-tools", "cmake");
+const productBundleRoot = join(repositoryRoot, ".superpowers", "runtime", "product-bundles", "windows-x64", "bundles");
+const cmakeBundleRoot = join(productBundleRoot, "cmake");
+const coverageBundleRoot = join(productBundleRoot, "coverage");
+const testgenBundleRoot = join(productBundleRoot, "testgen");
 const evidencePath = join(
   repositoryRoot,
   ".native-e2e",
@@ -349,7 +352,12 @@ function coverageOperations(
     },
     spawnService(binary, args): ChildProcessWithoutNullStreams {
       const launchArguments = useCMakeBundle
-        ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
+        ? [
+            ...args,
+            "--cmake-bundle-root", cmakeBundleRoot,
+            "--coverage-bundle-root", coverageBundleRoot,
+            "--testgen-bundle-root", testgenBundleRoot
+          ]
         : [...args];
       return spawn(binary, launchArguments, {
         windowsHide: true,
@@ -706,7 +714,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       fixture.toolsetPreflightBinary,
       fixture.guardianBinary,
       fixture.goCache,
-      cmakeBundleRoot
+      cmakeBundleRoot,
+      coverageBundleRoot,
+      testgenBundleRoot
     );
     await buildService(fixture);
     const gate = await runAfterVerifiedCoverageToolsetPreflight({
@@ -746,6 +756,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
           dataDirectory: installedFixture.dataDirectory,
           timeoutMs: 120_000,
           trusted: () => true,
+          // This smoke intentionally exercises the v1.4 coverage/task projection.
+          // The production client still offers the newest protocol by default.
+          handshakeSupportedProtocolVersions: ["1.4", "1.3", "1.2", "1.1", "1.0"],
           operations: coverageOperations(
             installedFixture,
             wire,

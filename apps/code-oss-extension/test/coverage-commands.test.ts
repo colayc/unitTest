@@ -184,7 +184,7 @@ test("detail commands route only supported filters and current service-backed no
     select: async (node) => { selected.push(node); },
     filter: (value) => { filters.push(value); }
   });
-  const node: CoverageTreeNode = { kind: "file", id: "f".repeat(32), label: "file", status: "current", metrics: { functions: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, lines: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, branches: { covered: 0, total: 0, percent: 100, coveredDelta: 0 } }, relativePath: "src/main.cpp" };
+  const node: CoverageTreeNode = { kind: "file", id: "f".repeat(32), coverageReportId: "e".repeat(32), label: "file", status: "current", metrics: { functions: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, lines: { covered: 1, total: 1, percent: 100, coveredDelta: 0 }, branches: { covered: 0, total: 0, percent: 100, coveredDelta: 0 } }, relativePath: "src/main.cpp" };
   await handlers.get("unitTestIde.openCoverageDetail")!(node);
   await handlers.get("unitTestIde.filterCoverageDetails")!("regressed");
   await handlers.get("unitTestIde.filterCoverageDetails")!("bogus");

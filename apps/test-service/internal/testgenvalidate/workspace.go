@@ -21,7 +21,23 @@ const maxSnapshotFiles = 10000
 const maxSnapshotBytes int64 = 512 << 20
 const maxEditBytes = 4 << 20
 
-type Roots struct{ Source, Build, Artifacts, SnapshotDigest string }
+type Roots struct {
+	Source, Build, Artifacts, SnapshotDigest string
+	// TaskID and CandidateID are validator-owned identities. They let a
+	// production stage planner resolve the exact service-prepared plan without
+	// deriving authority from staged file names or process output.
+	TaskID, ProcessTaskID, CandidateID string
+}
+
+// WorkspaceSnapshotDigest returns the exact source-tree identity consumed by
+// Validator. Production authorities must use this function instead of
+// reimplementing the fingerprint algorithm, otherwise a candidate could be
+// prepared against a different workspace identity than the isolated validator
+// later enforces.
+func WorkspaceSnapshotDigest(root string) (string, error) {
+	_, digest, err := sourceFingerprint(root)
+	return digest, err
+}
 
 func sourceFingerprint(root string) (map[string]string, string, error) {
 	if !directDirectory(root) {
@@ -34,6 +50,12 @@ func sourceFingerprint(root string) (map[string]string, string, error) {
 			return errIsolation
 		}
 		if path == root {
+			return nil
+		}
+		if ignoredSnapshotEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
@@ -128,6 +150,12 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile, expect
 		if path == source {
 			return nil
 		}
+		if ignoredSnapshotEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		rel, err := filepath.Rel(source, path)
 		if err != nil {
 			return errIsolation
@@ -212,6 +240,10 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile, expect
 		}
 	}
 	return roots, root, nil
+}
+
+func ignoredSnapshotEntry(entry os.DirEntry) bool {
+	return entry != nil && strings.HasPrefix(entry.Name(), ".")
 }
 
 func safeEdit(root, path string, edit testgenrender.StagedFile) error {

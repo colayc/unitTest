@@ -115,6 +115,11 @@ func TestValidateOrderedStagesAndReceipts(t *testing.T) {
 	if !reflect.DeepEqual(planner.stages, []Stage{StageConfigure, StageCompile, StageDiscover, StageCandidate, StageSuite, StageCoverage}) {
 		t.Fatalf("stage order: %v", planner.stages)
 	}
+	for _, roots := range planner.roots {
+		if roots.TaskID != r.TaskID || roots.CandidateID != r.CandidateID {
+			t.Fatalf("stage identity = task %q candidate %q", roots.TaskID, roots.CandidateID)
+		}
+	}
 	if len(result.Receipts) != 6 {
 		t.Fatalf("receipts: %+v", result.Receipts)
 	}
@@ -131,6 +136,7 @@ func TestValidateOrderedStagesAndReceipts(t *testing.T) {
 
 type fixturePlanner struct {
 	stages   []Stage
+	roots    []Roots
 	fail     Stage
 	coverage []byte
 	mutate   func(Stage, Roots)
@@ -138,6 +144,7 @@ type fixturePlanner struct {
 
 func (p *fixturePlanner) Execute(_ context.Context, stage Stage, roots Roots) (StageEvidence, error) {
 	p.stages = append(p.stages, stage)
+	p.roots = append(p.roots, roots)
 	if p.mutate != nil {
 		p.mutate(stage, roots)
 	}

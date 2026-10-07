@@ -128,9 +128,6 @@ jobs:
           $cmakeBin = Split-Path -Parent $result.executable
           $cmakeBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - run: pnpm prepare:testgen-bundle
-      - run: pnpm check:testgen-bundle
-      - run: pnpm verify
       - id: coverage-manifest
         shell: pwsh
         run: |
@@ -143,9 +140,35 @@ jobs:
           # intentionally excluded because smoke/tests can create __pycache__
           # files inside it and poison a later cache hit.
           path: .superpowers/cache/coverage-bundle
-          # Bump the recipe epoch when bundle layout/normalization changes; the
-          # source manifest digest alone cannot invalidate a cached old layout.
           key: coverage-bundle-windows-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
+      - id: testgen-manifest
+        shell: pwsh
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath 'tools/testgen-bundle/manifest.json').Hash.ToLowerInvariant()
+          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: testgen-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
+      # Preserve only the verified bundle before later test failures. Every
+      # restore is still checked against the complete pinned file inventory.
+      - name: Save verified Windows test-generation bundle
+        if: ${{ steps.testgen-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
+      - run: pnpm verify
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
       - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
@@ -271,6 +294,16 @@ jobs:
         with:
           path: .bundled-tools/cmake
           key: cmake-bundle-windows-x64-v1-${{ steps.cmake-manifest.outputs.digest }}
+      - id: testgen-manifest
+        shell: pwsh
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath 'tools/testgen-bundle/manifest.json').Hash.ToLowerInvariant()
+          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: testgen-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
       - name: Prepare CMake bundle and export toolchain
         shell: pwsh
         run: |
@@ -288,6 +321,31 @@ jobs:
           $cmakeBin = Split-Path -Parent $result.executable
           $cmakeBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare and verify Windows coverage bundle
+        shell: pwsh
+        run: |
+          pnpm prepare:coverage-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage bundle preparation failed' }
+          pnpm check:coverage-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows coverage bundle verification failed' }
+      - name: Prepare and verify Windows test-generation bundle
+        shell: pwsh
+        run: |
+          pnpm prepare:testgen-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle preparation failed' }
+          pnpm check:testgen-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test-generation bundle verification failed' }
+      - name: Save verified Windows test-generation bundle
+        if: ${{ steps.testgen-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle/22.1.8/windows-x64
+          key: testgen-bundle-windows-x64-v2-${{ steps.testgen-manifest.outputs.digest }}
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
       - id: framework-manifest
         shell: pwsh
         run: |
@@ -374,6 +432,12 @@ jobs:
           pnpm exec tsc -b tools/service-probe/tsconfig.json --force
           node C:\utide\tools\service-probe\dist\native-run.js --platform win32
           Pop-Location
+      - name: Run production Windows managed test generation
+        shell: pwsh
+        run: |
+          Push-Location C:\utide
+          node C:\utide\tools\service-probe\dist\native-test-generation.js --platform win32
+          Pop-Location
       - name: Upload failed Windows matrix diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -387,6 +451,13 @@ jobs:
         with:
           name: native-framework-windows
           path: C:\utide\.native-e2e\artifacts\windows\framework-report.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Windows managed test-generation report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-test-generation-windows
+          path: C:\utide\.native-e2e\artifacts\windows\test-generation-report.json
           if-no-files-found: error
           retention-days: 14
       - name: Remove short Windows workspace
@@ -444,6 +515,16 @@ jobs:
           cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
           echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
+      - id: testgen-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/testgen-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - id: testgen-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .superpowers/cache/testgen-bundle
+          key: testgen-bundle-linux-x64-v1-${{ steps.testgen-manifest.outputs.digest }}
       - run: pnpm prepare:testgen-bundle
       - run: pnpm check:testgen-bundle
       - id: framework-manifest
@@ -478,6 +559,22 @@ jobs:
       # Bootstrap/download/cache work completes before the fail-closed native namespace.
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
+      - name: Prepare approved offline LLVM bundle for managed generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="$GITHUB_WORKSPACE/.superpowers/cache/llvm-coverage-bundle/22.1.8/linux-x64"
+          node tools/llvm-coverage-bundle/prepare.mjs --platform linux-x64 --output-root "$bundle_root"
+          echo "UTIDE_NATIVE_LLVM_BUNDLE=$bundle_root" >> "$GITHUB_ENV"
+      - name: Check approved offline LLVM bundle for managed generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/llvm-coverage-bundle/check.mjs --platform linux-x64 --root "$UTIDE_NATIVE_LLVM_BUNDLE"
+      - name: Stage sibling production bundle roots
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
+          echo "UNIT_TEST_IDE_TEST_PRODUCT_BUNDLE_ROOT=$GITHUB_WORKSPACE/.superpowers/runtime/product-bundles/linux-x64" >> "$GITHUB_ENV"
       - name: Prepare Go module cache before Linux offline namespace
         working-directory: apps/test-service
         shell: bash
@@ -506,7 +603,11 @@ jobs:
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
-      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:service-smoke
+      - name: Run Linux service smoke with connection diagnostics
+        env:
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
+          UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: '1'
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:service-smoke
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:benchmark
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:host
       - name: Prepare trusted Linux framework runtime offline
@@ -523,6 +624,14 @@ jobs:
           UTIDE_DEBUG_FRAMEWORK: '1'
           UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
+      - name: Run production Linux managed test generation offline
+        env:
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
+          UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION: '1'
+        run: >-
+          node tools/linux-offline/run.mjs --allow-sudo-root --
+          pnpm --filter @unit-test-ide/service-probe
+          test:e2e:native:test-generation -- --platform linux
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -536,6 +645,13 @@ jobs:
           path: .native-e2e/artifacts/linux/framework-report.json
           if-no-files-found: error
           retention-days: 14
+      - name: Upload Linux managed test-generation report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-test-generation-linux
+          path: .native-e2e/artifacts/linux/test-generation-report.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload failed Linux framework diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -544,8 +660,10 @@ jobs:
           path: |
             .native-e2e/artifacts/linux/framework-debug-*.json
             .native-e2e/framework-failure/**
+            .native-e2e/test-generation-work/**
           if-no-files-found: warn
           retention-days: 1
+          include-hidden-files: true
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -646,6 +764,8 @@ jobs:
           cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
           echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - id: framework-manifest
         shell: bash
         run: |
@@ -670,6 +790,10 @@ jobs:
         run: |
           pnpm prepare:coverage-bundle
           pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform linux-x64
+          echo "UNIT_TEST_IDE_TEST_PRODUCT_BUNDLE_ROOT=$GITHUB_WORKSPACE/.superpowers/runtime/product-bundles/linux-x64" >> "$GITHUB_ENV"
       - name: Prepare Go modules before namespace entry
         working-directory: apps/test-service
         env:
@@ -697,7 +821,7 @@ jobs:
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test
       - name: Run required offline Linux GCC framework smoke
         env:
-          UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/coverage-bundle/linux-x64
+          UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/product-bundles/linux-x64/bundles/coverage
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:coverage-service-smoke:linux
       - name: Validate and close Linux GCC coverage evidence
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux
@@ -837,8 +961,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CMake bundle preparation failed' }
           Split-Path -Parent $result.executable | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
+      - name: Stage sibling production bundle roots
+        shell: pwsh
+        run: |
+          node tools/service-probe/stage-production-bundles.mjs --platform windows-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Windows production bundle staging failed' }
       - name: Run required real Windows clang-cl coverage
         env:
           GOENV: 'off'

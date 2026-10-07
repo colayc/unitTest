@@ -4,7 +4,8 @@ import type {
   ManagedReviewCaseV16,
   ManagedReviewV16,
   ManagedTestRecordPageV16,
-  ManagedTestStatusV16
+  ManagedTestStatusV16,
+  TestGenerationRunV15
 } from "@unit-test-ide/test-client";
 import { validateManagedReviewCaseDigestsV16 } from "@unit-test-ide/test-client";
 import { createHash } from "node:crypto";
@@ -26,11 +27,16 @@ export interface ManagedReviewControllerOptions {
 
 export interface ManagedReviewState {
   readonly review?: ManagedReviewV16;
+  readonly authoritativePreview?: ManagedAuthoritativePreview;
   readonly choices: Readonly<Record<string, ManagedChoice>>;
   readonly canApply: boolean;
   readonly applying: boolean;
   readonly previewAvailable: boolean;
 }
+
+export type ManagedAuthoritativePreview = Readonly<Required<Pick<NonNullable<TestGenerationRunV15["preview"]>, "candidateSetDigest" | "diff" | "diffDigest" | "confirmationDigest">> & {
+  readonly characterizationDigest?: string;
+}>;
 
 export type ManagedApplyOutcome =
   | { readonly state: "confirmed"; readonly result: ManagedReviewApplyResultV16 }
@@ -65,10 +71,46 @@ function validScaffoldKey(value: string): boolean {
   return SCAFFOLD_KEY.test(value) && !value.slice("scaffold:".length).split("/").some((part) => !part || part === "." || part === "..");
 }
 
+async function loadAuthoritativePreview(
+  context: BoundContext,
+  reviewId: string
+): Promise<ManagedAuthoritativePreview | undefined> {
+  if (!context.client.getTestGenerationRun) return undefined;
+  const run = await context.client.getTestGenerationRun(reviewId);
+  if (run.runId !== reviewId || run.projectId !== context.projectId || run.workspaceGeneration !== context.workspaceGeneration || run.state !== "awaiting_confirmation") {
+    throw new Error("The managed review preview is stale or bound to another project.");
+  }
+  const preview = run.preview;
+  if (!preview?.diff) return undefined;
+  if (!HEX_64.test(preview.candidateSetDigest) || !HEX_64.test(preview.diffDigest) || !HEX_64.test(preview.confirmationDigest) ||
+    preview.characterizationDigest !== undefined && !HEX_64.test(preview.characterizationDigest) ||
+    createHash("sha256").update(preview.diff).digest("hex") !== preview.diffDigest) {
+    throw new Error("The managed review preview proof is invalid.");
+  }
+  return {
+    candidateSetDigest: preview.candidateSetDigest,
+    diff: preview.diff,
+    diffDigest: preview.diffDigest,
+    confirmationDigest: preview.confirmationDigest,
+    ...(preview.characterizationDigest === undefined ? {} : { characterizationDigest: preview.characterizationDigest })
+  };
+}
+
+function sameAuthoritativePreview(
+  left: ManagedAuthoritativePreview | undefined,
+  right: ManagedAuthoritativePreview | undefined
+): boolean {
+  return left !== undefined && right !== undefined &&
+    left.candidateSetDigest === right.candidateSetDigest && left.diff === right.diff &&
+    left.diffDigest === right.diffDigest && left.confirmationDigest === right.confirmationDigest &&
+    left.characterizationDigest === right.characterizationDigest;
+}
+
 export class ManagedTestReviewController {
   #epoch = 0;
   #binding: BoundContext | undefined;
   #review: ManagedReviewV16 | undefined;
+  #authoritativePreview: ManagedAuthoritativePreview | undefined;
   #choices = new Map<string, ManagedChoice>();
   #requiredKeys = new Set<string>();
   #applying = false;
@@ -79,14 +121,13 @@ export class ManagedTestReviewController {
 
   getState(): ManagedReviewState {
     const review = this.#review;
-    // Current taskstore has no authenticated, persisted preview artifact.
-    // A response-side hash of reviewDigest + diff can be recomputed by a
-    // fabricator and therefore cannot authorize a write.
-    const previewAvailable = false;
+    const authoritativePreview = this.#authoritativePreview === undefined ? undefined : { ...this.#authoritativePreview };
+    const previewAvailable = authoritativePreview !== undefined;
     return {
       review: review ? { ...review, cases: review.cases.map((item) => ({ ...item })),
         conflictKeys: review.conflictKeys ? [...review.conflictKeys] : undefined,
         scaffoldPreviews: review.scaffoldPreviews?.map((item) => ({ ...item })) } : undefined,
+      authoritativePreview,
       choices: Object.fromEntries(this.#choices),
       canApply: !!review && previewAvailable && this.#displayed && !this.#applying && this.#currentBinding() && [...this.#requiredKeys].every((key) => this.#choices.has(key)),
       applying: this.#applying,
@@ -156,9 +197,13 @@ export class ManagedTestReviewController {
     if (conflictKeys.size > 200 || cases.some((item) => item.status === "conflicted" && !conflictKeys.has(item.caseId)) ||
       [...conflictKeys].some((key) => CASE_ID.test(key) && !cases.some((item) => item.caseId === key && item.status === "conflicted")) ||
       scaffoldPreviews.some((item) => !conflictKeys.has(item.key))) throw new Error("The managed review conflicts are inconsistent.");
+    const authoritativePreview = await loadAuthoritativePreview(context, reviewId);
+    this.#assertEpoch(epoch);
+    this.#assertSame(context);
     this.#binding = context;
     this.#requiredKeys = conflictKeys;
     this.#review = { ...anchor, cases, conflictKeys: [...conflictKeys], scaffoldPreviews, nextCursor: undefined };
+    this.#authoritativePreview = authoritativePreview;
     this.#notify();
     return this.getState();
   }
@@ -209,6 +254,10 @@ export class ManagedTestReviewController {
     this.#notify();
     let dispatched = false;
     try {
+      const freshPreview = await loadAuthoritativePreview(binding, review.reviewId);
+      this.#assertEpoch(epoch);
+      this.#assertSame(binding);
+      if (!sameAuthoritativePreview(freshPreview, this.#authoritativePreview)) throw new Error("The managed review preview is stale.");
       const fresh = await binding.client.getManagedReview({ reviewId: review.reviewId, limit: 100 });
       this.#assertEpoch(epoch);
       this.#assertSame(binding);
@@ -246,7 +295,7 @@ export class ManagedTestReviewController {
     return context as BoundContext;
   }
 
-  #clear(): void { this.#binding = undefined; this.#review = undefined; this.#choices.clear(); this.#requiredKeys.clear(); this.#displayed = false; this.#notify(); }
+  #clear(): void { this.#binding = undefined; this.#review = undefined; this.#authoritativePreview = undefined; this.#choices.clear(); this.#requiredKeys.clear(); this.#displayed = false; this.#notify(); }
   #notify(): void { this.options.onStateChanged?.(this.getState()); }
   #assertEpoch(epoch: number): void { if (epoch !== this.#epoch) throw new Error("The managed review was cancelled or became stale."); }
   #sameContext(expected: ManagedReviewContext): boolean {

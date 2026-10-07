@@ -26,8 +26,8 @@ type SnapshotVerifier func(context.Context, string) error
 // bounded validation receipt; absence of this callback fails managed planning.
 type ManagedSelectionValidator func(context.Context, ManagedSelection) ([]byte, error)
 type ManagedSelection struct {
-	RunID, SnapshotDigest, ToolchainID, SelectedOutputDigest string
-	Files                                                    []testgenrender.StagedFile
+	RunID, SnapshotDigest, ToolchainID, SelectedOutputDigest, SymbolID string
+	Files                                                              []testgenrender.StagedFile
 }
 type AcceptRequest struct{ RunID, CandidateSetDigest, SnapshotDigest, DiffDigest, ConfirmationDigest, CharacterizationDigest string }
 type publisherHooks struct {

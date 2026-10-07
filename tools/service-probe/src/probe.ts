@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -14,12 +14,19 @@ import type {
   CapabilitiesV12,
   CapabilitiesV13
 } from "@unit-test-ide/protocol-models";
-import { ProtocolClient, type ConnectionConnector, type HandshakeResult } from "@unit-test-ide/test-client";
+import {
+  ProtocolClient,
+  type ConnectionConnector,
+  type HandshakeResult,
+  type ProtocolVersion
+} from "@unit-test-ide/test-client";
 import { endpointForDirectory, type EndpointResource } from "./endpoint.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
 const execFile = promisify(execFileCallback);
 const OPERATION_TIMEOUT_MS = 8_000;
+const LEGACY_TASK_PROTOCOL_VERSIONS = ["1.4", "1.3", "1.2", "1.1", "1.0"] as const satisfies ReadonlyArray<ProtocolVersion>;
 
 function namedTimeoutError(label: string, milliseconds: number): Error {
   const error = new Error(`${label} timed out after ${milliseconds}ms`);
@@ -94,7 +101,14 @@ export interface StartServiceOptions {
   workspaceRoot?: string;
   trustedWorkspace?: boolean;
   cmakeBundleRoot?: string;
+  coverageBundleRoot?: string;
+  testgenBundleRoot?: string;
   devCMakeExecutable?: string;
+  /**
+   * Native legacy E2E operations use task routes that are not available in
+   * protocol 1.5/1.6. Managed generation callers opt into the latest list.
+   */
+  handshakeSupportedProtocolVersions?: ReadonlyArray<ProtocolVersion>;
   operations?: ProbeOperations;
 }
 
@@ -263,6 +277,8 @@ interface ServiceInstance {
   readonly directory: string;
   readonly workspaceRoot: string;
   readonly cmakeBundleRoot?: string;
+  readonly coverageBundleRoot?: string;
+  readonly testgenBundleRoot?: string;
   readonly devCMakeExecutable?: string;
   stdout: string;
   stderr: string;
@@ -276,6 +292,8 @@ function serviceSensitive(instance: ServiceInstance): string[] {
     instance.dataDir,
     instance.workspaceRoot,
     instance.cmakeBundleRoot ?? "",
+    instance.coverageBundleRoot ?? "",
+    instance.testgenBundleRoot ?? "",
     instance.devCMakeExecutable ?? "",
     instance.serviceBinary,
     instance.directory
@@ -358,6 +376,12 @@ async function launchService(serviceBinary: string, directory: string, options: 
     if (options.cmakeBundleRoot) {
       serviceArguments.push("--cmake-bundle-root", options.cmakeBundleRoot);
     }
+    if (options.coverageBundleRoot) {
+      serviceArguments.push("--coverage-bundle-root", options.coverageBundleRoot);
+    }
+    if (options.testgenBundleRoot) {
+      serviceArguments.push("--testgen-bundle-root", options.testgenBundleRoot);
+    }
     if (options.devCMakeExecutable) {
       serviceArguments.push("--dev-cmake-executable", options.devCMakeExecutable);
     }
@@ -383,7 +407,12 @@ async function launchService(serviceBinary: string, directory: string, options: 
     );
     const handshake = await withNamedTimeout(
       "task protocol handshake",
-      (options.operations?.handshakeClient ?? ((value, secret) => value.handshake(secret, "service-probe", "0.1.0")))(
+      (options.operations?.handshakeClient ?? ((value, secret) => value.handshake(
+        secret,
+        "service-probe",
+        "0.1.0",
+        options.handshakeSupportedProtocolVersions
+      )))(
         client,
         token,
         endpointResource.path
@@ -406,6 +435,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
       directory,
       workspaceRoot,
       ...(options.cmakeBundleRoot ? { cmakeBundleRoot: options.cmakeBundleRoot } : {}),
+      ...(options.coverageBundleRoot ? { coverageBundleRoot: options.coverageBundleRoot } : {}),
+      ...(options.testgenBundleRoot ? { testgenBundleRoot: options.testgenBundleRoot } : {}),
       ...(options.devCMakeExecutable ? { devCMakeExecutable: options.devCMakeExecutable } : {}),
       get stdout() { return stdout; },
       get stderr() { return stderr; },
@@ -426,7 +457,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
     }
     const sensitive = [
       token, endpointResource?.path ?? "", tokenFile, dataDir, workspaceRoot,
-      options.cmakeBundleRoot ?? "", options.devCMakeExecutable ?? "", serviceBinary, directory
+      options.cmakeBundleRoot ?? "", options.coverageBundleRoot ?? "", options.testgenBundleRoot ?? "",
+      options.devCMakeExecutable ?? "", serviceBinary, directory
     ];
     const details = `; stdout=${redact(stdout, sensitive)}; stderr=${redact(stderr, sensitive)}`;
     throw safeError(error, sensitive, details);
@@ -485,7 +517,7 @@ export class TaskServiceFixture {
     return this.#instance.connector.pauseNext();
   }
 
-  connectClient(): Promise<ProtocolClient> {
+  connectClient(supportedProtocolVersions = this.#options.handshakeSupportedProtocolVersions): Promise<ProtocolClient> {
     this.#assertAvailable();
     return this.#enqueueLifecycle(async () => {
       this.#assertAvailable();
@@ -497,7 +529,12 @@ export class TaskServiceFixture {
         client = await withNamedTimeout("secondary service connection", ProtocolClient.connect(instance.endpoint), timeoutMs);
         const handshake = await withNamedTimeout(
           "secondary task protocol handshake",
-          client.handshake(instance.token, "service-probe-secondary", "0.1.0"),
+          client.handshake(
+            instance.token,
+            "service-probe-secondary",
+            "0.1.0",
+            supportedProtocolVersions
+          ),
           timeoutMs
         );
         if (handshake.negotiatedProtocolVersion === "1.0") {
@@ -641,7 +678,18 @@ export async function startService(
   directory: string,
   options: StartServiceOptions = {}
 ): Promise<TaskServiceFixture> {
-  return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory, options), options);
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const productionRoots = productionBundleRoots(repositoryRoot, platform);
+  const effectiveOptions: StartServiceOptions = {
+    ...options,
+    cmakeBundleRoot: options.cmakeBundleRoot ?? productionRoots.cmakeBundleRoot,
+    coverageBundleRoot: options.coverageBundleRoot ?? productionRoots.coverageBundleRoot,
+    testgenBundleRoot: options.testgenBundleRoot ?? productionRoots.testgenBundleRoot,
+    handshakeSupportedProtocolVersions:
+      options.handshakeSupportedProtocolVersions ?? LEGACY_TASK_PROTOCOL_VERSIONS,
+  };
+  return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory, effectiveOptions), effectiveOptions);
 }
 
 export async function startTaskService(

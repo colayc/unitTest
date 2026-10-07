@@ -15,10 +15,13 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import { __testing as reportTesting, parseNativeLLVMFixtureLog } from "./native-report.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 
 const trackedManifestPath = resolve(import.meta.dirname, "../../../tools/cmake-bundle/manifest.json");
+
+const productionCapabilities = () => ({ coverageDetails: true, testGeneration: true, managedTests: true });
 
 test("Linux LLVM native evidence cannot be inferred from a skipped or marker-only fixture", () => {
   assert.throws(() => parseNativeLLVMFixtureLog("--- SKIP: TestNativeLinuxLLVMFixture (0.01s)\n"), /native LLVM fixture/u);
@@ -30,6 +33,24 @@ test("required native toolchain parsing is closed and deterministic", () => {
   assert.deepEqual([...parseRequiredToolchains("gcc, clang")], ["gcc", "clang"]);
   assert.throws(() => parseRequiredToolchains("gcc,gcc"), /duplicate required/);
   assert.throws(() => parseRequiredToolchains("gcc,cuda"), /invalid required/);
+});
+
+test("native generation capability gate requires coverage details and full v1.6 generation", async () => {
+  await assert.doesNotReject(__testing.requireProductionGenerationCapabilities({
+    getCapabilities: async () => ({ coverageDetails: true, testGeneration: true, managedTests: true }),
+  } as unknown as ProtocolClient));
+  for (const capabilities of [
+    { coverageDetails: false, testGeneration: true, managedTests: true },
+    { coverageDetails: true, testGeneration: false, managedTests: true },
+    { coverageDetails: true, testGeneration: true, managedTests: false },
+  ]) {
+    await assert.rejects(
+      __testing.requireProductionGenerationCapabilities({
+        getCapabilities: async () => capabilities,
+      } as unknown as ProtocolClient),
+      /production test generation capability is unavailable/u,
+    );
+  }
 });
 
 test("preset compiler validation accepts another installed version of the requested family", () => {
@@ -111,6 +132,7 @@ test("native matrix uses only the verified bundle and explicit trusted workspace
       const family = launches.length === 1 ? "gcc" : "clang";
       return {
         client: {
+          getCapabilities: async () => productionCapabilities(),
           inspectWorkspace: async () => family === "gcc"
             ? workspaceSnapshot("gcc")
             : workspaceSnapshot(),
@@ -143,9 +165,12 @@ test("native matrix uses only the verified bundle and explicit trusted workspace
   assert.equal(results[1]?.scenarios.discovery, "skipped");
   assert.equal(reportResults, results);
   assert.equal(launches.length, 2);
+  const roots = productionBundleRoots(root, "linux");
   for (const launch of launches) {
     assert.equal(launch.options.trustedWorkspace, true);
-    assert.equal(launch.options.cmakeBundleRoot, bundle.bundleRoot);
+    assert.equal(launch.options.cmakeBundleRoot, roots.cmakeBundleRoot);
+    assert.equal(launch.options.coverageBundleRoot, roots.coverageBundleRoot);
+    assert.equal(launch.options.testgenBundleRoot, roots.testgenBundleRoot);
     assert.equal("devCMakeExecutable" in launch.options, false);
     assert.equal(launch.disposed, true);
   }
@@ -178,7 +203,7 @@ test("declared required family absence fails and bundle preflight stays before l
     launchService: async () => {
       launches++;
       return {
-        client: { inspectWorkspace: async () => workspaceSnapshot() },
+        client: { getCapabilities: async () => productionCapabilities(), inspectWorkspace: async () => workspaceSnapshot() },
         dispose: async () => undefined,
       } as unknown as TaskServiceFixture;
     },
@@ -351,7 +376,7 @@ test("required Linux native run carries F1 identity and verifies exact 2x2x17 re
     launchService: async () => {
       const family = (["gcc", "clang"] as const)[launchIndex++]!;
       return {
-        client: { inspectWorkspace: async () => workspaceSnapshot(family) },
+        client: { getCapabilities: async () => productionCapabilities(), inspectWorkspace: async () => workspaceSnapshot(family) },
         dispose: async () => { events.push(`dispose:${family}`); },
       } as unknown as TaskServiceFixture;
     },

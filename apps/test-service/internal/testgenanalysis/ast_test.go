@@ -13,14 +13,14 @@ import (
 	"unit-test-ide.local/test-service/internal/probe"
 )
 
-const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","id":"param-x","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"param-x","kind":"ParmVarDecl","name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
+const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","mangledName":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","id":"param-x","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"param-x","kind":"ParmVarDecl","name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
 
 func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	first, err := decodeAST(strings.NewReader(scalarAST), 1<<20, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Functions) != 1 || first.Functions[0].Name != "choose" || len(first.Functions[0].Parameters) != 1 || len(first.Functions[0].Branches) != 1 {
+	if len(first.Functions) != 1 || first.Functions[0].Name != "choose" || first.Functions[0].LinkageName != "choose" || len(first.Functions[0].Parameters) != 1 || len(first.Functions[0].Branches) != 1 {
 		t.Fatalf("unexpected model: %#v", first)
 	}
 	if first.Functions[0].Branches[0].Kind != BranchIf || first.Functions[0].Branches[0].Predicate.Operator != ">" {
@@ -35,6 +35,23 @@ func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	}
 	if strings.Contains(first.Digest, "source") || strings.Contains(first.Functions[0].LocationDigest, "source") {
 		t.Fatal("path leaked")
+	}
+}
+
+func TestDecodeASTBuildsClosedReturnRulesForScalarIf(t *testing.T) {
+	program, err := decodeAST(strings.NewReader(scalarAST), 1<<20, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(program.Functions) != 1 || len(program.Functions[0].ReturnRules) != 2 {
+		t.Fatalf("return rules=%+v", program.Functions)
+	}
+	first, second := program.Functions[0].ReturnRules[0], program.Functions[0].ReturnRules[1]
+	if len(first.Conditions) != 1 || first.Conditions[0].Operator != ">" || first.Conditions[0].Left.Name != "x" || first.Result.Value != "1" {
+		t.Fatalf("first rule=%+v", first)
+	}
+	if len(second.Conditions) != 1 || second.Conditions[0].Operator != "!" || second.Result.Value != "0" {
+		t.Fatalf("second rule=%+v", second)
 	}
 }
 

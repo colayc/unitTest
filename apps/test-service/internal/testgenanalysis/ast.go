@@ -46,6 +46,7 @@ type astNode struct {
 	ID                 string        `json:"id"`
 	Kind               string        `json:"kind"`
 	Name               string        `json:"name"`
+	MangledName        string        `json:"mangledName"`
 	Type               astType       `json:"type"`
 	Loc                astLocation   `json:"loc"`
 	Range              astRange      `json:"range"`
@@ -202,7 +203,14 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		return Function{}, errors.New("unusable function identity")
 	}
 	location := locationDigest(sourceDigest, effectiveLocation(n))
-	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location, Excerpt: SourceExcerpt{LocationDigest: location, StartByte: n.Range.Begin.Offset, EndByte: n.Range.End.Offset + n.Range.End.TokLen}, originVerified: sourcePath == "" || matchesSourceOrigin(n, sourcePath, workspaceRoot)}
+	linkageName := n.MangledName
+	if linkageName == "" && n.Kind == "FunctionDecl" {
+		linkageName = n.Name
+	}
+	if !validLinkageName(linkageName) {
+		linkageName = ""
+	}
+	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, LinkageName: linkageName, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location, Excerpt: SourceExcerpt{LocationDigest: location, StartByte: n.Range.Begin.Offset, EndByte: n.Range.End.Offset + n.Range.End.TokLen}, originVerified: sourcePath == "" || matchesSourceOrigin(n, sourcePath, workspaceRoot)}
 	for _, child := range n.Inner {
 		if child.Kind == "ParmVarDecl" {
 			if !safeIdentifier(child.Name) {
@@ -360,9 +368,28 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 	if err := walk(body, 0, map[string]int{}); err != nil {
 		return Function{}, err
 	}
+	parameterIDs := map[string]string{}
+	for _, child := range n.Inner {
+		if child != nil && child.Kind == "ParmVarDecl" && child.ID != "" {
+			parameterIDs[child.ID] = child.Name
+		}
+	}
+	f.ReturnRules = extractClosedReturnRules(body, parameterIDs)
 	f.Decision = (SafetyClassifier{}).Classify(f)
 	setEffect(&f)
 	return f, nil
+}
+
+func validLinkageName(value string) bool {
+	if value == "" || len(value) > 8192 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character < 0x21 || character > 0x7e || character == '/' || character == '\\' {
+			return false
+		}
+	}
+	return true
 }
 func matchesSourceOrigin(n *astNode, sourcePath, root string) bool {
 	origin := n.Loc.File

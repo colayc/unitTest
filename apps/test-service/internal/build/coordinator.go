@@ -38,6 +38,13 @@ type ConfigurationStore interface {
 	PutBuildConfiguration(context.Context, taskstore.BuildConfiguration) error
 }
 
+func coveragePreparationDebugError(stage string, err error) error {
+	if err == nil || os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
+		return err
+	}
+	return fmt.Errorf("coverage preparation build plan rejected: %s: %w", stage, err)
+}
+
 type CoordinatorConfig struct {
 	Inspector       WorkspaceInspector
 	Tasks           TaskStarter
@@ -454,24 +461,24 @@ func (c *Coordinator) prepare(
 	baseProfile := profile
 	coverage, err := c.prepareCoverageOptions(request.Coverage, baseProfile)
 	if err != nil {
-		return nil, err
+		return nil, coveragePreparationDebugError("coverage options", err)
 	}
 	if coverage != nil {
 		toolsetIdentity, capabilityErr := coverageToolsetIdentity(instance, true)
 		if capabilityErr != nil {
-			return nil, task.ErrInvalidArgument
+			return nil, coveragePreparationDebugError("coverage toolset capability", task.ErrInvalidArgument)
 		}
 		coverage.ToolsetIdentity = toolsetIdentity
 		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
-		return nil, err
+		return nil, coveragePreparationDebugError("coverage build directory", err)
 	}
 	var coverageDirectory *verifiedDirectory
 	if coverage != nil {
 		coverageDirectory, err = pinVerifiedDirectory(profile.BinaryDir)
 		if err != nil {
-			return nil, task.ErrInvalidArgument
+			return nil, coveragePreparationDebugError("coverage directory pin", task.ErrInvalidArgument)
 		}
 		defer func() {
 			if coverageDirectory != nil {
@@ -480,7 +487,7 @@ func (c *Coordinator) prepare(
 		}()
 		baseInfo, baseErr := os.Stat(baseProfile.BinaryDir)
 		if baseErr == nil && os.SameFile(baseInfo, coverageDirectory.info) {
-			return nil, task.ErrInvalidArgument
+			return nil, coveragePreparationDebugError("coverage directory collision", task.ErrInvalidArgument)
 		}
 		coverage.BinaryDir = coverageDirectory.path
 		profile.BinaryDir = coverageDirectory.path
@@ -492,7 +499,7 @@ func (c *Coordinator) prepare(
 	}
 	if coverageDirectory != nil {
 		if err := coverageDirectory.Verify(); err != nil {
-			return nil, task.ErrInvalidArgument
+			return nil, coveragePreparationDebugError("coverage directory verification", task.ErrInvalidArgument)
 		}
 	}
 	lockOwned := true
@@ -627,6 +634,19 @@ func coverageToolsetIdentity(instance toolchain.Instance, coverageRequested bool
 			return "", task.ErrInvalidArgument
 		}
 		return instance.Coverage.ToolsetIdentity, nil
+	case toolchain.FamilyClang:
+		coverage := instance.Coverage
+		tools := []toolchain.LLVMToolEvidence{
+			{Role: "clang", Path: instance.CCompiler, Evidence: coverage.CompilerEvidence},
+			{Role: "clang++", Path: instance.CXXCompiler, Evidence: coverage.CXXCompilerEvidence},
+			{Role: "llvm-profdata", Path: coverage.LLVMProfdata, Evidence: coverage.ProfdataEvidence},
+			{Role: "llvm-cov", Path: coverage.LLVMCov, Evidence: coverage.CovEvidence},
+		}
+		identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+		if err != nil || identity != coverage.ToolsetIdentity {
+			return "", task.ErrInvalidArgument
+		}
+		return identity, nil
 	case toolchain.FamilyGCC:
 		coverage := instance.Coverage
 		if instance.Version == "" || coverage.GCov == "" ||
@@ -1304,12 +1324,7 @@ func fileAPIIdentity(reply cmake.FileAPIReply) string {
 }
 
 func cloneTargets(values []cmake.Target) []cmake.Target {
-	result := make([]cmake.Target, len(values))
-	for index := range values {
-		result[index] = values[index]
-		result[index].Artifacts = append([]string(nil), values[index].Artifacts...)
-	}
-	return result
+	return cmake.CloneTargets(values)
 }
 
 func resolveAllowedBuildPath(path string, roots ...string) (string, bool) {

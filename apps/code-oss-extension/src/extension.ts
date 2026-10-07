@@ -23,6 +23,7 @@ import { CoverageDecorations, type LineDecoration } from "./coverage-decorations
 import { coverageTreeItem } from "./coverage-viewer.js";
 import { verifyCoverageDetailLocation } from "./coverage-sources.js";
 import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
+import { resolveProductLayout, type ProductLayout } from "./service-layout.js";
 import {
   TestingApiAdapter,
   type TestingApiHost
@@ -141,17 +142,10 @@ class StatusProjection {
   }
 }
 
-function bundledServiceExecutable(extensionPath: string): string {
-  return join(
-    extensionPath,
-    "bin",
-    process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service"
-  );
-}
-
-function resolveServiceExecutable(host: ExtensionHost, extensionPath: string): string {
+function resolveServiceLayout(host: ExtensionHost, extensionPath: string): ProductLayout {
+  const layout = resolveProductLayout(extensionPath, process.platform, host.developmentMode === true);
   const configured = host.configuration("serviceExecutable", "").trim();
-  if (!configured) return bundledServiceExecutable(extensionPath);
+  if (!configured) return layout;
   if (!host.developmentMode) {
     throw new Error("unitTestIde.serviceExecutable overrides are development-only");
   }
@@ -161,7 +155,7 @@ function resolveServiceExecutable(host: ExtensionHost, extensionPath: string): s
   if (!absolute || normalizedBase !== expectedBase) {
     throw new Error("unitTestIde.serviceExecutable must be an absolute unit-test-service executable");
   }
-  return configured;
+  return Object.freeze({ ...layout, serviceExecutable: configured });
 }
 
 function createManager(
@@ -170,8 +164,10 @@ function createManager(
   factory: (options: ServiceManagerOptions) => LifecycleManager
 ): LifecycleManager {
   const extensionPath = host.extensionPath ?? process.cwd();
+  const productLayout = resolveServiceLayout(host, extensionPath);
   return factory({
-    serviceExecutable: resolveServiceExecutable(host, extensionPath),
+    serviceExecutable: productLayout.serviceExecutable,
+    productLayout,
     workspaceRoot: snapshot.workspaceRoot ?? extensionPath,
     dataDirectory: host.dataDirectory ?? join(extensionPath, ".unit-test-ide"),
     timeoutMs: host.configuration("serviceStartupTimeoutMs", 10_000),
@@ -584,9 +580,28 @@ class ExtensionController {
     const review = this.#managedReview;
     const generation = this.#generationController;
     if (!review || !generation || this.#deactivating || !await review.available() || epoch !== this.#managedRefreshEpoch || this.#deactivating) return;
-    this.#managedCommands = registerManagedTestCommands(this.host.context, generation, review, this.#status, this.host, this.#output);
+    this.#managedCommands = registerManagedTestCommands(
+      this.host.context,
+      generation,
+      review,
+      this.#status,
+      this.host,
+      this.#output,
+      () => this.#refreshAfterManagedApply()
+    );
     await this.host.setManagedTestsAvailable?.(true);
     if (epoch !== this.#managedRefreshEpoch || this.#deactivating) this.#clearManagedCommands();
+  }
+
+  async #refreshAfterManagedApply(): Promise<void> {
+    if (this.#deactivating || this.#testingTrust() !== "trusted" || !this.#coverageController) {
+      throw new Error("The trusted testing session is no longer available.");
+    }
+    await this.#refreshTesting();
+    const state = await this.#coverageController.startCurrent();
+    if (state.state !== "available" || !state.reportId || !state.summary) {
+      throw new Error("The generated tests did not produce a current coverage report.");
+    }
   }
 
   #filterCoverageDetails(value: CoverageFilter): void {

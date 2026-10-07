@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -238,6 +239,16 @@ func failPreparation(phase coveragerun.Phase, err error) error {
 		err = task.ErrInvalidArgument
 	}
 	return preparationFailure{phase: phase, cause: err}
+}
+
+func failPreparationStage(phase coveragerun.Phase, stage string, err error) error {
+	if err == nil {
+		err = task.ErrInvalidArgument
+	}
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		err = fmt.Errorf("coverage preparation rejected: %s: %w", stage, err)
+	}
+	return failPreparation(phase, err)
 }
 
 func (coordinator *Coordinator) resumePreparationFailure(
@@ -488,22 +499,22 @@ func (coordinator *Coordinator) prepare(
 	}
 	coverageInput, err := execution.coverageBuildInput()
 	if err != nil {
-		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
+		return nil, task.ExecutionPlan{}, failPreparationStage(coveragerun.PhaseBuild, "coverage input", err)
 	}
 	prepared, err := coordinator.config.Build.PreparePlan(ctx, coverageInput)
 	if err != nil || prepared == nil {
-		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, errOrInvalid(err))
+		return nil, task.ExecutionPlan{}, failPreparationStage(coveragerun.PhaseBuild, "instrumented build plan", errOrInvalid(err))
 	}
 	execution.prepared = prepared
 	if err := validatePreparedIdentity(prepared, run, testRun, profile, currentToolchain); err != nil {
-		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
+		return nil, task.ExecutionPlan{}, failPreparationStage(coveragerun.PhaseBuild, "instrumented identity", err)
 	}
 	if err := attachPreparedCoverageToolset(prepared, preparedAdapter, buildRoot); err != nil {
-		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, task.ErrInvalidArgument)
+		return nil, task.ExecutionPlan{}, failPreparationStage(coveragerun.PhaseBuild, "coverage toolset handoff", err)
 	}
 	plan, err := rewriteBuildPlan(prepared.Plan())
 	if err != nil {
-		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
+		return nil, task.ExecutionPlan{}, failPreparationStage(coveragerun.PhaseBuild, "instrumented plan rewrite", err)
 	}
 	execution.boundary = &executionBoundary{
 		delegate: prepared.Boundary(), execution: execution, root: root,
@@ -787,18 +798,25 @@ func (execution *execution) AfterStep(
 	}
 	switch step.Kind {
 	case task.StepCoverageConfigure:
-		if err := execution.applyPhase(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true}); err != nil {
-			return task.Continuation{}, err
-		}
 		execution.mu.Lock()
+		_, transitionErr := execution.state.Apply(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true})
 		prepared := execution.prepared
 		execution.mu.Unlock()
+		if transitionErr != nil {
+			return task.Continuation{}, transitionErr
+		}
 		if recorder, ok := prepared.(interface {
 			PersistConfiguration(context.Context) error
 		}); ok {
 			if err := recorder.PersistConfiguration(ctx); err != nil {
 				return task.Continuation{}, err
 			}
+		}
+		// The compiler/configuration checkpoint is part of configure. Do not
+		// project its failure onto build: build_failed maps to command_failed,
+		// not the infrastructure failure returned by a rejected checkpoint.
+		if err := execution.applyPhase(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true}); err != nil {
+			return task.Continuation{}, err
 		}
 		return task.Continuation{}, nil
 	case task.StepCoverageBuild:
@@ -987,8 +1005,15 @@ func (execution *execution) ExecuteServiceAction(
 		return task.StepResult{}, errors.New("coverage adapter is unavailable")
 	}
 	if execution.terminalErr != nil {
-		if execution.terminalOutcome == task.OutcomeCommandFailed {
+		if execution.terminalOutcome == task.OutcomeCommandFailed &&
+			os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
 			return task.StepResult{Verdict: task.StepVerdictFailed}, nil
+		}
+		if execution.terminalOutcome == task.OutcomeCommandFailed {
+			return task.StepResult{
+				Process: task.ProcessResult{Err: execution.terminalErr},
+				Verdict: task.StepVerdictFailed,
+			}, nil
 		}
 		return task.StepResult{}, execution.terminalErr
 	}

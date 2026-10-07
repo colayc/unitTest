@@ -6,6 +6,7 @@ import { collectAuditedFrameworkBenchmark } from "./native-framework-benchmark.j
 import { publishFrameworkRuntime } from "./native-framework-publish.js";
 import { prepareLinuxFrameworkInputs, type LinuxFrameworkInputManifest } from "./linux-framework-inputs.js";
 import { verifyPreparedCMakeBundle } from "./native-build.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import { discoverFrameworkCatalog, loadMatrixContract, stableFrameworkIdDigest, type F1FrameworkIdentity } from "./native-framework-matrix.js";
 import type { FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
 import { buildFrameworkRuntimeManifest, type FrameworkRuntimeManifest, type FrameworkRuntimeFramework, type FrameworkRuntimeToolchain } from "./native-framework-runtime-contract.js";
@@ -115,7 +116,12 @@ async function prepareFrameworkRuntimeInternal(
         const fixture = await (dependencies.startService ?? startService)(
           join(repositoryRoot, "build", options.platform === "win32" ? "unit-test-service.exe" : "unit-test-service"),
           staged.serviceDirectory,
-          { workspaceRoot: staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000, cmakeBundleRoot: join(repositoryRoot, ".bundled-tools/cmake") },
+          {
+            workspaceRoot: staged.workspaceRoot,
+            trustedWorkspace: true,
+            timeoutMs: 120_000,
+            ...productionBundleRoots(repositoryRoot, options.platform),
+          },
         );
         let compiled: Awaited<ReturnType<typeof readCompiledFrameworkExecutable>>;
         try {

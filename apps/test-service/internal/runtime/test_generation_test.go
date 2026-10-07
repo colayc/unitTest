@@ -33,6 +33,53 @@ type generationDriverFixture struct {
 	projectionMismatch   string
 	block                <-chan struct{}
 	ignoreCancel         bool
+	finalize             func(context.Context, testgendomain.Run) error
+}
+
+func (d *generationDriverFixture) FinalizeManagedReview(ctx context.Context, run testgendomain.Run) error {
+	if d.finalize == nil {
+		return nil
+	}
+	return d.finalize(ctx, run)
+}
+
+func TestGenerationFinalizesManagedReviewAfterAwaitingCheckpoint(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "managed-finalize.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	finalized := make(chan testgendomain.Run, 1)
+	driver := &generationDriverFixture{complete: true, finalize: func(_ context.Context, run testgendomain.Run) error {
+		finalized <- run
+		return nil
+	}}
+	service, err := newGenerationService(GenerationServiceConfig{
+		Store: store, Driver: driver, Publisher: &generationPublisherFixture{complete: true}, Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, request testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return request.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil }, VerifyProcess: func(context.Context, string, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	_, target, _, _ := productionPipelineFixture(t)
+	target.request.SessionOwnerDigest = strings.Repeat("f", 64)
+	started, err := service.coord.Start(context.Background(), target.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.launch(started.ID)
+	select {
+	case run := <-finalized:
+		if run.State != testgendomain.StateAwaitingConfirmation || run.Revision <= started.Revision || run.Request.ManagedGapID != target.gapID {
+			t.Fatalf("finalized before durable awaiting checkpoint: %+v", run)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed review was not finalized")
+	}
 }
 
 const fixtureGenerationDiff = "--- a/tests/generated/classify_test.cpp\n+++ b/tests/generated/classify_test.cpp\n@@ -0,0 +1 @@\n+TEST(classify, generated) {}\n--- a/CMakeLists.txt\n+++ b/CMakeLists.txt\n@@ -1 +1,2 @@\n add_executable(tests)\n+target_sources(tests PRIVATE tests/generated/classify_test.cpp)\n"
@@ -61,7 +108,7 @@ func TestGenerationServiceDoesNotAdvertiseManagedTestsWithoutSelectedOutputValid
 	}
 }
 
-func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
+func TestBaseGenerationFactoryRunsOnlyForTrustedReadyRuntimeButStaysHidden(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
 	if err := os.MkdirAll(workspaceRoot, 0700); err != nil {
@@ -98,8 +145,8 @@ func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer trusted.Close()
-	if trusted.GenerationBackend() == nil || !trusted.GenerationBackend().TestGenerationReady() || called != 1 {
-		t.Fatal("trusted runtime did not wire ready generation provider")
+	if trusted.GenerationBackend() != nil || called != 1 {
+		t.Fatal("base-only generation provider escaped the atomic production gate")
 	}
 }
 

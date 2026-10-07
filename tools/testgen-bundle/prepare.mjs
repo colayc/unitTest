@@ -188,40 +188,57 @@ async function downloadVerifiedSource(url, destination, maximumBytes) {
   throw new Error("source redirect limit exceeded");
 }
 
+export function parseArchiveListing(stdout, spec) {
+  const lines = stdout.split(/\r?\n/u).filter(Boolean);
+  const archiveRootPrefix = `${spec.archiveRoot}/`;
+  const entries = lines.map((line) => {
+    const type = line[0];
+    // GNU tar and bsdtar use different numbers of date/owner columns. The
+    // reviewed archive root is the stable delimiter; parse from it instead of
+    // assuming one platform-specific verbose-column layout.
+    const pathStart = line.indexOf(archiveRootPrefix);
+    if (pathStart < 0) throw new Error(`archive verbose listing has no reviewed root: ${line}`);
+    const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
+    const listed = line.slice(pathStart);
+    const markerIndex = marker ? listed.lastIndexOf(marker) : -1;
+    return {
+      path: markerIndex >= 0 ? listed.slice(0, markerIndex) : listed,
+      type,
+      target: markerIndex >= 0 ? listed.slice(markerIndex + marker.length) : undefined,
+    };
+  });
+  return validateSelectedArchiveEntries(entries, spec);
+}
+
 async function listArchiveEntries(archivePath, spec) {
   const options = {
     encoding: "utf8",
     maxBuffer: 128 * 1024 * 1024,
     windowsHide: true,
   };
-  const [names, verbose] = await Promise.all([
-    execFile("tar", ["-tf", archivePath], options),
-    execFile("tar", ["-tvf", archivePath], options),
-  ]);
-  const paths = names.stdout.split(/\r?\n/u).filter(Boolean);
-  const lines = verbose.stdout.split(/\r?\n/u).filter(Boolean);
-  if (paths.length !== lines.length) throw new Error("archive type listing does not match path listing");
-  const entries = paths.map((path, index) => {
-    const line = lines[index];
-    const type = line[0];
-    const marker = type === "l" ? " -> " : type === "h" ? " link to " : "";
-    return { path, type, target: marker && line.includes(marker) ? line.slice(line.lastIndexOf(marker) + marker.length) : undefined };
-  });
-  return validateSelectedArchiveEntries(entries, spec);
+  // A verbose listing already contains every archive path and its entry type.
+  // Running `tar -tf` and `tar -tvf` in parallel decompresses the same large
+  // LLVM archive twice and can exceed the Windows job timeout. Parse one
+  // detailed listing instead while retaining the existing link/type checks.
+  const { stdout } = await execFile("tar", ["-tvf", archivePath], options);
+  return parseArchiveListing(stdout, spec);
 }
 
-async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec) {
+async function copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec, onProgress) {
   const selected = [
     `${spec.archiveRoot}/${spec.executable}`,
     `${spec.archiveRoot}/${spec.resourceDir}/include`,
   ];
+  onProgress("extract-selection");
   await execFile("tar", ["-xf", archivePath, "-C", extractRoot, ...selected], {
     maxBuffer: 1024 * 1024,
     windowsHide: true,
   });
+  onProgress("verify-selection");
   await verifyExtractedSelection(extractRoot, spec);
   const sourceRoot = join(extractRoot, spec.archiveRoot);
   const canonicalRoot = await realpath(sourceRoot);
+  onProgress("copy-selection");
   for (const file of spec.files) {
     const source = join(sourceRoot, ...file.path.split("/"));
     const info = await lstat(source);
@@ -243,6 +260,7 @@ export async function prepareBundle({
   platform,
   cacheRoot = join(repositoryRoot, ".superpowers", "cache", "testgen-bundle", "22.1.8"),
   downloadArchive = downloadVerifiedSource,
+  onProgress = () => {},
 } = {}) {
   const sourceBytes = manifestBytes ?? (manifest ? Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`) : await readFile(join(toolDir, "manifest.json")));
   const sourceManifest = validateSourceManifest(manifest ?? JSON.parse(sourceBytes.toString("utf8")), sourceBytes);
@@ -254,6 +272,7 @@ export async function prepareBundle({
   try {
     await lstat(finalRoot);
     try {
+      onProgress("verify-cache");
       return await checkBundle({ root: finalRoot, platform: key, manifest: sourceManifest, manifestBytes: sourceBytes });
     } catch {
       // A corrupt or stale final cache is replaced only after a new tree verifies.
@@ -266,12 +285,15 @@ export async function prepareBundle({
   let preserveTemporaryRoot = false;
   try {
     const archivePath = join(temporaryRoot, spec.archive.filename);
+    onProgress("download-archive");
     await downloadArchive(spec.archive.url, archivePath, maximumArchiveBytes);
+    onProgress("verify-archive");
     const archiveInfo = await lstat(archivePath);
     if (!archiveInfo.isFile() || archiveInfo.isSymbolicLink() || archiveInfo.size > maximumArchiveBytes ||
         await sha256File(archivePath) !== spec.archive.sha256) {
       throw new Error("Clang archive SHA-256 digest mismatch");
     }
+    onProgress("list-archive");
     const entries = await listArchiveEntries(archivePath, spec);
     const selected = [
       `${spec.archiveRoot}/${spec.executable}`,
@@ -286,7 +308,8 @@ export async function prepareBundle({
     const bundleRoot = join(temporaryRoot, "bundle");
     await mkdir(extractRoot);
     await mkdir(bundleRoot);
-    await copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec);
+    await copyInventoriedArchiveFiles(archivePath, extractRoot, bundleRoot, spec, onProgress);
+    onProgress("download-licenses");
     for (const license of spec.licenses) {
       const destination = join(bundleRoot, ...license.path.split("/"));
       await mkdir(dirname(destination), { recursive: true });
@@ -300,6 +323,7 @@ export async function prepareBundle({
     const manifestSha256 = createHash("sha256").update(sourceBytes).digest("hex");
     await writeFile(join(bundleRoot, "manifest.json"), sourceBytes, { flag: "wx" });
     await writeFile(join(bundleRoot, "READY"), `${JSON.stringify({ schemaVersion: 1, platform: key, manifestSha256 })}\n`, { flag: "wx" });
+    onProgress("publish-bundle");
     return await publishCheckedBundle({
       candidateRoot: bundleRoot,
       finalRoot,
@@ -321,7 +345,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.stderr.write("Usage: node prepare.mjs [--platform <windows-x64|linux-x64>]\n");
     process.exitCode = 1;
   } else {
-    prepareBundle({ platform: platformFlag === 0 ? args[1] : undefined })
+    prepareBundle({
+      platform: platformFlag === 0 ? args[1] : undefined,
+      onProgress: (stage) => process.stderr.write(`testgen-bundle: ${stage}\n`),
+    })
       .then(({ root }) => process.stdout.write(`${root}\n`))
       .catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
   }

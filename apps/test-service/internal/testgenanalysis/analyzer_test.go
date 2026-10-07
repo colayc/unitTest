@@ -51,6 +51,15 @@ func fixtureAnalysis(t *testing.T) (Analyzer, AnalysisRequest, *fixtureRunner, *
 	return Analyzer{bundle: fixtureBundle{path: filepath.Join(root, "fixed", "clang"), resource: filepath.Join(root, "fixed", "lib", "clang", "22"), manifest: strings.Repeat("b", 64), verified: &verified}, runner: runner}, AnalysisRequest{WorkspaceRoot: root, SourceRelative: "scalar.c", SourceDigest: hex.EncodeToString(sum[:]), CompileSnapshotDigest: strings.Repeat("c", 64), Arguments: []string{"-std=c11"}, Timeout: 5 * time.Second}, runner, &verified
 }
 
+func TestNewAnalyzerAcceptsOnlyAnAlreadyVerifiedBundleCapability(t *testing.T) {
+	verified := 0
+	bundle := fixtureBundle{path: filepath.Join(t.TempDir(), "clang"), resource: filepath.Join(t.TempDir(), "resource"), manifest: strings.Repeat("b", 64), verified: &verified}
+	analyzer, err := NewAnalyzerWithVerifiedBundle(bundle)
+	if err != nil || analyzer == nil || verified != 1 {
+		t.Fatalf("analyzer=%#v verified=%d err=%v", analyzer, verified, err)
+	}
+}
+
 func TestAnalyzeUsesOnlyVerifiedFixedCompilerWithCleanEnvironment(t *testing.T) {
 	a, request, runner, verified := fixtureAnalysis(t)
 	program, err := a.Analyze(context.Background(), request)

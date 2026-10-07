@@ -1148,6 +1148,8 @@ func artifactDescriptor(kind string) (mimeType, extension string, ok bool) {
 		return "text/html", ".coverage.html", true
 	case "test-generation-source":
 		return "application/octet-stream", ".source", true
+	case "test-generation-evidence":
+		return "application/octet-stream", ".evidence", true
 	default:
 		return "", "", false
 	}

@@ -33,6 +33,10 @@ const (
 	maxFileAPIConfigs          = 64
 	maxFileAPITargets          = 1024
 	maxFileAPITargetFiles      = 256
+	maxFileAPITargetSources    = 4096
+	maxFileAPICompileGroups    = 256
+	maxFileAPICompileEntries   = 4096
+	maxFileAPICompileValue     = 4096
 	maxFileAPIArtifacts        = 128
 	maxFileAPITotalArtifacts   = 4096
 	maxFileAPIInputs           = 2048
@@ -65,6 +69,47 @@ type Target struct {
 	ProjectSourceDir string
 	ProjectBuildDir  string
 	Artifacts        []string
+	Sources          []TargetSource
+	CompileUnits     []CompileUnit
+}
+
+type TargetSource struct {
+	Path      string
+	Generated bool
+	Compiled  bool
+}
+
+// CompileUnit is CMake-owned compilation metadata for one source in a target.
+// Paths are canonical native paths captured from the current File API reply;
+// callers must still re-read the reply before using them as authority.
+type CompileUnit struct {
+	Source    string
+	Language  string
+	Standard  string
+	Generated bool
+	Includes  []string
+	Defines   []string
+}
+
+// CloneTargets returns a fully independent target graph for coordinator and
+// discovery boundaries.
+func CloneTargets(values []Target) []Target {
+	result := make([]Target, len(values))
+	for index := range values {
+		result[index] = values[index]
+		result[index].Artifacts = append([]string(nil), values[index].Artifacts...)
+		result[index].Sources = append([]TargetSource(nil), values[index].Sources...)
+		if values[index].CompileUnits == nil {
+			continue
+		}
+		result[index].CompileUnits = make([]CompileUnit, len(values[index].CompileUnits))
+		for unitIndex := range values[index].CompileUnits {
+			result[index].CompileUnits[unitIndex] = values[index].CompileUnits[unitIndex]
+			result[index].CompileUnits[unitIndex].Includes = append([]string(nil), values[index].CompileUnits[unitIndex].Includes...)
+			result[index].CompileUnits[unitIndex].Defines = append([]string(nil), values[index].CompileUnits[unitIndex].Defines...)
+		}
+	}
+	return result
 }
 
 type FileAPIReply struct {
@@ -211,6 +256,24 @@ type fileAPITargetObject struct {
 	Artifacts        []struct {
 		Path string `json:"path"`
 	} `json:"artifacts"`
+	Sources []struct {
+		Path              string `json:"path"`
+		CompileGroupIndex *int   `json:"compileGroupIndex"`
+		IsGenerated       bool   `json:"isGenerated"`
+	} `json:"sources"`
+	CompileGroups []struct {
+		SourceIndexes    []int  `json:"sourceIndexes"`
+		Language         string `json:"language"`
+		LanguageStandard *struct {
+			Standard string `json:"standard"`
+		} `json:"languageStandard"`
+		Includes []struct {
+			Path string `json:"path"`
+		} `json:"includes"`
+		Defines []struct {
+			Define string `json:"define"`
+		} `json:"defines"`
+	} `json:"compileGroups"`
 }
 
 type fileAPICMakeFiles struct {
@@ -737,13 +800,17 @@ func (reader *fileAPIReader) assemble(
 			if err != nil {
 				return FileAPIReply{}, fmt.Errorf("%w: construct target identity: %v", ErrFileAPIReply, err)
 			}
+			sources, compileUnits, err := reader.compileUnits(object, sourcePath, buildPath)
+			if err != nil {
+				return FileAPIReply{}, fmt.Errorf("%w: target %q compile units: %v", ErrFileAPIReply, object.Name, err)
+			}
 			target := Target{
 				ID: identity, Name: object.Name, Type: object.Type,
 				ProjectID: profiles[0].ProjectID, ProfileID: profiles[0].ID,
 				Configuration: configuration.Name,
 				SourceDir:     targetSource, BuildDir: targetBuild,
 				ProjectSourceDir: sourcePath, ProjectBuildDir: buildPath,
-				Artifacts: artifacts,
+				Artifacts: artifacts, Sources: sources, CompileUnits: compileUnits,
 			}
 			if previous, duplicate := targetsByID[target.ID]; duplicate && !equalTargets(previous, target) {
 				return FileAPIReply{}, fmt.Errorf("%w: conflicting duplicate target identity %q", ErrFileAPIReply, target.ID)
@@ -868,6 +935,136 @@ func (reader *fileAPIReader) assemble(
 	}
 	result.ToolchainIDs = sortedUniqueStrings(result.ToolchainIDs)
 	return result, nil
+}
+
+func (reader *fileAPIReader) compileUnits(object fileAPITargetObject, sourceRoot, buildRoot string) ([]TargetSource, []CompileUnit, error) {
+	if len(object.Sources) > maxFileAPITargetSources {
+		return nil, nil, fmt.Errorf("%w: sources exceed %d", ErrFileAPILimit, maxFileAPITargetSources)
+	}
+	if len(object.CompileGroups) > maxFileAPICompileGroups {
+		return nil, nil, fmt.Errorf("%w: compile groups exceed %d", ErrFileAPILimit, maxFileAPICompileGroups)
+	}
+	type groupMetadata struct {
+		language string
+		standard string
+		includes []string
+		defines  []string
+	}
+	groups := make([]groupMetadata, len(object.CompileGroups))
+	for index, group := range object.CompileGroups {
+		if !validCompileAtom(group.Language, 32) || len(group.SourceIndexes) > maxFileAPITargetSources ||
+			len(group.Includes) > maxFileAPICompileEntries || len(group.Defines) > maxFileAPICompileEntries {
+			return nil, nil, errors.New("invalid compile group shape")
+		}
+		standard := ""
+		if group.LanguageStandard != nil {
+			standard = group.LanguageStandard.Standard
+			if !validCompileAtom(standard, 32) {
+				return nil, nil, errors.New("invalid language standard")
+			}
+		}
+		includes := make([]string, 0, len(group.Includes))
+		for _, include := range group.Includes {
+			if !validCompileValue(include.Path) || strings.Contains(include.Path, `\`) {
+				return nil, nil, errors.New("invalid include path")
+			}
+			resolved, err := resolveFileAPIPath(include.Path, sourceRoot, reader.allowedRoots)
+			if err == nil {
+				includes = append(includes, resolved)
+			}
+		}
+		defines := make([]string, 0, len(group.Defines))
+		for _, define := range group.Defines {
+			if !validCompileValue(define.Define) {
+				return nil, nil, errors.New("invalid compile definition")
+			}
+			defines = append(defines, define.Define)
+		}
+		groups[index] = groupMetadata{
+			language: group.Language, standard: standard,
+			includes: sortedUniqueStrings(includes), defines: sortedUniqueStrings(defines),
+		}
+	}
+
+	boundSources := make([][]int, len(groups))
+	sources := make([]TargetSource, 0, len(object.Sources))
+	units := make([]CompileUnit, 0, len(object.Sources))
+	seenSources := make(map[string]struct{}, len(object.Sources))
+	for sourceIndex, source := range object.Sources {
+		root := sourceRoot
+		if source.IsGenerated {
+			root = buildRoot
+		}
+		resolved, err := resolveFileAPIPath(source.Path, root, reader.allowedRoots)
+		if err != nil {
+			return nil, nil, err
+		}
+		key := canonicalPortablePath(resolved)
+		if _, duplicate := seenSources[key]; duplicate {
+			return nil, nil, errors.New("duplicate target source")
+		}
+		seenSources[key] = struct{}{}
+		compiled := source.CompileGroupIndex != nil
+		sources = append(sources, TargetSource{Path: resolved, Generated: source.IsGenerated, Compiled: compiled})
+		if !compiled {
+			continue
+		}
+		groupIndex := *source.CompileGroupIndex
+		if groupIndex < 0 || groupIndex >= len(groups) {
+			return nil, nil, errors.New("source compile group index is out of range")
+		}
+		boundSources[groupIndex] = append(boundSources[groupIndex], sourceIndex)
+		group := groups[groupIndex]
+		units = append(units, CompileUnit{
+			Source: resolved, Language: group.language, Standard: group.standard,
+			Generated: source.IsGenerated,
+			Includes:  append([]string(nil), group.includes...),
+			Defines:   append([]string(nil), group.defines...),
+		})
+	}
+	for groupIndex, group := range object.CompileGroups {
+		declared := append([]int(nil), group.SourceIndexes...)
+		sort.Ints(declared)
+		for index, sourceIndex := range declared {
+			if sourceIndex < 0 || sourceIndex >= len(object.Sources) || index > 0 && sourceIndex == declared[index-1] {
+				return nil, nil, errors.New("invalid compile group source indexes")
+			}
+		}
+		bound := boundSources[groupIndex]
+		sort.Ints(bound)
+		if len(declared) != len(bound) {
+			return nil, nil, errors.New("compile group source indexes disagree")
+		}
+		for index := range declared {
+			if declared[index] != bound[index] {
+				return nil, nil, errors.New("compile group source indexes disagree")
+			}
+		}
+	}
+	sort.Slice(units, func(left, right int) bool {
+		if units[left].Source != units[right].Source {
+			return units[left].Source < units[right].Source
+		}
+		return units[left].Language < units[right].Language
+	})
+	sort.Slice(sources, func(left, right int) bool { return sources[left].Path < sources[right].Path })
+	return sources, units, nil
+}
+
+func validCompileAtom(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character < 0x21 || character > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validCompileValue(value string) bool {
+	return value != "" && len(value) <= maxFileAPICompileValue && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 // canonicalFileAPIToolPath validates and normalizes a compiler descriptor

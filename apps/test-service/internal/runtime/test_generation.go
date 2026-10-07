@@ -46,6 +46,13 @@ type ManagedValidationDriver interface {
 	ValidateManagedSelection(context.Context, testgenpublish.ManagedSelection) ([]byte, error)
 }
 
+// managedReviewFinalizer is an internal post-checkpoint hook. A durable review
+// must bind the final awaiting-confirmation revision, so it cannot be safely
+// committed by an earlier generation stage.
+type managedReviewFinalizer interface {
+	FinalizeManagedReview(context.Context, testgendomain.Run) error
+}
+
 type managedValidationProvider interface {
 	ManagedValidationDriver
 	ManagedValidationReady() bool
@@ -108,6 +115,7 @@ type generationService struct {
 	running            map[string]*generationExecution
 	cancelPending      map[string]bool
 	wg                 sync.WaitGroup
+	closeOnce          sync.Once
 }
 
 type generationExecution struct {
@@ -145,9 +153,9 @@ func (s *generationService) ManagedReadsReady() bool {
 		s.managedValidator != nil && s.managedValidator.ManagedValidationReady()
 }
 
-// ResolveManagedStart performs no generation work. Only a report-bound gap has
-// enough information in v1.6 to select one exact coverage snapshot; unbound
-// file/symbol/target/workspace requests remain unavailable.
+// ResolveManagedStart performs no generation work. Report-bound function,
+// file, and gap IDs are resolved only against the exact current coverage
+// snapshot; unbound target/workspace requests remain unavailable.
 func (s *generationService) ResolveManagedStart(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error) {
 	if !s.ManagedReadsReady() {
 		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
@@ -158,14 +166,35 @@ func (s *generationService) ResolveManagedStart(ctx context.Context, owner strin
 	if err := ctx.Err(); err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
-	if input.Scope != generationv16.TestGenerationScopeV16CoverageGap || input.CoverageReportID == nil || input.CoverageGapID == nil {
+	if input.CoverageReportID == nil {
+		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+	}
+	var scope testgendomain.Scope
+	var id string
+	switch input.Scope {
+	case generationv16.Symbol:
+		if input.FunctionID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeSymbol, *input.FunctionID
+	case generationv16.File:
+		if input.FileID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeFile, *input.FileID
+	case generationv16.TestGenerationScopeV16CoverageGap:
+		if input.CoverageGapID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeCoverageGap, *input.CoverageGapID
+	default:
 		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
 	}
 	index, err := s.currentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: input.ProjectID, ReportID: *input.CoverageReportID, WorkspaceGeneration: input.WorkspaceGeneration})
 	if err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
-	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: *input.CoverageGapID}, index)
+	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: scope, ID: id}, index)
 	if err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
@@ -360,7 +389,7 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 }
 
 func (s *generationService) reconcileManagedBeforeCancel(ctx context.Context, owner string, run testgendomain.Run) (testgendomain.Run, error) {
-	if run.Request.ManagedGapID == "" || testgendomain.IsTerminal(run.State) {
+	if run.Request.ManagedSelectionID() == "" || testgendomain.IsTerminal(run.State) {
 		return run, nil
 	}
 	// A managed receipt can outlive the run's accepted checkpoint. Without a
@@ -832,6 +861,14 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			// attempt; a failed CAS never carries in-memory usage forward.
 			return
 		}
+		if committed.State == testgendomain.StateAwaitingConfirmation && committed.Request.ManagedSelectionID() != "" {
+			if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+				if err := finalizer.FinalizeManagedReview(ctx, committed); err != nil {
+					s.fail(committed)
+					return
+				}
+			}
+		}
 		s.publishNewEvents(ctx, run, committed)
 		if committed.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(committed.State) {
 			return
@@ -903,6 +940,13 @@ func (s *generationService) ResumeAll(ctx context.Context) error {
 				continue
 			}
 			if run.State == testgendomain.StateAwaitingConfirmation {
+				if run.Request.ManagedSelectionID() != "" {
+					if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+						if err := finalizer.FinalizeManagedReview(ctx, run); err != nil {
+							s.fail(run)
+						}
+					}
+				}
 				continue
 			}
 			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {
@@ -922,12 +966,17 @@ func (s *generationService) Close() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	for _, execution := range s.running {
-		execution.cancel()
-	}
-	s.mu.Unlock()
-	s.wg.Wait()
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		for _, execution := range s.running {
+			execution.cancel()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
+		if closer, ok := s.publisher.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	})
 }
 
 var _ session.GenerationBackend = (*generationService)(nil)

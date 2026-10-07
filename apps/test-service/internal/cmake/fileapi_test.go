@@ -245,6 +245,112 @@ func TestFileAPIReplyFollowsObjectGraphAndReturnsCanonicalTargets(t *testing.T) 
 	}
 }
 
+func TestFileAPIReplyBindsCanonicalCompileUnitsToTargets(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	for path, content := range map[string]string{
+		filepath.Join(fixture.sourceDir, "src", "choose.c"):     "int choose(int value) { return value; }\n",
+		filepath.Join(fixture.sourceDir, "include", "choose.h"): "int choose(int value);\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+		value["sources"] = []any{
+			map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(0)},
+			map[string]any{"path": "include/choose.h"},
+		}
+		value["compileGroups"] = []any{map[string]any{
+			"language":      "C",
+			"sourceIndexes": []any{float64(0)},
+			"languageStandard": map[string]any{
+				"standard": "17",
+			},
+			"includes": []any{
+				map[string]any{"path": filepath.ToSlash(filepath.Join(fixture.sourceDir, "include"))},
+				map[string]any{"path": filepath.ToSlash(filepath.Join(fixture.sourceDir, "include"))},
+			},
+			"defines": []any{
+				map[string]any{"define": "FEATURE=1"},
+				map[string]any{"define": "FEATURE=1"},
+			},
+		}}
+	})
+
+	reply := readWithFixture(t, fixture)
+	support := reply.Targets[1]
+	want := []CompileUnit{{
+		Source:   filepath.Join(fixture.sourceDir, "src", "choose.c"),
+		Language: "C", Standard: "17",
+		Includes: []string{filepath.Join(fixture.sourceDir, "include")},
+		Defines:  []string{"FEATURE=1"},
+	}}
+	if !reflect.DeepEqual(support.CompileUnits, want) {
+		t.Fatalf("support compile units = %#v, want %#v", support.CompileUnits, want)
+	}
+	wantSources := []TargetSource{
+		{Path: filepath.Join(fixture.sourceDir, "include", "choose.h")},
+		{Path: filepath.Join(fixture.sourceDir, "src", "choose.c"), Compiled: true},
+	}
+	if !reflect.DeepEqual(support.Sources, wantSources) {
+		t.Fatalf("support sources = %#v, want %#v", support.Sources, wantSources)
+	}
+	if len(reply.Targets[0].CompileUnits) != 0 {
+		t.Fatalf("app compile units = %#v, want none", reply.Targets[0].CompileUnits)
+	}
+}
+
+func TestFileAPIReplyRejectsInvalidCompileUnitBinding(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, fileAPIReplyFixture)
+	}{
+		{
+			name: "compile group index out of range",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				writeCompileUnitSource(t, fixture, "src/choose.c")
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(1)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C"}}
+				})
+			},
+		},
+		{
+			name: "source escapes allowed roots",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				outside := filepath.Join(t.TempDir(), "outside.c")
+				if err := os.WriteFile(outside, []byte("int outside(void);\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": filepath.ToSlash(outside), "compileGroupIndex": float64(0)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C"}}
+				})
+			},
+		},
+		{
+			name: "compile group source indexes disagree",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				writeCompileUnitSource(t, fixture, "src/choose.c")
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(0)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C", "sourceIndexes": []any{}}}
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newFileAPIReplyFixture(t)
+			test.mutate(t, fixture)
+			expectFileAPIReadError(t, fixture)
+		})
+	}
+}
+
 func TestFileAPITargetIDIncludesProjectProfileConfigurationAndNativeIdentity(t *testing.T) {
 	fixture := newFileAPIReplyFixture(t)
 	read := func(profile BuildProfile) FileAPIReply {
@@ -1236,6 +1342,17 @@ func newFileAPIReplyFixture(t *testing.T) fileAPIReplyFixture {
 		}
 	}
 	return fixture
+}
+
+func writeCompileUnitSource(t *testing.T, fixture fileAPIReplyFixture, relative string) {
+	t.Helper()
+	path := filepath.Join(fixture.sourceDir, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("int choose(int value) { return value; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readWithFixture(t *testing.T, fixture fileAPIReplyFixture) FileAPIReply {

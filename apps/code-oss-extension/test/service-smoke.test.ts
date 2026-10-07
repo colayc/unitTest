@@ -49,6 +49,23 @@ const cmakeFixture = join(
   "build",
   process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture"
 );
+const productBundleRoot = join(
+  repositoryRoot,
+  ".superpowers",
+  "runtime",
+  "product-bundles",
+  process.platform === "win32" ? "windows-x64" : "linux-x64",
+  "bundles"
+);
+
+function stagedBundleArguments(): string[] {
+  return [
+    "--cmake-bundle-root", join(productBundleRoot, "cmake"),
+    "--coverage-bundle-root", join(productBundleRoot, "coverage"),
+    "--testgen-bundle-root", join(productBundleRoot, "testgen"),
+    "--dev-cmake-executable", cmakeFixture
+  ];
+}
 
 interface Fixture {
   readonly root: string;
@@ -69,6 +86,15 @@ interface Observations {
   readonly spawnArguments: string[][];
   readonly connectedEndpoints: string[];
   readonly children: ObservedChild[];
+  discoveryTaskId?: string;
+  discoveryTask?: {
+    status?: string;
+    outcome?: string;
+    errorCode?: string;
+    errorMessage?: string;
+  };
+  discoveryResponseKeys?: string;
+  discoveryError?: string;
 }
 
 function createObservations(): Observations {
@@ -203,7 +229,10 @@ function nestedItems(collection: SmokeCollection): TestingTestItem[] {
 
 async function eventually(assertion: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 600; attempt++) {
+  // The first real catalog request performs a cold CMake configure/build on
+  // hosted Linux runners. Keep the bound finite, but allow that one-time
+  // native startup to finish before reporting a false discovery failure.
+  for (let attempt = 0; attempt < 2400; attempt++) {
     try {
       assertion();
       return;
@@ -238,6 +267,9 @@ function createRealOperations(
   expected: Pick<ServiceManagerOptions, "serviceExecutable" | "workspaceRoot" | "dataDirectory">
 ): ServiceOperations {
   return {
+    async validateProductLayout() {
+      throw new Error("legacy service smoke does not use a packaged product layout");
+    },
     async prepareTokenFile(binary, tokenFile, token) {
       observations.order.push("prepare");
       observations.tokens.push(token);
@@ -261,7 +293,10 @@ function createRealOperations(
         "--workspace-root", expected.workspaceRoot,
         "--trusted-workspace=true"
       ]);
-      const child = spawn(binary, args, { windowsHide: true, stdio: "pipe" });
+      const child = spawn(binary, [...args, ...stagedBundleArguments()], {
+        windowsHide: true,
+        stdio: "pipe"
+      });
       const observed = { process: child, exited: false };
       observations.children.push(observed);
       child.once("exit", () => { observed.exited = true; });
@@ -275,6 +310,7 @@ function createRealOperations(
         ["inspectWorkspace", "workspace/inspect"],
         ["discoverTests", "discoverTests"],
         ["getTestCatalog", "catalog"],
+        ["getTask", "task"],
         ["runTests", "runTests"]
       ]);
       return new Proxy(client, {
@@ -284,7 +320,35 @@ function createRealOperations(
           return (...args: unknown[]) => {
             const label = tracked.get(property);
             if (label) observations.testingCalls.push(label);
-            return Reflect.apply(value, target, args);
+            const result = Reflect.apply(value, target, args) as unknown;
+            if (label === "discoverTests" && result && typeof (result as Promise<unknown>).then === "function") {
+              return (result as Promise<Record<string, unknown>>).then((snapshot) => {
+                observations.discoveryResponseKeys = Object.keys(snapshot).sort().join(",");
+                if (typeof snapshot.taskId === "string") observations.discoveryTaskId = snapshot.taskId;
+                observations.discoveryTask = {
+                  status: typeof snapshot.status === "string" ? snapshot.status : undefined,
+                  outcome: typeof snapshot.outcome === "string" ? snapshot.outcome : undefined,
+                  errorCode: typeof snapshot.errorCode === "string" ? snapshot.errorCode : undefined,
+                  errorMessage: typeof snapshot.errorMessage === "string" ? snapshot.errorMessage : undefined
+                };
+                return snapshot;
+              }, (error: unknown) => {
+                observations.discoveryError = error instanceof Error ? error.message : String(error);
+                throw error;
+              });
+            }
+            if (label === "task" && result && typeof (result as Promise<unknown>).then === "function") {
+              return (result as Promise<Record<string, unknown>>).then((snapshot) => {
+                observations.discoveryTask = {
+                  status: typeof snapshot.status === "string" ? snapshot.status : undefined,
+                  outcome: typeof snapshot.outcome === "string" ? snapshot.outcome : undefined,
+                  errorCode: typeof snapshot.errorCode === "string" ? snapshot.errorCode : undefined,
+                  errorMessage: typeof snapshot.errorMessage === "string" ? snapshot.errorMessage : undefined
+                };
+                return snapshot;
+              });
+            }
+            return result;
           };
         }
       });
@@ -430,6 +494,10 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
     managerFactory: (options): LifecycleManager => {
       manager = new ServiceManager({
         ...options,
+        // This adapter test launches the real built service through the
+        // fixture operations below; its source-tree development layout does
+        // not contain the packaged bin/unit-test-service path.
+        productLayout: undefined,
         operations: createRealOperations(observations, options)
       });
       return manager;
@@ -448,24 +516,41 @@ test("trusted extension adapter completes inspect, discovery, catalog, run, and 
     await controller.activate();
     assert.ok(manager?.session);
     collectSessionSecrets(manager.session, observations, sensitive);
+    if (observations.discoveryTaskId) {
+      await manager.session.client.getTask(observations.discoveryTaskId);
+    }
 
     const profile = testing.profiles[0];
     assert.ok(profile, "the activated adapter must register a run profile");
-    const items = nestedItems(testing.items);
-    const passingItem = items.find((item) => item.label === "passes");
-    const failingItem = items.find((item) => item.label === "fails");
-    assert.ok(passingItem, "real discovery must publish the passing case");
-    assert.ok(failingItem, "real discovery must publish the failing case");
+    let passingItem: TestingTestItem | undefined;
+    let failingItem: TestingTestItem | undefined;
+    await eventually(() => {
+      const items = nestedItems(testing.items);
+      passingItem = items.find((item) => item.label === "passes");
+      failingItem = items.find((item) => item.label === "fails");
+      assert.ok(
+        passingItem,
+        `real discovery must publish the passing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; response:${observations.discoveryResponseKeys ?? ""}; error:${observations.discoveryError ?? ""}; task:${JSON.stringify(observations.discoveryTask)})`
+      );
+      assert.ok(
+        failingItem,
+        `real discovery must publish the failing case (labels:${items.map((item) => item.label).join(",")}; calls:${observations.testingCalls.join(",")}; response:${observations.discoveryResponseKeys ?? ""}; error:${observations.discoveryError ?? ""}; task:${JSON.stringify(observations.discoveryTask)})`
+      );
+    });
+    const discoveredPassingItem = passingItem;
+    const discoveredFailingItem = failingItem;
+    assert.ok(discoveredPassingItem);
+    assert.ok(discoveredFailingItem);
 
     await profile.handler({});
     await eventually(() => {
       const run = testing.runs[0];
       assert.ok(run);
       assert.equal(run.ends, 1);
-      assert.equal(run.passed.includes(passingItem.id), true);
-      assert.equal(run.failed.includes(failingItem.id), true);
-      assert.equal(run.errored.includes(passingItem.id), false);
-      assert.equal(run.errored.includes(failingItem.id), false);
+      assert.equal(run.passed.includes(discoveredPassingItem.id), true);
+      assert.equal(run.failed.includes(discoveredFailingItem.id), true);
+      assert.equal(run.errored.includes(discoveredPassingItem.id), false);
+      assert.equal(run.errored.includes(discoveredFailingItem.id), false);
       const inspectIndex = observations.testingCalls.indexOf("workspace/inspect");
       const discoveryIndex = observations.testingCalls.indexOf("discoverTests");
       const catalogIndex = observations.testingCalls.indexOf("catalog");
@@ -547,6 +632,7 @@ test("host deactivation after trust loss stops the real child and makes its old 
     managerFactory: (options): LifecycleManager => {
       manager = new ServiceManager({
         ...options,
+        productLayout: undefined,
         operations: createRealOperations(observations, options)
       });
       return manager;

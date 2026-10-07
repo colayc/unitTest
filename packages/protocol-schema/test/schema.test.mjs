@@ -54,11 +54,17 @@ test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", a
   ];
   for (const [key, scope, value] of selectors) {
     const payload = { ...start.payload, scope, [key]: value };
-    if (scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
+    if (scope === "symbol" || scope === "file" || scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
     delete payload.symbolId;
     assert.equal(message({ ...start, payload }), true, `${key}: ${JSON.stringify(message.errors)}`);
     assert.equal(message({ ...start, payload: { ...payload, file: "src/source.cpp" } }), false, `${key} with legacy file`);
     assert.equal(message({ ...start, payload: { ...payload, symbolId: "target:symbol" } }), false, `${key} with legacy symbol`);
+  }
+  for (const [key, scope, value] of selectors.filter(([, scope]) => scope === "symbol" || scope === "file")) {
+    const payload = { ...start.payload, scope, [key]: value };
+    delete payload.symbolId;
+    delete payload.coverageReportId;
+    assert.equal(message({ ...start, payload }), false, `${key} without report binding`);
   }
   assert.equal(message({ ...start, payload: { ...start.payload, scope: "symbol" } }), false, "legacy symbol selector");
   assert.equal(message({ ...start, payload: { ...start.payload, scope: "file", file: "../escape.cpp" } }), false, "path traversal");

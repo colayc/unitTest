@@ -14,7 +14,10 @@ import (
 var ErrInvalidRequest = errors.New("invalid test generation validation request")
 
 type ValidationRequest struct {
-	TaskID           string
+	TaskID string
+	// ProcessTaskID is the durable task row used only for native process lease
+	// ownership. TaskID remains the redacted validation receipt identity.
+	ProcessTaskID    string
 	CandidateID      string
 	Edits            testgenrender.StagedEditSet
 	BaselineCoverage []byte
@@ -33,6 +36,10 @@ type StageEvidence struct {
 	Output            []byte
 	DiscoveredCaseIDs []string
 	CoverageJSON      []byte
+	// CoverageDetailJSON is bounded, service-normalized function evidence for
+	// managed selected-output validation. It is never accepted from IPC or a
+	// child process directly.
+	CoverageDetailJSON []byte
 }
 
 // EvidenceVerifier checks product-owned oracle proof or repeated-output
@@ -72,6 +79,15 @@ type Config struct {
 
 type Validator struct{ Config Config }
 
+// Ready reports whether the validator has every authority required before it
+// may execute a generated candidate. Coverage identity resolution is optional
+// only because line-only validation does not require native function/branch
+// identities; Validate enforces it whenever those metrics are selected.
+func (v Validator) Ready() bool {
+	return v.Config.SourceRoot != "" && v.Config.TempRoot != "" && v.Config.Planner != nil &&
+		v.Config.VerifyEvidence != nil && v.Config.ResolveCandidate != nil
+}
+
 func validDigest(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -85,7 +101,7 @@ func validDigest(s string) bool {
 }
 
 func validRequest(r ValidationRequest) bool {
-	if !validDigest(r.TaskID) || !validDigest(r.CandidateID) || len(r.Edits.Files) > 128 || !r.Metrics.Functions && !r.Metrics.Lines && !r.Metrics.Branches || len(r.BaselineCoverage) == 0 || len(r.BaselineCoverage) > 32<<20 {
+	if !validDigest(r.TaskID) || r.ProcessTaskID != "" && !validObjectID(r.ProcessTaskID) || !validDigest(r.CandidateID) || len(r.Edits.Files) > 128 || !r.Metrics.Functions && !r.Metrics.Lines && !r.Metrics.Branches || len(r.BaselineCoverage) == 0 || len(r.BaselineCoverage) > 32<<20 {
 		return false
 	}
 	switch r.Assertion.Kind {
@@ -99,7 +115,7 @@ func validRequest(r ValidationRequest) bool {
 }
 
 func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result ValidationResult, err error) {
-	if ctx == nil || !validRequest(r) || v.Config.Planner == nil || v.Config.VerifyEvidence == nil || v.Config.ResolveCandidate == nil {
+	if ctx == nil || !validRequest(r) || !v.Ready() {
 		return result, ErrInvalidRequest
 	}
 	resolved, resolveErr := v.Config.ResolveCandidate(ctx, r.CandidateID)
@@ -138,10 +154,25 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 		return ValidationResult{Diagnostic: DiagnosticIsolation}, nil
 	}
 	roots.SnapshotDigest = digestBytes([]byte(fingerprint + stagedDigest))
+	roots.TaskID = r.TaskID
+	roots.ProcessTaskID = r.ProcessTaskID
+	roots.CandidateID = r.CandidateID
 	if !v.Config.VerifyEvidence(ctx, r.CandidateID, r.Assertion) {
 		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
 	return v.runStages(ctx, r, roots, original, staged, resolved)
+}
+
+func validObjectID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validTargetLines(lines []int64) bool {
