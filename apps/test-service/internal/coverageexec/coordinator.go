@@ -798,18 +798,25 @@ func (execution *execution) AfterStep(
 	}
 	switch step.Kind {
 	case task.StepCoverageConfigure:
-		if err := execution.applyPhase(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true}); err != nil {
-			return task.Continuation{}, err
-		}
 		execution.mu.Lock()
+		_, transitionErr := execution.state.Apply(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true})
 		prepared := execution.prepared
 		execution.mu.Unlock()
+		if transitionErr != nil {
+			return task.Continuation{}, transitionErr
+		}
 		if recorder, ok := prepared.(interface {
 			PersistConfiguration(context.Context) error
 		}); ok {
 			if err := recorder.PersistConfiguration(ctx); err != nil {
 				return task.Continuation{}, err
 			}
+		}
+		// The compiler/configuration checkpoint is part of configure. Do not
+		// project its failure onto build: build_failed maps to command_failed,
+		// not the infrastructure failure returned by a rejected checkpoint.
+		if err := execution.applyPhase(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true}); err != nil {
+			return task.Continuation{}, err
 		}
 		return task.Continuation{}, nil
 	case task.StepCoverageBuild:

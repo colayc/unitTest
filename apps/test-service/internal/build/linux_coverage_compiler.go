@@ -43,15 +43,22 @@ func verifyLinuxCoverageCompilerCache(cachePath string, instance toolchain.Insta
 	for scanner.Scan() {
 		line := scanner.Text()
 		for _, role := range []string{"CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"} {
-			prefix := role + ":FILEPATH="
-			if strings.HasPrefix(line, prefix) {
-				if _, exists := values[role]; exists {
-					return task.ErrInvalidArgument
-				}
-				values[role] = strings.TrimPrefix(line, prefix)
-			} else if strings.HasPrefix(line, role+":") {
+			entry, compilerRole := strings.CutPrefix(line, role+":")
+			if !compilerRole {
+				continue
+			}
+			cacheType, value, found := strings.Cut(entry, "=")
+			// CMake records compiler paths supplied by presets or untyped -D
+			// arguments as STRING; auto-discovered/typed paths use FILEPATH.
+			// The representation does not weaken the absolute-path and file-
+			// identity checks below, and duplicate role entries remain invalid.
+			if !found || (cacheType != "FILEPATH" && cacheType != "STRING") {
 				return task.ErrInvalidArgument
 			}
+			if _, exists := values[role]; exists {
+				return task.ErrInvalidArgument
+			}
+			values[role] = value
 		}
 	}
 	if scanner.Err() != nil {

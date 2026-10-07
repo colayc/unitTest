@@ -62,6 +62,64 @@ func TestLinuxCoverageCompilerCacheRejectsAlternateSameBasenamePair(t *testing.T
 	}
 }
 
+func TestLinuxCoverageCompilerCacheAcceptsCMakeCompilerPathTypes(t *testing.T) {
+	root := t.TempDir()
+	instance := toolchain.Instance{Family: toolchain.FamilyClang,
+		CCompiler: filepath.Join(root, "clang"), CXXCompiler: filepath.Join(root, "clang++")}
+	for _, compiler := range []string{instance.CCompiler, instance.CXXCompiler} {
+		if err := os.WriteFile(compiler, []byte(compiler), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := filepath.Join(root, "CMakeCache.txt")
+	for _, cType := range []string{"FILEPATH", "STRING"} {
+		for _, cxxType := range []string{"FILEPATH", "STRING"} {
+			t.Run(cType+"-"+cxxType, func(t *testing.T) {
+				contents := "CMAKE_C_COMPILER:" + cType + "=" + filepath.ToSlash(instance.CCompiler) +
+					"\nCMAKE_CXX_COMPILER:" + cxxType + "=" + filepath.ToSlash(instance.CXXCompiler) + "\n"
+				if err := os.WriteFile(cache, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := verifyLinuxCoverageCompilerCache(cache, instance); err != nil {
+					t.Fatalf("CMake compiler path types rejected: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestLinuxCoverageCompilerCacheStringPathsRemainFailClosed(t *testing.T) {
+	root := t.TempDir()
+	instance := toolchain.Instance{Family: toolchain.FamilyClang,
+		CCompiler: filepath.Join(root, "clang"), CXXCompiler: filepath.Join(root, "clang++")}
+	for _, compiler := range []string{instance.CCompiler, instance.CXXCompiler} {
+		if err := os.WriteFile(compiler, []byte(compiler), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := filepath.Join(root, "CMakeCache.txt")
+	c := "CMAKE_C_COMPILER:STRING=" + filepath.ToSlash(instance.CCompiler) + "\n"
+	cxx := "CMAKE_CXX_COMPILER:STRING=" + filepath.ToSlash(instance.CXXCompiler) + "\n"
+	for name, contents := range map[string]string{
+		"missing C++":          c,
+		"relative C++":         c + "CMAKE_CXX_COMPILER:STRING=clang++\n",
+		"alternate C++":        c + "CMAKE_CXX_COMPILER:STRING=" + filepath.ToSlash(filepath.Join(t.TempDir(), "clang++")) + "\n",
+		"role replacement":     c + "CMAKE_CXX_COMPILER:STRING=" + filepath.ToSlash(instance.CCompiler) + "\n",
+		"duplicate same type":  c + c + cxx,
+		"duplicate mixed type": c + strings.Replace(c, ":STRING=", ":FILEPATH=", 1) + cxx,
+		"unsupported type":     strings.Replace(c, ":STRING=", ":INTERNAL=", 1) + cxx,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(cache, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyLinuxCoverageCompilerCache(cache, instance); err == nil {
+				t.Fatal("invalid compiler cache accepted")
+			}
+		})
+	}
+}
+
 func TestLinuxCoveragePreparedPlanChecksEffectiveCompilersBeforeBuild(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux compiler checkpoint")
