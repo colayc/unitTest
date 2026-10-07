@@ -634,6 +634,19 @@ func coverageToolsetIdentity(instance toolchain.Instance, coverageRequested bool
 			return "", task.ErrInvalidArgument
 		}
 		return instance.Coverage.ToolsetIdentity, nil
+	case toolchain.FamilyClang:
+		coverage := instance.Coverage
+		tools := []toolchain.LLVMToolEvidence{
+			{Role: "clang", Path: instance.CCompiler, Evidence: coverage.CompilerEvidence},
+			{Role: "clang++", Path: instance.CXXCompiler, Evidence: coverage.CXXCompilerEvidence},
+			{Role: "llvm-profdata", Path: coverage.LLVMProfdata, Evidence: coverage.ProfdataEvidence},
+			{Role: "llvm-cov", Path: coverage.LLVMCov, Evidence: coverage.CovEvidence},
+		}
+		identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+		if err != nil || identity != coverage.ToolsetIdentity {
+			return "", task.ErrInvalidArgument
+		}
+		return identity, nil
 	case toolchain.FamilyGCC:
 		coverage := instance.Coverage
 		if instance.Version == "" || coverage.GCov == "" ||
