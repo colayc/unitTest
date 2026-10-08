@@ -227,6 +227,13 @@ func TestPlannerAcceptsTrackedWindowsCoverageFixtureUnderWFP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	for _, relative := range []string{"src/math.cpp", "test/math_test.cpp"} {
+		content, err := os.ReadFile(filepath.Join(filepath.Dir(trackedFixture), filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeDeclarativeFixture(t, fixture, map[string]string{relative: string(content)})
+	}
 
 	if _, err := Plan(PlanInput{
 		Installation: fixture.installation, WorkspaceRoot: fixture.root,
@@ -1148,6 +1155,45 @@ func TestPlannerRejectsUnregisteredProjectLanguages(t *testing.T) {
 	}
 }
 
+func TestPlannerWindowsDeclarativeTargets(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows production launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.sourceDir, "include"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for relative, content := range map[string]string{
+		"main.cpp":        "int main() { return 0; }\n",
+		"extra.cpp":       "int extra() { return 1; }\n",
+		"include/value.h": "#define VALUE 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, relative), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contents := `cmake_minimum_required(VERSION 3.28)
+project(closed LANGUAGES CXX)
+add_library(core STATIC main.cpp)
+target_include_directories(core PUBLIC include)
+target_compile_definitions(core PUBLIC FEATURE_ON=1)
+target_sources(core PRIVATE extra.cpp)
+add_executable(closed-tests main.cpp)
+target_link_libraries(closed-tests PRIVATE core)
+add_test(NAME closed-tests COMMAND closed-tests)
+`
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain,
+		Jobs: 1, Configure: true})
+	if err != nil {
+		t.Fatalf("closed declarations rejected: %v", err)
+	}
+}
+
 func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
@@ -1908,6 +1954,14 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 	}
 	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte("project(fixture)"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	for relative, content := range map[string]string{
+		"main.cpp":   "int main() { return 0; }\n",
+		"helper.cpp": "int helper() { return 1; }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(sourceDir, relative), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cmakePath := filepath.Join(dataRoot, "cmake.exe")
 	ctestPath := filepath.Join(filepath.Dir(cmakePath), "ctest.exe")

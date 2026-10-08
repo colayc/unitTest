@@ -27,7 +27,9 @@ const (
 var errInvalidCMakeLaunchDeclaration = errors.New("invalid CMake launch declaration")
 
 type cmakeArgument struct {
-	value string
+	value   string
+	quoted  bool
+	escaped bool
 }
 
 type cmakeInvocation struct {
@@ -42,7 +44,7 @@ type cmakeLaunchValidator struct {
 	targets                map[string]string
 	targetPaths            map[string]struct{}
 	declaredTargets        map[string]struct{}
-	definedTargets         map[string]struct{}
+	definedTargets         map[string]string
 	declaredLinkArtifacts  map[string]struct{}
 	cmakePath              string
 	ctestPath              string
@@ -50,7 +52,9 @@ type cmakeLaunchValidator struct {
 	configuration          string
 	multiConfig            bool
 	allowedRoots           []string
-	visited                map[string]struct{}
+	visited                map[string]cmakeDirectoryContext
+	active                 map[string]bool
+	contents               map[string][]byte
 	states                 []cmake.FingerprintFile
 	planned                []string
 	trustedFiles           map[string]map[string]string
@@ -62,6 +66,8 @@ type cmakeLaunchValidator struct {
 	toolchainTarget        string
 	files                  int
 	totalBytes             int64
+	commands               int
+	arguments              int
 }
 
 // validateCMakeLaunchPlan proves every configure/build process entry in the
@@ -103,10 +109,12 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		targets:               make(map[string]string, len(input.Targets)),
 		targetPaths:           make(map[string]struct{}, len(input.Targets)),
 		declaredTargets:       make(map[string]struct{}, len(input.Targets)),
-		definedTargets:        make(map[string]struct{}, len(input.Targets)),
+		definedTargets:        make(map[string]string, len(input.Targets)),
 		declaredLinkArtifacts: make(map[string]struct{}, len(input.Targets)),
 		allowedRoots:          []string{sourceRoot},
-		visited:               make(map[string]struct{}),
+		visited:               make(map[string]cmakeDirectoryContext),
+		active:                make(map[string]bool),
+		contents:              make(map[string][]byte),
 		trustedFiles:          make(map[string]map[string]string),
 		snapshots:             make(map[string]cmake.FingerprintFile),
 		toolchainTarget:       input.Toolchain.TargetTriple,
@@ -194,15 +202,25 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 	return resultPlan, append([]cmake.FingerprintFile(nil), validator.states...), nil
 }
 
-func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) error {
+func (validator *cmakeLaunchValidator) validateFileContext(path string, context cmakeDirectoryContext) error {
 	canonical, err := canonicalCMakeLaunchPath(path)
 	if err != nil || !cmakeLaunchPathWithinRoots(canonical, validator.allowedRoots) {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	key := cmakeLaunchPathKey(canonical)
-	if _, seen := validator.visited[key]; seen {
+	context.ListDir = filepath.Dir(canonical)
+	if validator.active[key] {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	if previous, seen := validator.visited[key]; seen {
+		if previous != context {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		return nil
 	}
+	validator.visited[key] = context
+	validator.active[key] = true
+	defer delete(validator.active, key)
 	content, snapshotErr := validator.snapshotInput(canonical)
 	if snapshotErr != nil {
 		return snapshotErr
@@ -212,6 +230,11 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 		return errInvalidCMakeLaunchDeclaration
 	}
 	for _, invocation := range invocations {
+		validator.commands++
+		validator.arguments += len(invocation.arguments)
+		if validator.commands > maxCMakeLaunchCommands || validator.arguments > maxCMakeLaunchArguments {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		switch strings.ToLower(invocation.name) {
 		case "add_custom_command", "add_custom_target":
 			if err := validator.validateCommandGroups(invocation, key, "custom"); err != nil {
@@ -233,11 +256,11 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			// for an unrecognised cmake_language mode.
 			return errInvalidCMakeLaunchDeclaration
 		case "set":
-			if err := validator.validateSetLaunchProperty(invocation, key); err != nil {
+			if err := validator.validateSetLaunchProperty(invocation, key, context); err != nil {
 				return err
 			}
 		case "list":
-			if err := validator.validateListLaunchMutation(invocation, key); err != nil {
+			if err := validator.validateListLaunchMutation(invocation, key, context); err != nil {
 				return err
 			}
 		case "string", "cmake_path":
@@ -261,15 +284,33 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 				return err
 			}
 		case "add_executable":
-			if err := validator.declareExecutable(invocation, binaryDir); err != nil {
+			if err := validator.validateDeclarationSources(invocation, 1, context); err != nil {
+				return err
+			}
+			if err := validator.declareExecutable(invocation, context.BinaryDir); err != nil {
 				return err
 			}
 		case "add_library":
+			if err := validator.validateDeclarationSources(invocation, 2, context); err != nil {
+				return err
+			}
 			if err := validator.declareLibrary(invocation); err != nil {
 				return err
 			}
 		case "target_link_libraries":
 			if err := validator.validateTargetLinkLibraries(invocation); err != nil {
+				return err
+			}
+		case "target_include_directories":
+			if err := validator.validateTargetIncludes(invocation, context); err != nil {
+				return err
+			}
+		case "target_compile_definitions":
+			if err := validator.validateTargetDefinitions(invocation); err != nil {
+				return err
+			}
+		case "target_sources":
+			if err := validator.validateTargetSources(invocation, context); err != nil {
 				return err
 			}
 		case "file":
@@ -285,30 +326,12 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 		case "configure_file":
 			return errInvalidCMakeLaunchDeclaration
 		case "add_subdirectory":
-			if len(invocation.arguments) == 0 {
-				return errInvalidCMakeLaunchDeclaration
-			}
-			directory, err := resolveLiteralCMakeLaunchPath(filepath.Dir(canonical), invocation.arguments[0].value)
-			childBinary := filepath.Join(binaryDir, filepath.FromSlash(invocation.arguments[0].value))
-			if len(invocation.arguments) > 1 && !strings.EqualFold(invocation.arguments[1].value, "EXCLUDE_FROM_ALL") {
-				childBinary, err = resolveLiteralCMakeLaunchPath(binaryDir, invocation.arguments[1].value)
-			}
-			if err != nil || validator.validateFile(filepath.Join(directory, "CMakeLists.txt"), childBinary) != nil {
-				return errInvalidCMakeLaunchDeclaration
+			if err := validator.validateSubdirectory(invocation, context); err != nil {
+				return err
 			}
 		case "include":
-			if len(invocation.arguments) == 0 {
-				return errInvalidCMakeLaunchDeclaration
-			}
-			include, err := resolveLiteralCMakeLaunchPath(filepath.Dir(canonical), invocation.arguments[0].value)
-			if err != nil {
-				return errInvalidCMakeLaunchDeclaration
-			}
-			if filepath.Ext(include) == "" {
-				include += ".cmake"
-			}
-			if err := validator.validateFile(include, binaryDir); err != nil {
-				return errInvalidCMakeLaunchDeclaration
+			if err := validator.validateInclude(invocation, context); err != nil {
+				return err
 			}
 		case "add_compile_options", "add_link_options":
 			if err := validator.validateInstrumentationOptions(invocation, key); err != nil {
@@ -331,8 +354,11 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 
 func (validator *cmakeLaunchValidator) snapshotInput(canonical string) ([]byte, error) {
 	key := cmakeLaunchPathKey(canonical)
-	if _, seen := validator.visited[key]; seen {
-		return nil, nil
+	if state, seen := validator.snapshots[key]; seen {
+		if cmake.VerifyLaunchInput(state, maxCMakeLaunchFileBytes) != nil {
+			return nil, errInvalidCMakeLaunchDeclaration
+		}
+		return validator.contents[key], nil
 	}
 	if validator.files >= maxCMakeLaunchFiles {
 		return nil, errInvalidCMakeLaunchDeclaration
@@ -343,9 +369,9 @@ func (validator *cmakeLaunchValidator) snapshotInput(canonical string) ([]byte, 
 	}
 	validator.files++
 	validator.totalBytes += int64(len(content))
-	validator.visited[key] = struct{}{}
 	validator.states = append(validator.states, state)
 	validator.snapshots[key] = state
+	validator.contents[key] = content
 	return content, nil
 }
 
@@ -632,7 +658,9 @@ func (validator *cmakeLaunchValidator) validateScriptLoaderValue(sourceRoot, var
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(sourceRoot, path)
 		}
-		if err := validator.validateFile(path, validator.binaryRoot); err != nil {
+		context := cmakeDirectoryContext{SourceRoot: validator.allowedRoots[0], BinaryRoot: validator.binaryRoot,
+			SourceDir: validator.allowedRoots[0], BinaryDir: validator.binaryRoot, ListDir: filepath.Dir(path)}
+		if err := validator.validateFileContext(path, context); err != nil {
 			return err
 		}
 	}
@@ -743,12 +771,15 @@ func (validator *cmakeLaunchValidator) declareExecutable(invocation cmakeInvocat
 	}
 	executable := filepath.Join(outputDir, invocation.arguments[0].value+".exe")
 	name := strings.ToLower(invocation.arguments[0].value)
+	if _, duplicate := validator.definedTargets[name]; duplicate {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	if existing, duplicate := validator.targets[name]; duplicate && !strings.EqualFold(existing, executable) {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	validator.targets[name] = executable
 	validator.declaredTargets[name] = struct{}{}
-	validator.definedTargets[name] = struct{}{}
+	validator.definedTargets[name] = invocation.arguments[0].value
 	validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
 	validator.addAllowedExecutable(executable, true)
 	return nil
@@ -763,46 +794,28 @@ func (validator *cmakeLaunchValidator) declareLibrary(invocation cmakeInvocation
 	if _, duplicate := validator.definedTargets[name]; duplicate {
 		return errInvalidCMakeLaunchDeclaration
 	}
-	for _, source := range invocation.arguments[2:] {
-		if source.value == "" || strings.ContainsAny(source.value, "$;<>") {
-			return errInvalidCMakeLaunchDeclaration
-		}
-	}
 	validator.declaredTargets[name] = struct{}{}
-	validator.definedTargets[name] = struct{}{}
+	validator.definedTargets[name] = invocation.arguments[0].value
 	return nil
 }
 
 func (validator *cmakeLaunchValidator) validateTargetLinkLibraries(invocation cmakeInvocation) error {
-	if len(invocation.arguments) < 2 || !literalCMakeTargetName(invocation.arguments[0].value) {
-		return errInvalidCMakeLaunchDeclaration
+	scopes, err := validator.targetDeclarationScopes(invocation)
+	if err != nil {
+		return err
 	}
-	if _, declared := validator.declaredTargets[strings.ToLower(invocation.arguments[0].value)]; !declared {
-		return errInvalidCMakeLaunchDeclaration
-	}
-	items := 0
-	lastWasScope := false
-	for _, argument := range invocation.arguments[1:] {
-		switch strings.ToUpper(argument.value) {
-		case "PRIVATE", "PUBLIC", "INTERFACE":
-			lastWasScope = true
-			continue
-		}
-		lastWasScope = false
-		if _, declared := validator.declaredTargets[strings.ToLower(argument.value)]; declared {
-			items++
-			continue
-		}
-		if filepath.IsAbs(argument.value) {
-			if _, declared := validator.declaredLinkArtifacts[cmakeLaunchPathKey(argument.value)]; declared {
-				items++
+	for _, scope := range scopes {
+		for _, argument := range scope.Values {
+			if declared, defined := validator.definedTargets[strings.ToLower(argument.value)]; defined && declared == argument.value {
 				continue
 			}
+			if filepath.IsAbs(argument.value) {
+				if _, declared := validator.declaredLinkArtifacts[cmakeLaunchPathKey(argument.value)]; declared {
+					continue
+				}
+			}
+			return errInvalidCMakeLaunchDeclaration
 		}
-		return errInvalidCMakeLaunchDeclaration
-	}
-	if items == 0 || lastWasScope {
-		return errInvalidCMakeLaunchDeclaration
 	}
 	return nil
 }
@@ -933,9 +946,12 @@ func literalCMakeProjectVersion(value string) bool {
 	return true
 }
 
-func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmakeInvocation, sourceKey string) error {
+func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmakeInvocation, sourceKey string, context cmakeDirectoryContext) error {
 	if len(invocation.arguments) == 0 {
 		return nil
+	}
+	if isDeclarativeDirectoryVariable(invocation.arguments[0].value) {
+		return errInvalidCMakeLaunchDeclaration
 	}
 	if strings.ContainsAny(invocation.arguments[0].value, "$;<>") {
 		if _, trusted := validator.trustedFiles[sourceKey]; trusted {
@@ -963,7 +979,7 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 		if len(invocation.arguments) != 2 {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		return validator.validateScriptLoaderValue(filepath.Dir(sourceKey), invocation.arguments[0].value, invocation.arguments[1].value)
+		return validator.validateScriptLoaderContext(invocation.arguments[0].value, invocation.arguments[1].value, context)
 	}
 	if !isCompilerLauncherProperty(invocation.arguments[0].value) {
 		return nil
@@ -971,7 +987,7 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 	return validator.validateLaunchProperty(invocation.arguments[0].value, invocation.arguments[1:], sourceKey)
 }
 
-func (validator *cmakeLaunchValidator) validateListLaunchMutation(invocation cmakeInvocation, sourceKey string) error {
+func (validator *cmakeLaunchValidator) validateListLaunchMutation(invocation cmakeInvocation, sourceKey string, context cmakeDirectoryContext) error {
 	involvesControlled := false
 	for _, argument := range invocation.arguments {
 		if strings.ContainsAny(argument.value, "$<>") {
@@ -995,14 +1011,14 @@ func (validator *cmakeLaunchValidator) validateListLaunchMutation(invocation cma
 	operation := strings.ToUpper(invocation.arguments[0].value)
 	switch operation {
 	case "APPEND", "PREPEND":
-		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[2:])
+		return validator.validateListScriptContext(variable, invocation.arguments[2:], context)
 	case "INSERT":
 		if len(invocation.arguments) < 4 || !literalCMakeListIndex(invocation.arguments[2].value) {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[3:])
+		return validator.validateListScriptContext(variable, invocation.arguments[3:], context)
 	case "REMOVE_ITEM":
-		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[2:])
+		return validator.validateListScriptContext(variable, invocation.arguments[2:], context)
 	case "REMOVE_AT":
 		if len(invocation.arguments) < 3 {
 			return errInvalidCMakeLaunchDeclaration
@@ -1323,7 +1339,7 @@ func isCMakeScriptLoaderVariable(value string) bool {
 }
 
 func isControlledCMakeListVariable(value string) bool {
-	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
+	return isDeclarativeDirectoryVariable(value) || isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
 		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value) ||
 		isCMakeCompilerOrLinkerFlagsVariable(value) || isCMakeRuleTemplateVariable(value)
 }
@@ -1445,22 +1461,24 @@ func (parser *cmakeParser) readArguments() ([]cmakeArgument, error) {
 			depth--
 			continue
 		case '"':
+			start := parser.offset
 			value, err := parser.readQuotedArgument()
 			if err != nil {
 				return nil, err
 			}
-			result = append(result, cmakeArgument{value: value})
+			result = append(result, cmakeArgument{value: value, quoted: true, escaped: bytes.ContainsRune(parser.content[start:parser.offset], '\\')})
 		default:
 			if value, ok, err := parser.readBracketArgument(); err != nil {
 				return nil, err
 			} else if ok {
 				result = append(result, cmakeArgument{value: value})
 			} else {
+				start := parser.offset
 				value, err := parser.readUnquotedArgument()
 				if err != nil {
 					return nil, err
 				}
-				result = append(result, cmakeArgument{value: value})
+				result = append(result, cmakeArgument{value: value, escaped: bytes.ContainsRune(parser.content[start:parser.offset], '\\')})
 			}
 		}
 		parser.argumentCount++
