@@ -205,3 +205,117 @@ func TestCoverageDetailLinesRejectCorruptedCurrentGraph(t *testing.T) {
 		}
 	})
 }
+
+func TestCoverageDetailLinesRejectUnattributedBranchAcrossParents(t *testing.T) {
+	s := openTestStore(t)
+	index := attestedDetailFixture(t, s, 7540)
+	// This covered arm needs no gap. Moving it preserves every metric and gap,
+	// so the existing full attestation does not mask the missing attribution check.
+	if _, err := s.db.Exec(`UPDATE coverage_detail_branches SET line=12 WHERE report_id=? AND ordinal=0`, index.ReportID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadValidatedCoverageIndex(context.Background(), coveragedetail.CurrentIndexQuery{
+		ProjectID: index.ProjectID, ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration,
+	}); err != nil {
+		t.Fatalf("counterexample masked by another attestation guard: %v", err)
+	}
+	q := coveragedetail.LineQuery{ReportID: index.ReportID, WorkspaceGeneration: index.WorkspaceGeneration, FileID: index.Files[1].ID, Limit: 2}
+	page, err := s.ListCoverageLines(context.Background(), q)
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("empty sibling file exposed a corrupt current graph: page=%#v err=%v", page, err)
+	}
+}
+
+// A coherent current graph with two functions sharing one positive branch arm.
+// Function metrics are 1/1, file unions are 1/1, and there are no uncovered gaps.
+// Existing graph validation accepts it, isolating branch ownership from drift.
+func currentLineOwnershipFixture(t *testing.T) coveragedetail.Index {
+	t.Helper()
+	index := coveragedetail.Index{ProjectID: "core", ReportID: strings.Repeat("a", 32), WorkspaceGeneration: strings.Repeat("b", 64), Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent}}
+	for _, path := range []string{"src/a.cpp", "src/b.cpp"} {
+		id, err := coveragedetail.StableFileID(index.ProjectID, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index.Files = append(index.Files, coveragedetail.File{ID: id, RelativePath: path, SourceSHA256: strings.Repeat("c", 64), Status: coveragedetail.StatusCurrent})
+	}
+	metric := coveragedomain.Metric{Covered: 1, Total: 1}
+	for _, name := range []string{"first", "second"} {
+		id, err := coveragedetail.StableFunctionID(index.Files[0].ID, fmt.Sprintf("qualified:%d:%s:signature:", len(name), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		index.Files[0].Functions = append(index.Files[0].Functions, coveragedetail.Function{
+			ID: id, Name: name, Start: coveragedomain.SourceLocation{Line: 1}, End: coveragedomain.SourceLocation{Line: 1}, Status: coveragedetail.StatusCurrent,
+			Summary: coveragedomain.Summary{Functions: metric, Lines: metric, Branches: metric},
+			Lines:   []coveragedetail.Line{{Line: 1, Count: 1}}, Branches: []coveragedetail.Branch{{Line: 1, Column: 1, Ordinal: 0, Count: 1}},
+		})
+	}
+	index.Files[0].Lines = []coveragedetail.Line{{Line: 1, Count: 1}}
+	index.Files[0].Summary = coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 2, Total: 2}, Lines: metric, Branches: metric}
+	index.Project.Summary = index.Files[0].Summary
+	return index
+}
+
+func TestCoverageDetailLinesRejectSiblingBranchOwnershipBeforeNarrowing(t *testing.T) {
+	index := currentLineOwnershipFixture(t)
+	if err := validateDetailIndex(index); err != nil {
+		t.Fatalf("ownership counterexample has unrelated graph drift: %v", err)
+	}
+	for _, parent := range []struct{ name, file, function string }{
+		{"first function", index.Files[0].ID, index.Files[0].Functions[0].ID},
+		{"second function", index.Files[0].ID, index.Files[0].Functions[1].ID},
+		{"empty sibling file", index.Files[1].ID, ""},
+	} {
+		t.Run(parent.name, func(t *testing.T) {
+			lines, err := projectCurrentLines(index, parent.file, parent.function)
+			if !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("sibling branch owner discarded before validation: lines=%#v err=%v", lines, err)
+			}
+		})
+	}
+}
+
+func TestCoverageDetailLinesRejectSiblingBranchAttributionBeforeNarrowing(t *testing.T) {
+	index := currentLineOwnershipFixture(t)
+	// Make the functions disjoint, but move the sibling's positive arm away
+	// from its attributed line. Numeric summaries and the gap set stay coherent.
+	index.Files[0].Functions[1].Lines[0].Line = 2
+	index.Files[0].Functions[1].Branches[0].Line = 12
+	index.Files[0].Lines = append(index.Files[0].Lines, coveragedetail.Line{Line: 2, Count: 1})
+	index.Files[0].Summary.Lines = coveragedomain.Metric{Covered: 2, Total: 2}
+	index.Files[0].Summary.Branches = coveragedomain.Metric{Covered: 2, Total: 2}
+	index.Project.Summary = index.Files[0].Summary
+	if err := validateDetailIndex(index); err != nil {
+		t.Fatalf("attribution counterexample has unrelated graph drift: %v", err)
+	}
+	lines, err := projectCurrentLines(index, index.Files[0].ID, index.Files[0].Functions[0].ID)
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("unattributed sibling arm discarded before validation: lines=%#v err=%v", lines, err)
+	}
+}
+
+func TestCoverageDetailLinesAllowSameArmKeyInDifferentFiles(t *testing.T) {
+	index := currentLineOwnershipFixture(t)
+	second := index.Files[0].Functions[1]
+	var err error
+	second.ID, err = coveragedetail.StableFunctionID(index.Files[1].ID, "qualified:6:second:signature:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index.Files[0].Functions = index.Files[0].Functions[:1]
+	index.Files[0].Summary = index.Files[0].Functions[0].Summary
+	index.Files[1].Functions = []coveragedetail.Function{second}
+	index.Files[1].Lines = []coveragedetail.Line{{Line: 1, Count: 1}}
+	index.Files[1].Summary = second.Summary
+	index.Project.Summary = coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 2, Total: 2}, Lines: coveragedomain.Metric{Covered: 2, Total: 2}, Branches: coveragedomain.Metric{Covered: 2, Total: 2}}
+	if err := validateDetailIndex(index); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range index.Files {
+		lines, err := projectCurrentLines(index, file.ID, file.Functions[0].ID)
+		if err != nil || lines[1] != (coveragedetail.LineDetail{Line: 1, Count: 1, BranchesCovered: 1, BranchesTotal: 1}) {
+			t.Fatalf("unrelated files' arm keys collided: lines=%#v err=%v", lines, err)
+		}
+	}
+}

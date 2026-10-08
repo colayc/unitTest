@@ -11,50 +11,10 @@ import (
 
 type currentBranchKey struct{ line, column, ordinal int64 }
 
-// projectCurrentLines accepts only an attested current graph. Raw observations
-// remain unchanged; the page carries branch evidence from its selected owner.
-func projectCurrentLines(index coveragedetail.Index, fileID, functionID string) (map[int64]coveragedetail.LineDetail, error) {
-	if index.Project.Status != coveragedetail.StatusCurrent {
-		return nil, coveragedetail.ErrStale
-	}
-	var file *coveragedetail.File
-	for i := range index.Files {
-		if index.Files[i].ID == fileID {
-			if file != nil {
-				return nil, storageError("duplicate current line file", nil)
-			}
-			file = &index.Files[i]
-		}
-	}
-	if file == nil {
-		return nil, task.ErrNotFound
-	}
-	if file.Status != coveragedetail.StatusCurrent {
-		return nil, storageError("current line file is incomplete", nil)
-	}
-	lines, functions, summary := file.Lines, file.Functions, file.Summary
-	if functionID != "" {
-		var fn *coveragedetail.Function
-		for i := range file.Functions {
-			if file.Functions[i].ID == functionID {
-				if fn != nil {
-					return nil, storageError("duplicate current line function", nil)
-				}
-				fn = &file.Functions[i]
-			}
-		}
-		if fn == nil {
-			return nil, task.ErrNotFound
-		}
-		lines, functions, summary = fn.Lines, []coveragedetail.Function{*fn}, fn.Summary
-	}
-	projected := make(map[int64]coveragedetail.LineDetail, len(lines))
-	for _, line := range lines {
-		if _, duplicate := projected[line.Line]; duplicate || !validDetailLine(line) {
-			return nil, storageError("invalid current line projection", nil)
-		}
-		projected[line.Line] = coveragedetail.LineDetail{Line: line.Line, Count: line.Count}
-	}
+// currentBranchArms validates ownership within one file, before a page can
+// discard sibling functions. The same source coordinate in another file is
+// independent. Numeric bounds and summary unions are already attested.
+func currentBranchArms(functions []coveragedetail.Function) (map[currentBranchKey]int64, error) {
 	arms := make(map[currentBranchKey]int64)
 	owners := make(map[currentBranchKey]string)
 	for _, fn := range functions {
@@ -78,6 +38,67 @@ func projectCurrentLines(index coveragedetail.Index, fileID, functionID string) 
 			}
 			owners[key], arms[key] = fn.ID, branch.Count
 		}
+	}
+	return arms, nil
+}
+
+// projectCurrentLines accepts only an attested current graph. Raw observations
+// remain unchanged; the page carries branch evidence from its selected owner.
+func projectCurrentLines(index coveragedetail.Index, fileID, functionID string) (map[int64]coveragedetail.LineDetail, error) {
+	if index.Project.Status != coveragedetail.StatusCurrent {
+		return nil, coveragedetail.ErrStale
+	}
+	var file *coveragedetail.File
+	var arms map[currentBranchKey]int64
+	for i := range index.Files {
+		// Attestation's summary unions cannot prove branch attribution or
+		// exclusive ownership. Check every loaded file before narrowing.
+		fileArms, err := currentBranchArms(index.Files[i].Functions)
+		if err != nil {
+			return nil, err
+		}
+		if index.Files[i].ID == fileID {
+			if file != nil {
+				return nil, storageError("duplicate current line file", nil)
+			}
+			file = &index.Files[i]
+			arms = fileArms
+		}
+	}
+	if file == nil {
+		return nil, task.ErrNotFound
+	}
+	if file.Status != coveragedetail.StatusCurrent {
+		return nil, storageError("current line file is incomplete", nil)
+	}
+	lines, summary := file.Lines, file.Summary
+	if functionID != "" {
+		var fn *coveragedetail.Function
+		for i := range file.Functions {
+			if file.Functions[i].ID == functionID {
+				if fn != nil {
+					return nil, storageError("duplicate current line function", nil)
+				}
+				fn = &file.Functions[i]
+			}
+		}
+		if fn == nil {
+			return nil, task.ErrNotFound
+		}
+		lines, summary = fn.Lines, fn.Summary
+		// The whole graph has passed ownership/attribution checks; only the
+		// selected function's arms contribute to its current page.
+		arms = make(map[currentBranchKey]int64, len(fn.Branches))
+		for _, branch := range fn.Branches {
+			arms[currentBranchKey{branch.Line, branch.Column, branch.Ordinal}] = branch.Count
+		}
+	}
+	projected := make(map[int64]coveragedetail.LineDetail, len(lines))
+	for _, line := range lines {
+		if _, duplicate := projected[line.Line]; duplicate || !validDetailLine(line) {
+			return nil, storageError("invalid current line projection", nil)
+		}
+		projected[line.Line] = coveragedetail.LineDetail{Line: line.Line, Count: line.Count}
 	}
 	for key, count := range arms {
 		line, exists := projected[key.line]
