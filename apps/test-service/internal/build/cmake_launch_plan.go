@@ -46,6 +46,11 @@ type cmakeLaunchValidator struct {
 	targetPaths            map[string]struct{}
 	declaredTargets        map[string]struct{}
 	definedTargets         map[string]string
+	definedTargetTypes     map[string]string
+	targetLinks            map[string][]windowsTargetLink
+	windowsLibraryOwners   map[string][]string
+	windowsLibrary         *windowsLinkLibraryBinding
+	toolchain              toolchain.Instance
 	declaredLinkArtifacts  map[string]struct{}
 	cmakePath              string
 	ctestPath              string
@@ -84,6 +89,12 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 	if err != nil {
 		return nil, nil, errInvalidCMakeLaunchDeclaration
 	}
+	if input.WindowsLinkLibrary != nil {
+		selected, captureErr := captureWindowsWinMMLibrary(input.Toolchain)
+		if captureErr != nil || *selected != *input.WindowsLinkLibrary {
+			return nil, nil, errInvalidCMakeLaunchDeclaration
+		}
+	}
 	capturedEnvironment := make(map[string]string, len(normalizedEnvironment))
 	for _, entry := range normalizedEnvironment {
 		key, value, found := strings.Cut(entry, "=")
@@ -111,6 +122,11 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		targetPaths:           make(map[string]struct{}, len(input.Targets)),
 		declaredTargets:       make(map[string]struct{}, len(input.Targets)),
 		definedTargets:        make(map[string]string, len(input.Targets)),
+		definedTargetTypes:    make(map[string]string),
+		targetLinks:           make(map[string][]windowsTargetLink),
+		windowsLibraryOwners:  make(map[string][]string),
+		windowsLibrary:        input.WindowsLinkLibrary,
+		toolchain:             input.Toolchain,
 		declaredLinkArtifacts: make(map[string]struct{}, len(input.Targets)),
 		allowedRoots:          []string{sourceRoot},
 		visited:               make(map[string]cmakeDirectoryContext),
@@ -194,6 +210,20 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 	}
 	if err := validator.validateFile(filepath.Join(sourceRoot, "CMakeLists.txt"), binaryRoot); err != nil {
 		return nil, nil, err
+	}
+	consumers, err := validator.windowsLinkConsumers()
+	if err != nil {
+		return nil, nil, err
+	}
+	if validator.windowsLibrary != nil && verifyWindowsWinMMLibrary(validator.windowsLibrary) != nil {
+		return nil, nil, errInvalidCMakeLaunchDeclaration
+	}
+	if validator.windowsLibrary != nil && len(consumers) == 0 {
+		return nil, nil, errInvalidCMakeLaunchDeclaration
+	}
+	if input.launchPreparation != nil {
+		input.launchPreparation.windowsLibrary = validator.windowsLibrary
+		input.launchPreparation.windowsConsumers = consumers
 	}
 	sort.Slice(validator.states, func(i, j int) bool { return validator.states[i].Path < validator.states[j].Path })
 	resultPlan := append(append([]string(nil), launchPlan...), validator.planned...)
@@ -434,6 +464,9 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		return err
 	}
 	for variable, raw := range resolved.cache {
+		if strings.EqualFold(variable, windowsWinMMVariable) {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
 		}
@@ -792,6 +825,7 @@ func (validator *cmakeLaunchValidator) declareExecutable(invocation cmakeInvocat
 	validator.targets[name] = executable
 	validator.declaredTargets[name] = struct{}{}
 	validator.definedTargets[name] = invocation.arguments[0].value
+	validator.definedTargetTypes[invocation.arguments[0].value] = "EXECUTABLE"
 	validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
 	validator.addAllowedExecutable(executable, true)
 	return nil
@@ -808,6 +842,7 @@ func (validator *cmakeLaunchValidator) declareLibrary(invocation cmakeInvocation
 	}
 	validator.declaredTargets[name] = struct{}{}
 	validator.definedTargets[name] = invocation.arguments[0].value
+	validator.definedTargetTypes[invocation.arguments[0].value] = "STATIC_LIBRARY"
 	return nil
 }
 
@@ -818,7 +853,23 @@ func (validator *cmakeLaunchValidator) validateTargetLinkLibraries(invocation cm
 	}
 	for _, scope := range scopes {
 		for _, argument := range scope.Values {
+			if argument.value == "${"+windowsWinMMVariable+"}" && !argument.escaped && !argument.bracket {
+				if validator.windowsLibrary == nil {
+					validator.windowsLibrary, err = captureWindowsWinMMLibrary(validator.toolchain)
+					if err != nil {
+						return errInvalidCMakeLaunchDeclaration
+					}
+				}
+				owner := invocation.arguments[0].value
+				validator.windowsLibraryOwners[owner] = append(validator.windowsLibraryOwners[owner], scope.Scope)
+				continue
+			}
 			if declared, defined := validator.definedTargets[strings.ToLower(argument.value)]; defined && declared == argument.value {
+				if invocation.arguments[0].value == declared {
+					return errInvalidCMakeLaunchDeclaration
+				}
+				owner := invocation.arguments[0].value
+				validator.targetLinks[owner] = append(validator.targetLinks[owner], windowsTargetLink{target: declared, scope: scope.Scope})
 				continue
 			}
 			if filepath.IsAbs(argument.value) {
@@ -961,6 +1012,9 @@ func literalCMakeProjectVersion(value string) bool {
 func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmakeInvocation, sourceKey string, context cmakeDirectoryContext) error {
 	if len(invocation.arguments) == 0 {
 		return nil
+	}
+	if strings.EqualFold(invocation.arguments[0].value, windowsWinMMVariable) {
+		return errInvalidCMakeLaunchDeclaration
 	}
 	if isDeclarativeDirectoryVariable(invocation.arguments[0].value) {
 		return errInvalidCMakeLaunchDeclaration
@@ -1137,6 +1191,9 @@ func (validator *cmakeLaunchValidator) validateDirectoryProperties(invocation cm
 }
 
 func (validator *cmakeLaunchValidator) validateLaunchProperty(name string, values []cmakeArgument, sourceKey string) error {
+	if strings.EqualFold(name, windowsWinMMVariable) {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	if isCompilerOrLinkerOptionProperty(name) {
 		return errInvalidCMakeLaunchDeclaration
 	}
@@ -1354,7 +1411,7 @@ func isCMakeScriptLoaderVariable(value string) bool {
 }
 
 func isControlledCMakeListVariable(value string) bool {
-	return isDeclarativeDirectoryVariable(value) || isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
+	return strings.EqualFold(value, windowsWinMMVariable) || isDeclarativeDirectoryVariable(value) || isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
 		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value) ||
 		isCMakeCompilerOrLinkerFlagsVariable(value) || isCMakeRuleTemplateVariable(value)
 }
@@ -1364,7 +1421,7 @@ func mentionsControlledCMakeListVariable(value string) bool {
 		return true
 	}
 	upper := strings.ToUpper(value)
-	return strings.Contains(upper, "CMAKE_PROJECT_") ||
+	return strings.Contains(upper, windowsWinMMVariable) || strings.Contains(upper, "CMAKE_PROJECT_") ||
 		strings.Contains(upper, "CMAKE_TOOLCHAIN_FILE") ||
 		strings.Contains(upper, "CMAKE_USER_MAKE_RULES_OVERRIDE") ||
 		strings.Contains(upper, "CMAKE_MAKE_PROGRAM") ||

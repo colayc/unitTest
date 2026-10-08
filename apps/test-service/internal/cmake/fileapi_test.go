@@ -14,6 +14,69 @@ import (
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
+func TestFileAPILinkFragments(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	before := readWithFixture(t, fixture)
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["link"] = map[string]any{"commandFragments": []any{map[string]any{"fragment": "/debug", "role": "flags"}, map[string]any{"fragment": `"C:/SDK root/winmm.lib"`, "role": "libraries"}}}
+	})
+	reply := readWithFixture(t, fixture)
+	var app Target
+	for _, target := range reply.Targets {
+		if target.Name == "app" {
+			app = target
+		}
+	}
+	want := []LinkCommandFragment{{Fragment: "/debug", Role: "flags"}, {Fragment: `"C:/SDK root/winmm.lib"`, Role: "libraries"}}
+	if !reflect.DeepEqual(app.LinkFragments, want) {
+		t.Fatalf("fragments=%#v want %#v", app.LinkFragments, want)
+	}
+	if stateByBaseName(t, before.StateFiles, "target-app-Debug.json").SHA256 == stateByBaseName(t, reply.StateFiles, "target-app-Debug.json").SHA256 {
+		t.Fatal("link reply bytes not fingerprinted")
+	}
+	cloned := CloneTargets([]Target{app})
+	cloned[0].LinkFragments[0].Fragment = "changed"
+	if app.LinkFragments[0].Fragment != "/debug" {
+		t.Fatal("clone aliases link fragments without compile units")
+	}
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{"wrong type", 42}, {"null", nil},
+		{"too long", []any{map[string]any{"fragment": strings.Repeat("x", 16*1024+1), "role": "libraries"}}},
+		{"nul", []any{map[string]any{"fragment": "a\x00b", "role": "libraries"}}},
+		{"bad role", []any{map[string]any{"fragment": "x", "role": "commands"}}},
+		{"too many", make([]any, 4097)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFileAPIReplyFixture(t)
+			mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) { value["link"] = map[string]any{"commandFragments": tc.value} })
+			expectFileAPIReadError(t, fixture)
+		})
+	}
+}
+
+func TestFileAPILinkFragmentsDoNotAuthorizeSDKSourceRoots(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	sdk := t.TempDir()
+	outside := filepath.Join(sdk, "sdk-source.cpp")
+	if err := os.WriteFile(outside, []byte("int sdk_source;\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["link"] = map[string]any{"commandFragments": []any{map[string]any{"fragment": `"` + filepath.ToSlash(filepath.Join(sdk, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib")) + `"`, "role": "libraries", "backtrace": 1}}}
+	})
+	readWithFixture(t, fixture)
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["sources"] = []any{map[string]any{"path": filepath.ToSlash(outside)}}
+	})
+	_, err := ReadReply(fixture.buildDir, []string{fixture.sourceDir, fixture.buildDir}, fixture.profile)
+	if err == nil {
+		t.Fatal("SDK link metadata authorized an external source path")
+	}
+}
+
 func TestWriteQueryPublishesFixedStatefulRequest(t *testing.T) {
 	buildDir := t.TempDir()
 

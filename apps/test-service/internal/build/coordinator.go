@@ -127,9 +127,17 @@ func (c *Coordinator) Targets(
 		return nil, ErrConfigureRequired
 	}
 	toolchainIdentity := effectiveToolchainIdentity(profile, toolchain.Instance{}, reply)
+	sourceDir, err := c.config.WorkspaceRoot.ResolveRelative(project.SourceDir)
+	if err != nil {
+		return nil, ErrConfigureRequired
+	}
+	prepared, err := prepareCMakePlan(PlanInput{Installation: c.config.Installation, WorkspaceRoot: c.config.WorkspaceRoot, Project: project, Profile: profile, Toolchain: instance, Targets: reply.Targets}, sourceDir)
+	if err != nil || prepared.windowsLibrary != nil && verifyWindowsLinkLibraryEvidence(prepared.windowsLibrary, reply.Targets, prepared.windowsConsumers) != nil {
+		return nil, ErrConfigureRequired
+	}
 	current := fingerprintInput(
 		snapshot.Generation, profile, c.config.Installation.Identity,
-		toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity, nil,
+		toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity, nil, prepared.windowsLibrary,
 	)
 	if cmake.NeedsConfigure(cmake.BuildConfiguration{
 		Fingerprint: previous.Fingerprint, Succeeded: true,
@@ -274,6 +282,10 @@ func (plan *PreparedPlan) RefreshTargets(ctx context.Context) ([]cmake.Target, e
 		return nil, ErrConfigureRequired
 	}
 	if err := plan.verifyCoverageCompilerEvidence(reply); err != nil {
+		return nil, ErrConfigureRequired
+	}
+	prepared := plan.prepared.launchPreparation
+	if prepared != nil && prepared.windowsLibrary != nil && verifyWindowsLinkLibraryEvidence(prepared.windowsLibrary, reply.Targets, prepared.windowsConsumers) != nil {
 		return nil, ErrConfigureRequired
 	}
 	return cloneTargets(reply.Targets), nil
@@ -424,14 +436,15 @@ func (c *Coordinator) Resume(
 }
 
 type preparedBuild struct {
-	request   task.StartRequest
-	boundary  *executionBoundary
-	snapshot  discovery.Snapshot
-	project   workspace.ProjectConfig
-	profile   cmake.BuildProfile
-	toolchain toolchain.Instance
-	targets   []cmake.Target
-	coverage  *CoverageOptions
+	request           task.StartRequest
+	boundary          *executionBoundary
+	snapshot          discovery.Snapshot
+	project           workspace.ProjectConfig
+	profile           cmake.BuildProfile
+	toolchain         toolchain.Instance
+	targets           []cmake.Target
+	coverage          *CoverageOptions
+	launchPreparation *cmakeLaunchPreparation
 }
 
 func (p *preparedBuild) releaseUnlessAdopted() {
@@ -529,18 +542,29 @@ func (c *Coordinator) prepare(
 		return nil, configurationErr
 	}
 	toolchainIdentity := effectiveToolchainIdentity(profile, instance, reply)
+	planInput := PlanInput{Installation: c.config.Installation, WorkspaceRoot: c.config.WorkspaceRoot, Project: project, Profile: profile, Toolchain: instance, Targets: targets, TargetIDs: request.TargetIDs, Jobs: request.Jobs, Coverage: coverage}
+	sourceDir, err := c.config.WorkspaceRoot.ResolveRelative(project.SourceDir)
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	launchPreparation, err := prepareCMakePlan(planInput, sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	planInput.WindowsLinkLibrary = launchPreparation.windowsLibrary
+	planInput.launchPreparation = launchPreparation
 	if configurationErr == nil && replyErr == nil {
 		needsConfigure = cmake.NeedsConfigure(
 			cmake.BuildConfiguration{Fingerprint: previous.Fingerprint, Succeeded: true},
 			fingerprintInput(
 				snapshot.Generation, profile, c.config.Installation.Identity,
 				toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity,
-				coverage,
+				coverage, launchPreparation.windowsLibrary,
 			),
 		)
 	}
 	state, err := c.configureState(
-		snapshot, project, profile, instance, reply, request.TargetIDs, coverage,
+		snapshot, project, profile, instance, reply, request.TargetIDs, coverage, launchPreparation.windowsLibrary, launchPreparation.windowsConsumers,
 	)
 	if err != nil {
 		return nil, err
@@ -550,13 +574,9 @@ func (c *Coordinator) prepare(
 			return nil, ErrConfigureRequired
 		}
 	}
-	plan, err := Plan(PlanInput{
-		Installation: c.config.Installation, WorkspaceRoot: c.config.WorkspaceRoot,
-		Project: project, Profile: profile, Toolchain: instance,
-		Targets: targets, TargetIDs: request.TargetIDs, Jobs: request.Jobs,
-		Configure: needsConfigure, ConfigureState: state,
-		Coverage: coverage,
-	})
+	planInput.Configure = needsConfigure
+	planInput.ConfigureState = state
+	plan, err := Plan(planInput)
 	if err != nil {
 		return nil, err
 	}
@@ -617,9 +637,10 @@ func (c *Coordinator) prepare(
 	return &preparedBuild{
 		request: internalRequest, boundary: boundary,
 		snapshot: snapshot, project: project, profile: profile,
-		toolchain: preparedToolchain,
-		targets:   cloneTargets(targets),
-		coverage:  cloneCoverageOptions(coverage),
+		toolchain:         preparedToolchain,
+		targets:           cloneTargets(targets),
+		coverage:          cloneCoverageOptions(coverage),
+		launchPreparation: launchPreparation,
 	}, nil
 }
 
@@ -736,13 +757,20 @@ func (c *Coordinator) Succeeded(
 			return ErrTargetNotFound
 		}
 	}
+	if state.WindowsLinkLibrary != nil {
+		if verifyWindowsLinkLibraryEvidence(state.WindowsLinkLibrary, reply.Targets, state.WindowsLinkConsumers) != nil {
+			return ErrConfigureRequired
+		}
+	} else if len(state.WindowsLinkConsumers) != 0 {
+		return ErrConfigureRequired
+	}
 	toolchainIdentity := effectiveToolchainIdentity(
 		state.Profile, toolchain.Instance{ID: state.ToolchainID}, reply,
 	)
 	input := fingerprintInput(
 		state.WorkspaceGeneration, state.Profile, state.CMakeIdentity,
 		toolchainIdentity, reply, state.UnityRunnerGeneratorIdentity,
-		state.Coverage,
+		state.Coverage, state.WindowsLinkLibrary,
 	)
 	fingerprint := cmake.ConfigureFingerprint(input)
 	if fingerprint == "" {
@@ -887,19 +915,21 @@ func validFingerprintFilesForDiagnostic(groups ...[]cmake.FingerprintFile) bool 
 }
 
 type configureStepState struct {
-	WorkspaceID                  string             `json:"workspaceId"`
-	WorkspaceGeneration          string             `json:"workspaceGeneration"`
-	ProjectID                    string             `json:"projectId"`
-	ConfigurationID              string             `json:"configurationId"`
-	Profile                      cmake.BuildProfile `json:"profile"`
-	ToolchainID                  string             `json:"toolchainId"`
-	CMakeIdentity                string             `json:"cmakeIdentity"`
-	UnityRunnerGeneratorIdentity string             `json:"unityRunnerGeneratorIdentity,omitempty"`
-	BuildDirectory               string             `json:"buildDirectory"`
-	AllowedRoots                 []string           `json:"allowedRoots"`
-	TargetIDs                    []string           `json:"targetIds"`
-	TargetNames                  map[string]string  `json:"targetNames"`
-	Coverage                     *CoverageOptions   `json:"coverage,omitempty"`
+	WorkspaceID                  string                     `json:"workspaceId"`
+	WorkspaceGeneration          string                     `json:"workspaceGeneration"`
+	ProjectID                    string                     `json:"projectId"`
+	ConfigurationID              string                     `json:"configurationId"`
+	Profile                      cmake.BuildProfile         `json:"profile"`
+	ToolchainID                  string                     `json:"toolchainId"`
+	CMakeIdentity                string                     `json:"cmakeIdentity"`
+	UnityRunnerGeneratorIdentity string                     `json:"unityRunnerGeneratorIdentity,omitempty"`
+	BuildDirectory               string                     `json:"buildDirectory"`
+	AllowedRoots                 []string                   `json:"allowedRoots"`
+	TargetIDs                    []string                   `json:"targetIds"`
+	TargetNames                  map[string]string          `json:"targetNames"`
+	Coverage                     *CoverageOptions           `json:"coverage,omitempty"`
+	WindowsLinkLibrary           *windowsLinkLibraryBinding `json:"windowsLinkLibrary,omitempty"`
+	WindowsLinkConsumers         []string                   `json:"windowsLinkConsumers,omitempty"`
 }
 
 func (c *Coordinator) configureState(
@@ -910,7 +940,12 @@ func (c *Coordinator) configureState(
 	reply cmake.FileAPIReply,
 	targetIDs []string,
 	coverage *CoverageOptions,
+	windowsLinkLibrary *windowsLinkLibraryBinding,
+	windowsLinkConsumers []string,
 ) (json.RawMessage, error) {
+	if windowsLinkLibrary != nil && (verifyWindowsWinMMLibrary(windowsLinkLibrary) != nil || len(windowsLinkConsumers) == 0) || windowsLinkLibrary == nil && len(windowsLinkConsumers) != 0 {
+		return nil, task.ErrInvalidArgument
+	}
 	targetNames := make(map[string]string, len(targetIDs))
 	byID := make(map[string]string, len(reply.Targets))
 	for _, target := range reply.Targets {
@@ -936,7 +971,8 @@ func (c *Coordinator) configureState(
 		BuildDirectory:               buildDirectory,
 		AllowedRoots:                 c.fileAPIAllowedRoots(profile, instance, snapshot.Toolchains),
 		TargetIDs:                    append([]string{}, targetIDs...), TargetNames: targetNames,
-		Coverage: cloneCoverageOptions(coverage),
+		Coverage:           cloneCoverageOptions(coverage),
+		WindowsLinkLibrary: windowsLinkLibrary, WindowsLinkConsumers: append([]string(nil), windowsLinkConsumers...),
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument
@@ -1050,7 +1086,10 @@ func (c *Coordinator) fileAPIAllowedRoots(
 		if candidate.CXXCompiler != "" {
 			candidates = append(candidates, filepath.Dir(candidate.CXXCompiler))
 		}
-		if candidate.Sysroot != "" {
+		// A Windows SDK is not a project source/input/include root. Its one
+		// service-owned system library is authenticated separately, never by
+		// widening this shared File API source authority.
+		if candidate.Sysroot != "" && !(runtime.GOOS == "windows" && (candidate.Family == toolchain.FamilyMSVC || candidate.Family == toolchain.FamilyClangCL)) {
 			candidates = append(candidates, candidate.Sysroot)
 		}
 	}
@@ -1235,6 +1274,7 @@ func fingerprintInput(
 	reply cmake.FileAPIReply,
 	unityRunnerGeneratorIdentity string,
 	coverage *CoverageOptions,
+	windowsLinkLibrary *windowsLinkLibraryBinding,
 ) cmake.ProfileFingerprintInput {
 	result := cmake.ProfileFingerprintInput{
 		WorkspaceGeneration: generation, Profile: profile,
@@ -1243,6 +1283,17 @@ func fingerprintInput(
 		ToolchainIdentity:            toolchainIdentity,
 		CMakeInputStates:             reply.CMakeInputStates, Cache: reply.Cache,
 		FileAPIState: reply.StateFiles,
+	}
+	if windowsLinkLibrary != nil {
+		file := windowsLinkLibrary.File
+		result.WindowsLinkLibrary = &file
+		// The SDK directory can be republished while preserving the library's
+		// file identity. Bind that selected directory authority too, without
+		// changing the executable lease's actual OS file identity.
+		sum := sha256.Sum256([]byte("windows-sdk-configure-v1\x00" + result.ToolchainIdentity + "\x00" +
+			windowsLinkLibrary.SDKRoot + "\x00" + windowsLinkLibrary.SDKIdentity + "\x00" +
+			windowsLinkLibrary.SDKVersion + "\x00" + windowsLinkLibrary.TargetArchitecture))
+		result.ToolchainIdentity = hex.EncodeToString(sum[:])
 	}
 	if coverage != nil {
 		result.CMakeInputStates = append(
@@ -1281,11 +1332,12 @@ func configureFingerprint(
 	reply cmake.FileAPIReply,
 	unityRunnerGeneratorIdentity string,
 	coverage *CoverageOptions,
+	windowsLinkLibrary *windowsLinkLibraryBinding,
 ) string {
 	return cmake.ConfigureFingerprint(fingerprintInput(
 		generation, profile, cmakeIdentity, toolchainIdentity, reply,
 		unityRunnerGeneratorIdentity,
-		coverage,
+		coverage, windowsLinkLibrary,
 	))
 }
 

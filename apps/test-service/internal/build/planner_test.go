@@ -1679,13 +1679,13 @@ func TestPlannerPinsClangCLPresetCompilerToVerifiedPath(t *testing.T) {
 	writePlannerPreset(t, fixture.sourceDir, "debug")
 
 	plan, err := Plan(PlanInput{
-		Installation: fixture.installation,
+		Installation:  fixture.installation,
 		WorkspaceRoot: fixture.root,
-		Project: fixture.project,
-		Profile: fixture.profile,
-		Toolchain: fixture.toolchain,
-		Jobs: 1,
-		Configure: true,
+		Project:       fixture.project,
+		Profile:       fixture.profile,
+		Toolchain:     fixture.toolchain,
+		Jobs:          1,
+		Configure:     true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2036,4 +2036,233 @@ func canonicalPlannerFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return canonical
+}
+
+func TestPlannerWindowsSDKLibrary(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	for _, coverage := range []bool{false, true} {
+		t.Run(strconv.FormatBool(coverage), func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			fixture.toolchain.Family = toolchain.FamilyClangCL
+			fixture.toolchain.TargetArchitecture = "x64"
+			sdk := filepath.Join(fixture.dataRoot, "selected-sdk")
+			library := filepath.Join(sdk, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib")
+			if err := os.MkdirAll(filepath.Dir(library), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(library, []byte("selected import library"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			library = canonicalPlannerFile(t, library)
+			fixture.toolchain.Sysroot = sdk
+			fixture.toolchain.Environment = []string{"WINDOWSSDKDIR=" + sdk, "WINDOWSSDKVERSION=10.0.26100.0\\"}
+			contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_library(middle STATIC helper.cpp)\ntarget_link_libraries(middle PUBLIC core)\nadd_executable(fixture main.cpp)\ntarget_link_libraries(fixture PRIVATE middle)\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			input := PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}
+			if coverage {
+				include := filepath.Join(fixture.dataRoot, "coverage.cmake")
+				if err := os.WriteFile(include, []byte("# bounded instrumentation fixture\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				state, _, err := cmake.SnapshotLaunchInput(canonicalPlannerFile(t, include), 512*1024)
+				if err != nil {
+					t.Fatal(err)
+				}
+				state.Identity = strings.Repeat("4", 64)
+				input.Coverage = &CoverageOptions{BinaryDir: fixture.profile.BinaryDir, TopLevelInclude: state, InstrumentationFingerprint: state.Identity}
+			}
+			plan, err := Plan(input)
+			if err != nil {
+				t.Fatalf("service-owned SDK declaration rejected: %v", err)
+			}
+			want := "-DUNIT_TEST_IDE_WINMM_LIBRARY:FILEPATH=" + filepath.ToSlash(library)
+			count := 0
+			for _, arg := range plan.Steps[0].Process.Args {
+				if arg == want {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("SDK configure argument count = %d, args=%#v", count, plan.Steps[0].Process.Args)
+			}
+			for _, step := range plan.Steps {
+				count = 0
+				for _, state := range step.Process.LaunchInputs {
+					if state.Path == library && state.Identity != "" && len(state.SHA256) == 64 {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Fatalf("%s SDK input count = %d", step.ID, count)
+				}
+			}
+		})
+	}
+}
+
+func TestPlannerWindowsSDKReservedWriterOrdinaryBuild(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	fixture := newPlannerFixture(t)
+	fixture.toolchain.Family = toolchain.FamilyClangCL
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte("set(UNIT_TEST_IDE_WINMM_LIBRARY evil.lib)\nproject(fixture)\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}); err == nil {
+		t.Fatal("ordinary build accepted caller-owned reserved library")
+	}
+}
+
+func TestPlannerWindowsSDKReservedSyntaxAndWriters(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	for _, statement := range []string{
+		`set(UNIT_TEST_IDE_WINMM_LIBRARY "same.lib")`,
+		`unset(UNIT_TEST_IDE_WINMM_LIBRARY)`,
+		`list(APPEND UNIT_TEST_IDE_WINMM_LIBRARY evil.lib)`,
+		`string(APPEND UNIT_TEST_IDE_WINMM_LIBRARY evil.lib)`,
+		`set_property(GLOBAL PROPERTY UNIT_TEST_IDE_WINMM_LIBRARY evil.lib)`,
+		`set_target_properties(core PROPERTIES UNIT_TEST_IDE_WINMM_LIBRARY evil.lib)`,
+		`target_link_libraries(core PUBLIC [[${UNIT_TEST_IDE_WINMM_LIBRARY}]])`,
+		`target_link_libraries(core PUBLIC "\${UNIT_TEST_IDE_WINMM_LIBRARY}")`,
+		`target_link_libraries(core PUBLIC "${UNIT_TEST_IDE_WINMM_LIBRARY}/other.lib")`,
+		`target_link_libraries(core PUBLIC winmm.lib)`,
+		`target_link_libraries(CORE PUBLIC "${UNIT_TEST_IDE_WINMM_LIBRARY}")`,
+		`target_link_libraries(core PUBLIC core)`,
+	} {
+		t.Run(statement, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			selected, _ := windowsSDKFixture(t)
+			fixture.toolchain.Family = selected.Family
+			fixture.toolchain.Sysroot = selected.Sysroot
+			fixture.toolchain.Environment = selected.Environment
+			fixture.toolchain.TargetArchitecture = selected.TargetArchitecture
+			contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\n" + statement + "\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_executable(fixture main.cpp)\ntarget_link_libraries(fixture PRIVATE core)\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}); err == nil {
+				t.Fatal("unsafe reserved-library syntax/writer accepted")
+			}
+		})
+	}
+	for _, value := range []any{"same.lib", nil, map[string]any{"type": "FILEPATH", "value": "same.lib"}} {
+		fixture := newPlannerFixture(t)
+		fixture.toolchain.Family = toolchain.FamilyClangCL
+		fixture.profile.Origin = "preset"
+		fixture.profile.ConfigurePreset = "debug"
+		content, err := json.Marshal(map[string]any{"version": 3, "configurePresets": []any{map[string]any{"name": "debug", "cacheVariables": map[string]any{"UNIT_TEST_IDE_WINMM_LIBRARY": value}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}); err == nil {
+			t.Fatal("preset owns reserved variable")
+		}
+	}
+}
+
+func TestPlannerWindowsSDKExistingInputLimits(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	for _, kind := range []string{"bytes", "count"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			selected, library := windowsSDKFixture(t)
+			fixture.toolchain.Family = selected.Family
+			fixture.toolchain.Sysroot = selected.Sysroot
+			fixture.toolchain.Environment = selected.Environment
+			fixture.toolchain.TargetArchitecture = selected.TargetArchitecture
+			var contents strings.Builder
+			contents.WriteString("project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_executable(fixture main.cpp)\ntarget_link_libraries(fixture PRIVATE core)\n")
+			if kind == "bytes" {
+				if err := os.WriteFile(library, make([]byte, 512*1024+1), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := captureWindowsWinMMLibrary(fixture.toolchain); err != nil {
+					t.Fatalf("capture incorrectly enlarged/dropped its 4MiB contract: %v", err)
+				}
+			} else {
+				for index := 0; index < 125; index++ {
+					name := fmt.Sprintf("bounded-%03d.cmake", index)
+					if err := os.WriteFile(filepath.Join(fixture.sourceDir, name), []byte("# bounded input\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					contents.WriteString("include(" + name + ")\n")
+				}
+			}
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}); err == nil {
+				t.Fatal("SDK binding emitted plan beyond existing launch-input boundary")
+			}
+		})
+	}
+}
+
+func TestPlannerWindowsSDKRequiresSelectedNativeContext(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_PIPE", "")
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_NONCE", "")
+	for _, family := range []toolchain.Family{toolchain.FamilyGCC, toolchain.FamilyClang, "", toolchain.FamilyClangCL} {
+		t.Run(string(family), func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			fixture.toolchain.Family = family
+			if family == "" {
+				fixture.toolchain.CCompiler = ""
+				fixture.toolchain.CXXCompiler = ""
+				fixture.profile.Origin = "preset"
+				fixture.profile.ConfigurePreset = "debug"
+				writePlannerPreset(t, fixture.sourceDir, "debug")
+			}
+			contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_executable(fixture main.cpp)\ntarget_link_libraries(fixture PRIVATE core)\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true}); err == nil {
+				t.Fatal("new SDK recipe ignored missing/unsupported selected context")
+			}
+		})
+	}
+}
+
+func TestPlannerWindowsSDKUnrelatedGCCGraph(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows planner boundary")
+	}
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_PIPE", "")
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_NONCE", "")
+	fixture := newPlannerFixture(t)
+	contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\nadd_executable(fixture main.cpp)\ntarget_link_libraries(fixture PRIVATE core)\n"
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan(PlanInput{Installation: fixture.installation, WorkspaceRoot: fixture.root, Project: fixture.project, Profile: fixture.profile, Toolchain: fixture.toolchain, Jobs: 1, Configure: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range plan.Steps[0].Process.Args {
+		if strings.Contains(arg, "UNIT_TEST_IDE_WINMM_LIBRARY") {
+			t.Fatal("unrelated GCC graph gained SDK dependency")
+		}
+	}
+	for _, step := range plan.Steps {
+		for _, input := range step.Process.LaunchInputs {
+			if strings.EqualFold(filepath.Base(input.Path), "winmm.lib") {
+				t.Fatal("unrelated GCC graph captured Windows SDK")
+			}
+		}
+	}
 }

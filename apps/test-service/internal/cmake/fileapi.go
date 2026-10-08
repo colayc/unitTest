@@ -71,6 +71,12 @@ type Target struct {
 	Artifacts        []string
 	Sources          []TargetSource
 	CompileUnits     []CompileUnit
+	LinkFragments    []LinkCommandFragment
+}
+
+type LinkCommandFragment struct {
+	Fragment string
+	Role     string
 }
 
 type TargetSource struct {
@@ -99,6 +105,7 @@ func CloneTargets(values []Target) []Target {
 		result[index] = values[index]
 		result[index].Artifacts = append([]string(nil), values[index].Artifacts...)
 		result[index].Sources = append([]TargetSource(nil), values[index].Sources...)
+		result[index].LinkFragments = append([]LinkCommandFragment(nil), values[index].LinkFragments...)
 		if values[index].CompileUnits == nil {
 			continue
 		}
@@ -248,11 +255,12 @@ type fileAPIPaths struct {
 }
 
 type fileAPITargetObject struct {
-	CodemodelVersion fileAPIVersion `json:"codemodelVersion"`
-	Name             string         `json:"name"`
-	ID               string         `json:"id"`
-	Type             string         `json:"type"`
-	Paths            fileAPIPaths   `json:"paths"`
+	Link             json.RawMessage `json:"link"`
+	CodemodelVersion fileAPIVersion  `json:"codemodelVersion"`
+	Name             string          `json:"name"`
+	ID               string          `json:"id"`
+	Type             string          `json:"type"`
+	Paths            fileAPIPaths    `json:"paths"`
 	Artifacts        []struct {
 		Path string `json:"path"`
 	} `json:"artifacts"`
@@ -804,13 +812,17 @@ func (reader *fileAPIReader) assemble(
 			if err != nil {
 				return FileAPIReply{}, fmt.Errorf("%w: target %q compile units: %v", ErrFileAPIReply, object.Name, err)
 			}
+			linkFragments, err := readLinkFragments(object.Link)
+			if err != nil {
+				return FileAPIReply{}, err
+			}
 			target := Target{
 				ID: identity, Name: object.Name, Type: object.Type,
 				ProjectID: profiles[0].ProjectID, ProfileID: profiles[0].ID,
 				Configuration: configuration.Name,
 				SourceDir:     targetSource, BuildDir: targetBuild,
 				ProjectSourceDir: sourcePath, ProjectBuildDir: buildPath,
-				Artifacts: artifacts, Sources: sources, CompileUnits: compileUnits,
+				Artifacts: artifacts, Sources: sources, CompileUnits: compileUnits, LinkFragments: linkFragments,
 			}
 			if previous, duplicate := targetsByID[target.ID]; duplicate && !equalTargets(previous, target) {
 				return FileAPIReply{}, fmt.Errorf("%w: conflicting duplicate target identity %q", ErrFileAPIReply, target.ID)
@@ -934,6 +946,47 @@ func (reader *fileAPIReader) assemble(
 		result.ToolchainIDs = append(result.ToolchainIDs, identity)
 	}
 	result.ToolchainIDs = sortedUniqueStrings(result.ToolchainIDs)
+	return result, nil
+}
+
+func readLinkFragments(raw json.RawMessage) ([]LinkCommandFragment, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var object struct {
+		CommandFragments json.RawMessage `json:"commandFragments"`
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &object) != nil {
+		return nil, ErrFileAPIReply
+	}
+	if len(object.CommandFragments) == 0 {
+		return nil, nil
+	}
+	var fragments []struct {
+		Fragment *string `json:"fragment"`
+		Role     *string `json:"role"`
+	}
+	if bytes.Equal(bytes.TrimSpace(object.CommandFragments), []byte("null")) || json.Unmarshal(object.CommandFragments, &fragments) != nil {
+		return nil, ErrFileAPIReply
+	}
+	if len(fragments) > 4096 {
+		return nil, ErrFileAPILimit
+	}
+	result := make([]LinkCommandFragment, len(fragments))
+	for index, fragment := range fragments {
+		if fragment.Fragment == nil || fragment.Role == nil || strings.ContainsRune(*fragment.Fragment, 0) {
+			return nil, ErrFileAPIReply
+		}
+		if len(*fragment.Fragment) > maxCommandFragmentBytes {
+			return nil, ErrFileAPILimit
+		}
+		switch *fragment.Role {
+		case "flags", "libraries", "libraryPath", "frameworkPath":
+		default:
+			return nil, ErrFileAPIReply
+		}
+		result[index] = LinkCommandFragment{Fragment: *fragment.Fragment, Role: *fragment.Role}
+	}
 	return result, nil
 }
 

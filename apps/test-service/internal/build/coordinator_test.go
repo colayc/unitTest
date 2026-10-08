@@ -49,6 +49,138 @@ func TestCoordinatorRejectsStaleAndUnknownWorkspaceReferencesBeforeTaskCreation(
 	}
 }
 
+func TestWindowsSDKCoordinatorEvidenceBeforeSuccessAndReuse(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SDK authority")
+	}
+	fixture := newCoordinatorFixture(t)
+	selected, library := windowsSDKFixture(t)
+	fixture.toolchain.Family = selected.Family
+	fixture.toolchain.Sysroot = selected.Sysroot
+	fixture.toolchain.Environment = selected.Environment
+	fixture.toolchain.TargetArchitecture = selected.TargetArchitecture
+	fixture.snapshot.Toolchains = []toolchain.Instance{fixture.toolchain}
+	contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_library(middle STATIC helper.cpp)\ntarget_link_libraries(middle PUBLIC core)\nadd_executable(unit-tests main.cpp)\ntarget_link_libraries(unit-tests PRIVATE middle)\n"
+	if err := os.WriteFile(filepath.Join(fixture.root.NativePath, "project", "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.target.Type = "EXECUTABLE"
+	fixture.target.LinkFragments = []cmake.LinkCommandFragment{{Role: "libraries", Fragment: `"` + filepath.ToSlash(library) + `" kernel32.lib`}}
+	fixture.reader.reply = fixture.validReply()
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	step := fixture.starter.request.Plan.Steps[0]
+	var state configureStepState
+	if err := json.Unmarshal(step.State, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.WindowsLinkLibrary == nil || len(state.WindowsLinkConsumers) != 1 || state.WindowsLinkConsumers[0] != "unit-tests" {
+		t.Fatalf("configure state lost SDK consumers: %#v", state)
+	}
+	if containsCanonicalBoundaryPath(state.AllowedRoots, selected.Sysroot) {
+		t.Fatal("configure state grants entire SDK as File API source root")
+	}
+	if err := fixture.coordinator.Succeeded(context.Background(), task.Task{}, step); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.configurations.putCalls != 1 {
+		t.Fatal("valid evidence did not persist")
+	}
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.starter.request.Plan.Steps) != 1 {
+		t.Fatal("unchanged SDK configuration not reused")
+	}
+	fixture.reader.reply.Targets[0].LinkFragments = nil
+	if err := fixture.coordinator.Succeeded(context.Background(), task.Task{}, step); err == nil {
+		t.Fatal("lost indirect consumer evidence persisted")
+	}
+	if fixture.configurations.putCalls != 1 {
+		t.Fatal("bad link evidence wrote successful state")
+	}
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err == nil {
+		t.Fatal("no-configure reused missing link evidence")
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), TargetsRequest{WorkspaceGeneration: fixture.snapshot.Generation, ProjectID: fixture.project.ID, BuildProfileID: fixture.profile.ID}); err == nil {
+		t.Fatal("Targets reused missing link evidence")
+	}
+	fixture.reader.reply = fixture.validReply()
+	if err := os.WriteFile(library, []byte("changed selected import library"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.coordinator.Succeeded(context.Background(), task.Task{}, step); err == nil {
+		t.Fatal("changed queued SDK authority persisted")
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), TargetsRequest{WorkspaceGeneration: fixture.snapshot.Generation, ProjectID: fixture.project.ID, BuildProfileID: fixture.profile.ID}); err == nil {
+		t.Fatal("changed library reused previous Targets fingerprint")
+	}
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.starter.request.Plan.Steps) != 2 {
+		t.Fatal("changed SDK bytes did not require configure")
+	}
+}
+
+func TestWindowsSDKFileAPIRootsPreserveOtherSysroots(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	sdk := t.TempDir()
+	for _, family := range []toolchain.Family{toolchain.FamilyMSVC, toolchain.FamilyClangCL, toolchain.FamilyGCC, toolchain.FamilyClang} {
+		t.Run(string(family), func(t *testing.T) {
+			instance := fixture.toolchain
+			instance.Family = family
+			instance.Sysroot = sdk
+			roots := fixture.coordinator.fileAPIAllowedRoots(fixture.profile, instance, nil)
+			want := runtime.GOOS != "windows" || (family != toolchain.FamilyMSVC && family != toolchain.FamilyClangCL)
+			if containsCanonicalBoundaryPath(roots, sdk) != want {
+				t.Fatalf("SDK/sysroot ownership=%v want %v roots=%#v", containsCanonicalBoundaryPath(roots, sdk), want, roots)
+			}
+			preset := fixture.profile
+			preset.Origin = "preset"
+			roots = fixture.coordinator.fileAPIAllowedRoots(preset, toolchain.Instance{}, []toolchain.Instance{instance})
+			if containsCanonicalBoundaryPath(roots, sdk) != want {
+				t.Fatalf("preset SDK/sysroot root policy changed: %#v", roots)
+			}
+		})
+	}
+}
+
+func TestConfigureFingerprintWindowsSDKRootIdentity(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SDK authority")
+	}
+	fixture := newCoordinatorFixture(t)
+	instance, path := windowsSDKFixture(t)
+	first, err := captureWindowsWinMMLibrary(instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := configureFingerprint(fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity, fixture.toolchain.ID, fixture.validReply(), "", nil, first)
+	oldRoot := instance.Sysroot + "-old"
+	if err := os.Rename(instance.Sysroot, oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(oldRoot, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib"), path); err != nil {
+		t.Fatal(err)
+	}
+	current, err := captureWindowsWinMMLibrary(instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.File != first.File || current.SDKIdentity == first.SDKIdentity {
+		t.Fatalf("fixture did not isolate changed SDK root: first=%#v current=%#v", first, current)
+	}
+	after := configureFingerprint(fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity, fixture.toolchain.ID, fixture.validReply(), "", nil, current)
+	if before == after {
+		t.Fatal("replaced SDK root reused configure identity despite retained library bytes and file identity")
+	}
+}
+
 func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	unselectedCompilerRoot := filepath.Join(t.TempDir(), "unselected", "bin")
@@ -102,7 +234,7 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 		fixture.installation.Identity,
 		fixture.toolchain.ID,
 		reply,
-		"", nil,
+		"", nil, nil,
 	)
 	fixture.configurations.value = taskstore.BuildConfiguration{
 		WorkspaceID: fixture.root.ID, ProjectID: fixture.project.ID,
@@ -335,7 +467,7 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 	}
 	base := configureFingerprint(
 		fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
-		fixture.toolchain.ID, reply, "", options,
+		fixture.toolchain.ID, reply, "", options, nil,
 	)
 	if base == "" {
 		t.Fatal("coverage configure fingerprint is empty")
@@ -360,7 +492,7 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 			mutation.edit(&identity, &changed)
 			got := configureFingerprint(
 				fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
-				identity, reply, "", &changed,
+				identity, reply, "", &changed, nil,
 			)
 			if got == base {
 				t.Fatalf("configure fingerprint did not track %s", mutation.name)
@@ -376,7 +508,7 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 	}
 	stable := configureFingerprint(
 		fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
-		fixture.toolchain.ID, reply, "", options,
+		fixture.toolchain.ID, reply, "", options, nil,
 	)
 	if stable != base {
 		t.Fatal("ordinary source content changed coverage configure fingerprint")
@@ -445,6 +577,14 @@ func TestPresetFileAPIRootsIncludeOnlyServiceDiscoveredToolchains(t *testing.T) 
 	preset.Generator = "Ninja"
 	preset.Configuration = "Debug"
 	preset.BinaryDir = filepath.Join(fixture.root.NativePath, "preset-build")
+	var selected toolchain.Instance
+	if runtime.GOOS == "windows" {
+		selected = fixture.toolchain
+		fixture.request.ToolchainID = selected.ID
+		sourceDir := filepath.Join(fixture.root.NativePath, "project")
+		writePlannerPreset(t, sourceDir, preset.ConfigurePreset)
+		preset.BinaryDir = filepath.Join(sourceDir, "build")
+	}
 	fixture.profile = preset
 	fixture.snapshot.Profiles = []cmake.BuildProfile{preset}
 	fixture.request.BuildProfileID = preset.ID
@@ -471,7 +611,7 @@ func TestPresetFileAPIRootsIncludeOnlyServiceDiscoveredToolchains(t *testing.T) 
 	defer prepared.ReleaseIfUnadopted()
 	wantToolchainID := effectiveToolchainIdentity(
 		preset,
-		toolchain.Instance{},
+		selected,
 		cmake.FileAPIReply{},
 	)
 	if prepared.Toolchain().ID != wantToolchainID {
@@ -500,7 +640,7 @@ func TestConfigureObserverWritesStateAndRejectsDisappearedOrRemappedTarget(t *te
 	fixture := newCoordinatorFixture(t)
 	state, err := fixture.coordinator.configureState(
 		fixture.snapshot, fixture.project, fixture.profile, fixture.toolchain,
-		fixture.validReply(), []string{fixture.target.ID}, nil,
+		fixture.validReply(), []string{fixture.target.ID}, nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -22,6 +22,7 @@ type ProfileFingerprintInput struct {
 	CMakeInputStates             []FingerprintFile
 	Cache                        FingerprintFile
 	FileAPIState                 []FingerprintFile
+	WindowsLinkLibrary           *FingerprintFile
 }
 
 type BuildConfiguration struct {
@@ -39,6 +40,7 @@ type configureFingerprintPayload struct {
 	CMakeInputs                  []FingerprintFile `json:"cmakeInputs"`
 	Cache                        FingerprintFile   `json:"cache"`
 	FileAPIState                 []FingerprintFile `json:"fileApiState"`
+	WindowsLinkLibrary           *FingerprintFile  `json:"windowsLinkLibrary,omitempty"`
 }
 
 func ConfigureFingerprint(input ProfileFingerprintInput) string {
@@ -52,6 +54,10 @@ func ConfigureFingerprint(input ProfileFingerprintInput) string {
 		CMakeInputs:                  canonicalFingerprintFiles(input.CMakeInputStates),
 		Cache:                        canonicalFingerprintFile(input.Cache),
 		FileAPIState:                 canonicalFingerprintFiles(input.FileAPIState),
+	}
+	if input.WindowsLinkLibrary != nil {
+		file := canonicalFingerprintFile(*input.WindowsLinkLibrary)
+		payload.WindowsLinkLibrary = &file
 	}
 	sum, err := canonicalSHA256(payload)
 	if err != nil {
@@ -83,6 +89,9 @@ func validProfileFingerprintInput(input ProfileFingerprintInput) bool {
 	files = append(files, input.CMakeInputStates...)
 	files = append(files, input.Cache)
 	files = append(files, input.FileAPIState...)
+	if input.WindowsLinkLibrary != nil {
+		files = append(files, *input.WindowsLinkLibrary)
+	}
 	return validFingerprintFiles(files)
 }
 
