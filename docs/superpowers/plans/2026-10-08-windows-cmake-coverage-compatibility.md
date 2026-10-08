@@ -76,7 +76,7 @@ Test-Path -LiteralPath $env:CMAKE -PathType Leaf
 
 已准备的框架和 bundle 复用正常 `prepare/check/stage` 产物；只有具体缺失才运行对应准备，不伪造 READY，不再跑依赖下载排查。当前原生 LLVM 选择是 `C:/Program Files/LLVM/bin/clang-cl.exe` 22.1.8；不能拿 Swift clang-cl 或 PATH 中另一个编译器替代实际选择证据。
 
-## Task W1：闭合声明、目录上下文和源码绑定
+## Task 1 (W1)：闭合声明、目录上下文和源码绑定
 
 **Files:** 文件职责表 W1 的六个文件；沿用现有 `newPlannerFixture`、`activatePlannerWFPRegistration`、`canonicalCMakeLaunchPath`、`SnapshotLaunchInput` 与预算。
 
@@ -194,7 +194,7 @@ git commit -m 'fix: validate bounded Windows CMake target declarations'
 
 每条命令 exit 0 后才继续。独立审查目录语义、目标真实性、快照和原有安全反例；Critical/Important 未闭合不进入 W2。W1 不宣称真实 CppUTest 原生链路通过。
 
-## Task W2：服务拥有的 SDK 库绑定与实际链接证据
+## Task 2 (W2)：服务拥有的 SDK 库绑定与实际链接证据
 
 **Files:** 文件职责表 W2。`cmake.Target` 当前没有 link fragments；必须补有界读取与 clone，不能假设已有该字段。官方定义：link fragments 存在于真正链接的可执行/共享库，而非 STATIC 库；格式是生成系统本机 shell 格式。[CMake 4.3 File API](https://cmake.org/cmake/help/v4.3/manual/cmake-file-api.7.html#codemodel-version-2-target-object)
 
@@ -295,7 +295,7 @@ git commit -m 'fix: bind Windows framework system library to selected SDK'
 
 独立审查重点是服务拥有的来源、普通/coverage 相同语义、实际链接 token、配置成功保存前门禁、再配置/重启与 lease/输入替换。若需要超出本设计的整套 Ninja 命令解释或外部库搜索，报告具体 NEEDS_CONTEXT，不私自扩大范围。
 
-## Task W3：共享固定配方、闭合库存与 Windows fixture 接线
+## Task 3 (W3)：共享固定配方、闭合库存与 Windows fixture 接线
 
 **Files:** 文件职责表 W3。原 `fixtures/test-generation/{cpputest,unity}/CMakeLists.txt` 与 `tests/CMakeLists.txt` 保留给 Linux。新 Windows 目录镜像只包含 CMake 两个文件，分类器源码、测试和 workspace config 共用原 fixture，不复制第二套业务逻辑。
 
@@ -365,7 +365,7 @@ git commit -m 'fix: use audited Windows framework recipes for native generation'
 
 提交前核对：前两个 TS 文件包含原 Task 4 工作，其余 Task 4 fixture/UI 文件仍保留；原 vendor/manifest/helper 与 Linux root/test CMake 无 diff。W3 资源接口摘要/check 和 root path 审查通过后才恢复原 native。不要为仅静态 staging 测试重复跑整套 framework prepare/tar/download 矩阵。
 
-## Task W4：恢复原 Task 4，收口真实执行与覆盖率
+## Task 4 (W4)：恢复原 Task 4，收口真实执行与覆盖率
 
 **Files/Interfaces:** 使用[原计划 Task 4](2026-10-08-coverage-detail-first-report-contract.md#task-4-正式-ipc客户端ui离线生成验收收口)，保留 `readNativeCoverageLineEvidence`、`withNativeFirstCoverageReport` 和原服务生命周期；W1–W3 是新的前置依赖。原 Task 4 实施者 `/root/first_report_task4` 可恢复时复用该实施者及报告，不重派已完成任务。
 
