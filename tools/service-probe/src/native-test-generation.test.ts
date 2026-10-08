@@ -101,6 +101,7 @@ test("workspace configuration binds one generated Debug profile and exposes one 
     }],
   });
   assert.throws(() => buildNativeGenerationWorkspaceConfig("unity", "bad"), /profile/u);
+  assert.throws(() => buildNativeGenerationWorkspaceConfig("unity", "8c41ec4cd1ae1c444276f6fed5c16bab"), /profile/u);
 });
 
 test("Linux generation bootstrap binds the approved LLVM toolchain before profile discovery", () => {
@@ -159,26 +160,66 @@ test("native generation chooses only the production LLVM family and exact genera
   assert.equal(selectNativeGenerationProfile(snapshot as never, "win32").profile.buildProfileId, digest("3"));
 });
 
-test("coverage target is an exact current file with one exact current function", () => {
-  const fileId = digest("f");
-  const functionId = digest("a");
+test("coverage target accepts real 32-character entity IDs", () => {
+  const fileId = "8c41ec4cd1ae1c444276f6fed5c16bab";
+  const functionId = "c9096d1efd8a87e00f4cfba79e459610";
   const target = selectNativeGenerationTarget(
-    { items: [{ fileId, relativePath: "src/classifier.c", status: "current" }] },
+    { items: [{ fileId, relativePath: "src/classifier.cpp", status: "current" }] },
     { items: [{ functionId, fileId, qualifiedName: "_Z8classifyi", status: "current" }] },
-    "src/classifier.c",
+    "src/classifier.cpp",
   );
   assert.deepEqual(target, { fileId, functionId });
+});
+
+for (const [label, invalidId] of [
+  ["31 characters", "a".repeat(31)],
+  ["33 characters", "a".repeat(33)],
+  ["64 characters", "a".repeat(64)],
+  ["non-hex", "g".repeat(32)],
+  ["uppercase", "A".repeat(32)],
+] as const) {
+  for (const entity of ["file", "function"] as const) {
+    test(`coverage target rejects ${entity} IDs with ${label}`, () => {
+      const fileId = entity === "file" ? invalidId : "8c41ec4cd1ae1c444276f6fed5c16bab";
+      const functionId = entity === "function" ? invalidId : "c9096d1efd8a87e00f4cfba79e459610";
+      assert.throws(() => selectNativeGenerationTarget(
+        { items: [{ fileId, relativePath: "src/classifier.cpp", status: "current" }] },
+        { items: [{ fileId, functionId, qualifiedName: "_Z8classifyi", status: "current" }] },
+        "src/classifier.cpp",
+      ), /coverage target is unavailable/u);
+    });
+  }
+}
+
+test("coverage target rejects a pair of digest-sized entity IDs", () => {
+  const fileId = "f".repeat(64);
+  const functionId = "a".repeat(64);
   assert.throws(() => selectNativeGenerationTarget(
-    { items: [{ fileId, relativePath: "src/classifier.c", status: "stale" }] },
-    { items: [{ functionId, fileId, qualifiedName: "classify", status: "current" }] },
-    "src/classifier.c",
-  ), /target/u);
-  assert.throws(() => selectNativeGenerationTarget(
-    { items: [{ fileId, relativePath: "src/classifier.c", status: "current" }] },
-    { items: [
-      { functionId, fileId, qualifiedName: "classify", status: "current" },
-      { functionId: digest("b"), fileId, qualifiedName: "other", status: "current" },
-    ] },
-    "src/classifier.c",
-  ), /target/u);
+    { items: [{ fileId, relativePath: "src/classifier.cpp", status: "current" }] },
+    { items: [{ fileId, functionId, qualifiedName: "_Z8classifyi", status: "current" }] },
+    "src/classifier.cpp",
+  ), /coverage target is unavailable/u);
+});
+
+test("coverage target preserves exact, current, unique, parent-bound and closed-page selection", () => {
+  const fileId = "8c41ec4cd1ae1c444276f6fed5c16bab";
+  const functionId = "c9096d1efd8a87e00f4cfba79e459610";
+  const file = { fileId, relativePath: "src/classifier.cpp", status: "current" };
+  const fn = { fileId, functionId, qualifiedName: "_Z8classifyi", status: "current" };
+  const cases = [
+    { label: "stale file", files: { items: [{ ...file, status: "stale" }] }, functions: { items: [fn] } },
+    { label: "inexact path", files: { items: [{ ...file, relativePath: "src/other.cpp" }] }, functions: { items: [fn] } },
+    { label: "duplicate file", files: { items: [file, file] }, functions: { items: [fn] } },
+    { label: "stale function", files: { items: [file] }, functions: { items: [{ ...fn, status: "stale" }] } },
+    { label: "wrong parent file", files: { items: [file] }, functions: { items: [{ ...fn, fileId: "a".repeat(32) }] } },
+    { label: "empty name", files: { items: [file] }, functions: { items: [{ ...fn, qualifiedName: "" }] } },
+    { label: "duplicate function", files: { items: [file] }, functions: { items: [fn, fn] } },
+    { label: "second current function", files: { items: [file] }, functions: { items: [fn, { ...fn, functionId: "a".repeat(32), qualifiedName: "other" }] } },
+    { label: "second unmatched function", files: { items: [file] }, functions: { items: [fn, { ...fn, fileId: "a".repeat(32) }] } },
+    { label: "file pagination", files: { items: [file], nextCursor: "more" }, functions: { items: [fn] } },
+    { label: "function pagination", files: { items: [file] }, functions: { items: [fn], nextCursor: "more" } },
+  ];
+  for (const { label, files, functions } of cases) {
+    assert.throws(() => selectNativeGenerationTarget(files, functions, "src/classifier.cpp"), /coverage target is unavailable/u, label);
+  }
 });

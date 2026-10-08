@@ -29,6 +29,7 @@ const coverageProfileId = "generation-coverage";
 const operationTimeoutMs = 300_000;
 const pollIntervalMs = 100;
 const hex64 = /^[0-9a-f]{64}$/u;
+const hex32 = /^[0-9a-f]{32}$/u;
 
 export function shouldPreserveNativeGenerationFailureWorkspace(): boolean {
   return process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1";
@@ -254,7 +255,7 @@ export function selectNativeGenerationTarget(
   const fn = matchingFunctions.length === 1 && functions.items.length === 1 && functions.nextCursor === undefined
     ? matchingFunctions[0]
     : undefined;
-  if (file === undefined || fn === undefined || !hex64.test(file.fileId) || !hex64.test(fn.functionId)) {
+  if (file === undefined || fn === undefined || !hex32.test(file.fileId) || !hex32.test(fn.functionId)) {
     throw new Error("native test-generation coverage target is unavailable");
   }
   return { fileId: file.fileId, functionId: fn.functionId };
