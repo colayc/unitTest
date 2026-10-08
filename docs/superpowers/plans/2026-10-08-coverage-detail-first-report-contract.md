@@ -433,6 +433,8 @@ git commit -m "fix: project current coverage lines and branch evidence"
 
 ### Task 4: 正式 IPC→客户端→UI→离线生成验收收口
 
+2026-10-08 续接：任务 1–3 已实现并通过对应审查；任务 4 的原生 Windows 验收暴露闭合 CMake 兼容缺口，现有未提交 helper/UI 工作保留。用户已确认[新增设计](../specs/2026-10-08-windows-cmake-coverage-compatibility-design.md)，先执行[新增计划](2026-10-08-windows-cmake-coverage-compatibility.md) W1–W3，再恢复本任务；不要重做任务 1–3。W3 将提交两个重叠 TS 文件的累计改动，本任务提交按届时剩余路径精确暂存。
+
 **Files:** 文件职责表任务 4 的文件。已有 `tools/service-probe/src/test-generation-e2e.ts` 的 `coverageImproved` 用 baseline/final 当前 covered,total 比较；不要用 null UI delta 代替它。
 
 **Interfaces:**

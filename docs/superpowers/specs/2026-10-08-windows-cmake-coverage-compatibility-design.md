@@ -2,7 +2,9 @@
 
 日期：2026-10-08
 
-状态：用户已确认方案 1；本文等待书面设计审核，新增批次尚未实施。
+状态：用户已确认方案 1 和本文书面设计；新增实施计划已保存，新增批次尚未实施。
+
+实施计划：[Windows CMake 覆盖率受控兼容](../plans/2026-10-08-windows-cmake-coverage-compatibility.md)。
 
 工作分支：`codex/phase10-production-generation`。设计前本地基准：`783db417a84713039d7d83a7054d645db14a463a`。
 
