@@ -37,7 +37,7 @@
 | 2 | `tools/protocol-gen/generate.mjs` 的 `rewriteCoverageV16`；`packages/protocol-models/src/generated/coverage-v1-6.ts`；`apps/test-service/internal/protocolmodel/v1_6/coverage/generated.go` | 从 schema 重生成并稳定命名；生成文件不手改 |
 | 2 | `packages/protocol-models/src/coverage-v1-6-validation.ts`、`src/generated-contract.test.ts`；`apps/test-service/internal/protocol/coverage_v16.go`、新建 `coverage_v16_test.go` | 当前计数边界、nullable 增量和全 null/全数字一致性 |
 | 2 | `apps/test-service/internal/session/coverage_detail_routes.go`、同名 `_test.go` | 无历史比较不再阻断完整当前报告；真实读取统一输出 null |
-| 2 | 新建 `apps/test-service/internal/taskstore/coverage_detail_session_test.go` | 复用真实 SQLite fixture，经实际 session 序列化验证，不伪造历史来源 |
+| 2 | 新建 `apps/test-service/internal/taskstore/coverage_detail_session_test.go`、`coverage_detail_export_test.go` | 外部测试包经仅测试编译的 fixture 桥复用真实 SQLite fixture，实际 session 序列化验证，不伪造历史来源 |
 | 2 | `packages/test-client/src/decoders.ts`、`src/client.test.ts`；`apps/code-oss-extension/src/coverage-detail-tree.ts`、`test/coverage-detail-tree.test.ts` | nullable 解码和 UI 文案/筛选/零分母 |
 | 3 | `apps/test-service/internal/coveragedetail/model.go` | 新的只读页面 DTO；原始 `Line`、`Index` 保持不变 |
 | 3 | `apps/test-service/internal/taskstore/coverage_attested.go`；从 `coverage_details.go` 移出到新建 `coverage_detail_lines.go`；新建 `coverage_detail_lines_test.go` | 同一事务重放完整已验证图并投影分支；保留原分页 SQL 和 cursor |
@@ -218,16 +218,18 @@ func ValidCoverageSummaryV16(summary coveragev16.CoverageSummaryV16) bool {
 
 `detailMetric` 用 `wire.coveredDelta === null ? null : safeInteger(...)`；`detailSummary` 返回前调用共享 `validateCoverageSummaryV16`，失败抛出 `detail comparison state is inconsistent`。通过 `ProtocolClient` 的真实 response validation/decode 路径测试所有三种 summary-bearing response；不只测 helper。
 
-- [ ] **Step 4: 写并复现真实 SQLite→session 红测。** 新建 `taskstore/coverage_detail_session_test.go`，package `taskstore`，复用现有 `openTestStore(t)` 和 `attestedDetailFixture(t, store, 7401)`。fixture 经真实 `CreateCoverageTask`/`Apply`/`PutCoverageDetail` 持久化，返回 canonical 32 位 IDs；不复制 coverage 完成生命周期，不插入假的 baseline。
+- [ ] **Step 4: 写并复现真实 SQLite→session 红测。** 新建 `taskstore/coverage_detail_session_test.go`，package `taskstore_test`。2026-10-08 用户确认调整：原定同包测试会形成 `taskstore → session → build → taskstore` 循环依赖；仅调整测试布局，不修改生产依赖或产品接口。
+
+新建 `coverage_detail_export_test.go`，package `taskstore`，仅在测试编译时导出两个薄包装：`OpenCoverageDetailTestStore(t *testing.T) *Store` 调用现有 `openTestStore(t)`；`AttestedCoverageDetailTestFixture(t *testing.T, store *Store, number int) coveragedetail.Index` 调用现有 `attestedDetailFixture(t,store,number)`。两个包装都调用 `t.Helper()`；不得新增生产测试 hook、复制 fixture 生命周期或添加可变全局状态。外部测试通过 `taskstore.OpenCoverageDetailTestStore(t)` 和 `taskstore.AttestedCoverageDetailTestFixture(t,store,7401)` 复用真实 fixture。fixture 经真实 `CreateCoverageTask`/`Apply`/`PutCoverageDetail` 持久化，返回 canonical 32 位 IDs；不插入假的 baseline。Task 3 的内部 store 测试仍直接使用现有私有 fixture，仅扩展这个外部通信测试时使用测试桥。
 
 测试桥只替代与读路由无关的 readiness：
 
 ```go
-type firstReportDetailReader struct{ *Store }
+type firstReportDetailReader struct{ *taskstore.Store }
 func (b firstReportDetailReader) CoverageDetailsReady() bool { return b.CoverageDetailReady() }
 type firstReportCoverageReader struct {
     session.CoverageBackend
-    store *Store
+    store *taskstore.Store
 }
 func (b firstReportCoverageReader) GetCoverageReport(ctx context.Context, id string) (coveragedomain.Report, error) {
     return b.store.GetCoverageReport(ctx, id)
@@ -249,7 +251,7 @@ func (firstReportReadiness) ManagedTestsReady() bool { return true }
 
 首先 handshake token `0123456789abcdef`、clientName `first-report-test`、clientVersion `0.1.0`、supportedProtocolVersions `["1.6"]`。然后调用 project/get、files/list、functions/list：必须成功且 summary 当前值与 index 一致、三个 coveredDelta 属性都存在且为 null。第一轮旧路由预期返回 SERVICE_UNHEALTHY，证明测试达到了故障边界。
 
-再写入第二份 `attestedDetailFixture(t,store,7402)` 并读取，仍必须全 null；不能由报告数量推导基线。保留 noBaseline 单测，但将断言改为上述成功语义；另加一个仅带字符串 BaselineReportID 的替身也输出 null，证明内存字符串不能成为来源。
+再写入第二份 `taskstore.AttestedCoverageDetailTestFixture(t,store,7402)` 并读取，仍必须全 null；不能由报告数量推导基线。保留 noBaseline 单测，但将断言改为上述成功语义；另加一个仅带字符串 BaselineReportID 的替身也输出 null，证明内存字符串不能成为来源。
 
 - [ ] **Step 5: 解耦 session 汇总读取。**
 
@@ -299,6 +301,7 @@ git commit -m "fix: expose first-report coverage with unavailable comparison"
 ```
 
 若其他既有 v1.6 测试需要 pointer literal，同一提交显式加入这些已核对文件，不使用 `git add -A`。
+同一提交显式加入仅测试桥 `apps/test-service/internal/taskstore/coverage_detail_export_test.go` 及本计划已确认的布局调整，保留决策记录。
 
 ### Task 3: 从同一已验证快照投影真实当前行/分支
 

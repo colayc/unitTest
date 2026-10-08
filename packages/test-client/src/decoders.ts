@@ -76,7 +76,7 @@ import {
 } from "@unit-test-ide/protocol-models";
 import { CoverageDetailReasonV16 as DetailReasonV16, CoverageDetailStatusV16 as DetailStatusV16,
   FrameworkAdapterIDV16,
-  ManagedTestStatusV16 } from "@unit-test-ide/protocol-models";
+  ManagedTestStatusV16, validateCoverageSummaryV16 } from "@unit-test-ide/protocol-models";
 import type { ProtocolTaskEvent } from "./envelopes.js";
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -202,18 +202,20 @@ function detailMetric(value: unknown, name: string): CoverageSummaryV16["lines"]
   const wire = record(value, name);
   const covered = safeInteger(wire.covered, `${name} covered`);
   const total = safeInteger(wire.total, `${name} total`);
-  const coveredDelta = safeInteger(wire.coveredDelta, `${name} coveredDelta`);
+  const coveredDelta = wire.coveredDelta === null ? null : safeInteger(wire.coveredDelta, `${name} coveredDelta`);
   if (covered < 0 || total < 0 || covered > total) throw new Error(`${name} covered exceeds total`);
   return { covered, total, coveredDelta };
 }
 
 function detailSummary(value: unknown): CoverageSummaryV16 {
   const wire = record(value, "detail summary");
-  return {
+  const summary = {
     lines: detailMetric(wire.lines, "detail lines"),
     branches: detailMetric(wire.branches, "detail branches"),
     functions: detailMetric(wire.functions, "detail functions")
   };
+  if (!validateCoverageSummaryV16(summary)) throw new Error("detail comparison state is inconsistent");
+  return summary;
 }
 
 function uniqueItems<T>(items: T[], key: (item: T) => string, name: string): T[] {

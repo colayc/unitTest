@@ -71,7 +71,7 @@ export interface CoverageSummaryV16 {
 
 export interface CoverageMetricV16 {
     covered:      number;
-    coveredDelta: number;
+    coveredDelta: number | null;
     total:        number;
 }
 

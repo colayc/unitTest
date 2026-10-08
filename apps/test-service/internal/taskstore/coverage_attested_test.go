@@ -15,7 +15,7 @@ import (
 
 func attestedDetailFixture(t *testing.T, s *Store, number int) coveragedetail.Index {
 	t.Helper()
-	index := detailStoreFixture(t, s, number)
+	index := detailStoreFixtureWithPrefix(t, s, number, fmt.Sprintf("attested-%d/", number))
 	fn := &index.Files[0].Functions[0]
 	oldID := fn.ID
 	semantic := fmt.Sprintf("linkage:%d:%s:signature:", len(fn.LinkageName), fn.LinkageName)

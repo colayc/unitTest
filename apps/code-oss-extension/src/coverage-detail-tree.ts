@@ -2,7 +2,7 @@ import type { CoverageFileV16, CoverageFunctionV16, CoverageMetricV16, CoverageP
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 
 export type CoverageFilter = "all" | "uncovered" | "regressed" | "incomplete";
-export interface MetricLabel { readonly covered: number; readonly total: number; readonly percent: number; readonly coveredDelta: number }
+export interface MetricLabel { readonly covered: number; readonly total: number; readonly percent: number | null; readonly coveredDelta: number | null }
 export interface CoverageTreeNode {
   readonly kind: "project" | "file" | "function" | "load-more";
   readonly id: string;
@@ -27,7 +27,7 @@ const PAGE_LIMIT = 100;
 const MAX_LABEL_LENGTH = 256;
 
 function metric(value: CoverageMetricV16): MetricLabel {
-  return { covered: value.covered, total: value.total, percent: value.total === 0 ? 100 : Math.round(100 * value.covered / value.total), coveredDelta: value.coveredDelta };
+  return { covered: value.covered, total: value.total, percent: value.total === 0 ? null : Math.round(100 * value.covered / value.total), coveredDelta: value.coveredDelta };
 }
 
 function metrics(value: CoverageProjectV16["summary"]): CoverageTreeNode["metrics"] {
@@ -37,7 +37,9 @@ function metrics(value: CoverageProjectV16["summary"]): CoverageTreeNode["metric
 function label(name: string, value: CoverageProjectV16["summary"], status: CoverageTreeNode["status"]): string {
   const parts = (["functions", "lines", "branches"] as const).map((key) => {
     const item = metric(value[key]);
-    return `${key} ${item.covered}/${item.total} (${item.percent}%, ${item.coveredDelta >= 0 ? "+" : ""}${item.coveredDelta})`;
+    const comparison = item.coveredDelta === null ? "不可比较" : `${item.coveredDelta >= 0 ? "+" : ""}${item.coveredDelta}`;
+    const ratio = item.percent === null ? "不适用" : `${item.percent}%`;
+    return `${key} ${item.covered}/${item.total} (${ratio}, ${comparison})`;
   });
   const suffix = ` [${status}] · ${parts.join(" · ")}`;
   return `${name.slice(0, Math.max(0, MAX_LABEL_LENGTH - suffix.length))}${suffix}`.slice(0, MAX_LABEL_LENGTH);
@@ -47,7 +49,7 @@ function matches(node: CoverageTreeNode, filter: CoverageFilter): boolean {
   if (filter === "all" || node.kind === "load-more") return true;
   if (filter === "incomplete") return node.status === "incomplete";
   const items = Object.values(node.metrics);
-  return filter === "uncovered" ? items.some((item) => item.covered < item.total) : items.some((item) => item.coveredDelta < 0);
+  return filter === "uncovered" ? items.some((item) => item.covered < item.total) : items.some((item) => item.coveredDelta !== null && item.coveredDelta < 0);
 }
 
 type PageState = { items: CoverageTreeNode[]; nextCursor?: string; seen: Set<string>; loaded: boolean };

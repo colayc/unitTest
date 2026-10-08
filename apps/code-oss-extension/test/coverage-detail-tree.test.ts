@@ -9,6 +9,42 @@ const project: CoverageProjectV16 = { coverageReportId: "report", projectId: "pr
 const file: CoverageFileV16 = { fileId: "f".repeat(32), relativePath: "src/math.cpp", sourceSha256: "a".repeat(64), functionCount: 1, status: CoverageDetailStatusV16.Incomplete, reasons: [CoverageDetailReasonV16.AttributionAmbiguous], summary };
 const fn: CoverageFunctionV16 = { functionId: "b".repeat(32), fileId: file.fileId, qualifiedName: "math::add", startLine: 3, endLine: 8, status: CoverageDetailStatusV16.Current, reasons: [], summary };
 
+test("first-report current tree expands with unavailable comparison and zero-denominator labels", async () => {
+  const firstSummary = {
+    functions: { covered: 1, total: 2, coveredDelta: null },
+    lines: { covered: 3, total: 4, coveredDelta: null },
+    branches: { covered: 0, total: 0, coveredDelta: null }
+  };
+  const currentFile = { ...file, status: CoverageDetailStatusV16.Current, reasons: [], summary: firstSummary };
+  const client = {
+    getCapabilities: async () => ({ coverageDetails: true, maxCoverageDetailPageSize: 2, maxCoverageLinePageSize: 2 }),
+    getCoverageProject: async () => ({ ...project, summary: firstSummary }),
+    listCoverageFiles: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [currentFile] }),
+    listCoverageFunctions: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [{ ...fn, summary: firstSummary }] }),
+    listCoverageLines: async () => ({ coverageReportId: "report", workspaceGeneration: "workspace", items: [] })
+  };
+  const tree = new CoverageDetailTree(() => ({ client: client as unknown as ExtensionProtocolClient, workspaceGeneration: "workspace", projectId: "project", reportId: "report" }));
+  assert.equal(await tree.refresh(), true);
+  const root = (await tree.children())[0]!;
+  const files = await tree.children(root);
+  assert.equal(files.length, 1);
+  tree.setFilter("regressed");
+  assert.equal((await tree.children(root)).length, 1, "unloaded functions remain navigable, not marked as regressed");
+  tree.setFilter("all");
+  const functions = await tree.children(files[0]);
+  assert.equal(functions.length, 1);
+  for (const node of [root, files[0]!, functions[0]!]) {
+    assert.match(node.label, /functions 1\/2 \(50%, 不可比较\)/);
+    assert.match(node.label, /branches 0\/0 \(不适用, 不可比较\)/);
+    assert.doesNotMatch(node.label, /\+0|null%|NaN|Infinity/);
+    assert.equal(node.metrics.branches.percent, null);
+    assert.equal(node.metrics.lines.coveredDelta, null);
+  }
+  tree.setFilter("regressed");
+  assert.deepEqual(await tree.children(root), []);
+  assert.deepEqual(await tree.children(files[0]), []);
+});
+
 test("tree expands lazily, labels metrics, filters and paginates", async () => {
   const calls: string[] = [];
   const client = {

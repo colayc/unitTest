@@ -8,14 +8,16 @@ import coveragev16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6
 func ValidCoverageMetricV16(metric coveragev16.CoverageMetricV16) bool {
 	return validNonnegativeSafeInteger(metric.Covered) &&
 		validNonnegativeSafeInteger(metric.Total) &&
-		validSafeInteger(metric.CoveredDelta) &&
+		(metric.CoveredDelta == nil || validSafeInteger(*metric.CoveredDelta)) &&
 		metric.Covered <= metric.Total
 }
 
 func ValidCoverageSummaryV16(summary coveragev16.CoverageSummaryV16) bool {
 	return ValidCoverageMetricV16(summary.Functions) &&
 		ValidCoverageMetricV16(summary.Lines) &&
-		ValidCoverageMetricV16(summary.Branches)
+		ValidCoverageMetricV16(summary.Branches) &&
+		(summary.Functions.CoveredDelta == nil) == (summary.Lines.CoveredDelta == nil) &&
+		(summary.Functions.CoveredDelta == nil) == (summary.Branches.CoveredDelta == nil)
 }
 
 func validNonnegativeSafeInteger(value int64) bool {

@@ -59,9 +59,9 @@ type CoverageSummaryV16 struct {
 }
 
 type CoverageMetricV16 struct {
-	Covered      int64 `json:"covered"`
-	CoveredDelta int64 `json:"coveredDelta"`
-	Total        int64 `json:"total"`
+	Covered      int64  `json:"covered"`
+	CoveredDelta *int64 `json:"coveredDelta"`
+	Total        int64  `json:"total"`
 }
 
 type CoverageDetailProjectRequestV16 struct {

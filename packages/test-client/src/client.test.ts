@@ -467,6 +467,52 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
   fixture.client.close();
 });
 
+test("protocol 1.6 summary routes decode required null comparisons and reject mixed states", async () => {
+  const nullSummary = {
+    functions: { covered: 2, total: 4, coveredDelta: null },
+    lines: { covered: 2, total: 4, coveredDelta: null },
+    branches: { covered: 0, total: 0, coveredDelta: null }
+  };
+  for (const method of ["coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list"]) {
+    for (const comparison of ["null", "number", "mixed", "missing", "undefined", "string", "fraction", "unsafe", "overcovered"] as const) {
+      const summary = structuredClone(nullSummary) as JsonObject;
+      if (comparison === "number") for (const key of ["functions", "lines", "branches"]) (summary[key] as JsonObject).coveredDelta = -1;
+      const lines = summary.lines as JsonObject;
+      if (comparison === "mixed") lines.coveredDelta = 0;
+      if (comparison === "missing") delete lines.coveredDelta;
+      // JSON transports omit undefined, which must not be interpreted as null.
+      if (comparison === "undefined") Object.assign(lines, { coveredDelta: undefined });
+      if (comparison === "string") lines.coveredDelta = "0";
+      if (comparison === "fraction") lines.coveredDelta = 0.5;
+      if (comparison === "unsafe") lines.coveredDelta = Number.MAX_SAFE_INTEGER + 1;
+      if (comparison === "overcovered") lines.covered = 5;
+      const entity = { status: "current", reasons: [], summary };
+      const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID };
+      const payload = method === "coverage/details/project/get" ? { ...context, ...entity, projectId: "core", fileCount: 1 }
+        : method === "coverage/details/files/list" ? { ...context, items: [{ ...entity, fileId: FILE_ID, relativePath: "src/a.cpp", sourceSha256: "a".repeat(64), functionCount: 1 }] }
+        : { ...context, items: [{ ...entity, fileId: FILE_ID, functionId: FUNCTION_ID, qualifiedName: "core::add", startLine: 3, endLine: 6 }] };
+      const fixture = scriptedClient((request) => request.method === "handshake"
+        ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+        : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+        : response(request, payload, "1.6"));
+      try {
+        await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+        const call = async () => method === "coverage/details/project/get"
+          ? (await fixture.client.getCoverageProject({ ...context, projectId: "core" })).summary
+          : method === "coverage/details/files/list"
+            ? (await fixture.client.listCoverageFiles({ ...context, projectId: "core" })).items[0]!.summary
+            : (await fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })).items[0]!.summary;
+        if (comparison === "null" || comparison === "number") {
+          const decoded = await call().catch((error: Error) => { throw new Error(`${method}/${comparison}: ${error.message.slice(0, 1200)}`); });
+          assert.equal(decoded.lines.coveredDelta, comparison === "null" ? null : -1);
+          assert.equal(decoded.lines.covered, 2);
+          assert.equal(decoded.lines.total, 4);
+        } else await assert.rejects(call, comparison === "mixed" ? /detail comparison state is inconsistent/ : /invalid|integer|total/i);
+      } finally { fixture.client.close(); }
+    }
+  }
+});
+
 test("protocol 1.6 keeps pre-existing coverage and generation queries callable", async () => {
   const fixture = scriptedClient((request) => request.method === "handshake"
     ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")

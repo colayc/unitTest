@@ -85,6 +85,19 @@ test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", a
   }
 });
 
+test("protocol 1.6 detail metrics require nullable comparison without relaxing counts", async () => {
+  const { ajv } = await compileV16();
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const validate = ajv.compile({ ...coverage.$defs.detailMetric, $defs: coverage.$defs });
+  const metric = { covered: 2, total: 4, coveredDelta: null };
+  assert.equal(validate(metric), true, JSON.stringify(validate.errors));
+  for (const invalid of [
+    { covered: 2, total: 4 }, { ...metric, coveredDelta: "0" },
+    { ...metric, coveredDelta: 0.5 }, { ...metric, coveredDelta: Number.MAX_SAFE_INTEGER + 1 },
+    { ...metric, coveredDelta: -Number.MAX_SAFE_INTEGER - 1 }, { ...metric, unknown: true }
+  ]) assert.equal(validate(invalid), false, JSON.stringify(invalid));
+});
+
 test("protocol 1.6 closes detail status, reasons, managed states, and digest-bound review choices", async () => {
   const { ajv, message } = await compileV16();
   const coverage = await load("../schema/v1.6/coverage.schema.json");
