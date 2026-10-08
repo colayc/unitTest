@@ -30,6 +30,7 @@ type cmakeArgument struct {
 	value   string
 	quoted  bool
 	escaped bool
+	bracket bool
 }
 
 type cmakeInvocation struct {
@@ -203,8 +204,17 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 }
 
 func (validator *cmakeLaunchValidator) validateFileContext(path string, context cmakeDirectoryContext) error {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) || !cmakeLaunchPathWithinRoots(path, validator.allowedRoots) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	canonical, err := canonicalCMakeLaunchPath(path)
-	if err != nil || !cmakeLaunchPathWithinRoots(canonical, validator.allowedRoots) {
+	if err != nil || cmakeLaunchPathKey(canonical) != cmakeLaunchPathKey(path) ||
+		!cmakeLaunchPathWithinRoots(canonical, validator.allowedRoots) {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	key := cmakeLaunchPathKey(canonical)
@@ -221,7 +231,9 @@ func (validator *cmakeLaunchValidator) validateFileContext(path string, context 
 	validator.visited[key] = context
 	validator.active[key] = true
 	defer delete(validator.active, key)
-	content, snapshotErr := validator.snapshotInput(canonical)
+	// Capture the requested direct path, not an alias target that CMake may
+	// cease to consume if the alias is retargeted after validation.
+	content, snapshotErr := validator.snapshotInput(path)
 	if snapshotErr != nil {
 		return snapshotErr
 	}
@@ -979,6 +991,9 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 		if len(invocation.arguments) != 2 {
 			return errInvalidCMakeLaunchDeclaration
 		}
+		if !supportedDeclarativePathSyntax(invocation.arguments[1]) {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		return validator.validateScriptLoaderContext(invocation.arguments[0].value, invocation.arguments[1].value, context)
 	}
 	if !isCompilerLauncherProperty(invocation.arguments[0].value) {
@@ -1471,7 +1486,7 @@ func (parser *cmakeParser) readArguments() ([]cmakeArgument, error) {
 			if value, ok, err := parser.readBracketArgument(); err != nil {
 				return nil, err
 			} else if ok {
-				result = append(result, cmakeArgument{value: value})
+				result = append(result, cmakeArgument{value: value, bracket: true})
 			} else {
 				start := parser.offset
 				value, err := parser.readUnquotedArgument()

@@ -1,6 +1,8 @@
 package build
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,148 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
 )
+
+func TestPlannerWindowsDeclarativeLiteralVariablePaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows production launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, syntax := range []struct{ name, pattern string }{
+		{"escaped dollar", `\%s`},
+		{"quoted escaped dollar", `"\%s"`},
+		{"bracket", `[[%s]]`},
+		{"equals bracket", `[=[%s]=]`},
+	} {
+		for _, consumer := range []struct{ name, command, value string }{
+			{"executable source", "add_executable(check %s)", "${CMAKE_CURRENT_SOURCE_DIR}/extra.cpp"},
+			{"library source", "add_library(check STATIC %s)", "${CMAKE_CURRENT_SOURCE_DIR}/extra.cpp"},
+			{"target source", "target_sources(core PRIVATE %s)", "${CMAKE_CURRENT_SOURCE_DIR}/extra.cpp"},
+			{"include directory", "target_include_directories(core PRIVATE %s)", "${CMAKE_CURRENT_SOURCE_DIR}/include"},
+			{"include file", "include(%s)", "${CMAKE_CURRENT_SOURCE_DIR}/sdk/empty.cmake"},
+			{"subdirectory source", "add_subdirectory(%s)", "${CMAKE_CURRENT_SOURCE_DIR}/child"},
+			{"subdirectory explicit source", "add_subdirectory(%s child-output)", "${CMAKE_CURRENT_SOURCE_DIR}/child"},
+			{"subdirectory binary", "add_subdirectory(child %s)", "${CMAKE_CURRENT_BINARY_DIR}/child-output"},
+			{"set script loader", "set(CMAKE_PROJECT_INCLUDE %s)", "${CMAKE_CURRENT_SOURCE_DIR}/sdk/empty.cmake"},
+			{"list script loader", "list(APPEND CMAKE_PROJECT_INCLUDE %s)", "${CMAKE_CURRENT_SOURCE_DIR}/sdk/empty.cmake"},
+		} {
+			t.Run(syntax.name+"/"+consumer.name, func(t *testing.T) {
+				fixture := newPlannerFixture(t)
+				command := fmt.Sprintf(consumer.command, fmt.Sprintf(syntax.pattern, consumer.value))
+				writeDeclarativeFixture(t, fixture, map[string]string{
+					"CMakeLists.txt": "add_library(core STATIC main.cpp)\n" + command + "\n",
+					"extra.cpp":      "int extra() { return 1; }\n", "include/value.h": "#define VALUE 1\n",
+					"sdk/empty.cmake": "message(empty)\n", "child/CMakeLists.txt": "message(child)\n",
+				})
+				if _, err := planDeclarativeFixture(fixture); !errors.Is(err, task.ErrInvalidArgument) {
+					t.Fatalf("literal variable path accepted for %s: %v", command, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPlannerWindowsDeclarativeSupportedPathSyntax(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows production launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	writeDeclarativeFixture(t, fixture, map[string]string{
+		"CMakeLists.txt": `add_library(core STATIC [[main.cpp]])
+target_sources(core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/extra.cpp")
+target_include_directories(core PUBLIC [[include]])
+include("${CMAKE_CURRENT_SOURCE_DIR}/sdk/empty.cmake")
+add_subdirectory([[child]] "${CMAKE_CURRENT_BINARY_DIR}/child-output")
+`,
+		"extra.cpp": "int extra() { return 1; }\n", "include/value.h": "#define VALUE 1\n",
+		"sdk/empty.cmake": "message(empty)\n", "child/CMakeLists.txt": "message(child)\n",
+	})
+	if _, err := planDeclarativeFixture(fixture); err != nil {
+		t.Fatalf("supported literal/quoted paths rejected: %v", err)
+	}
+}
+
+func TestPlannerWindowsDeclarativeChildCMakeAliasRetarget(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows production launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	writeDeclarativeFixture(t, fixture, map[string]string{
+		"CMakeLists.txt":     "add_subdirectory(child)\n",
+		"child/first.cmake":  "message(first)\n",
+		"child/second.cmake": "message(second)\n",
+	})
+	alias := filepath.Join(fixture.sourceDir, "child", "CMakeLists.txt")
+	if err := os.Symlink(filepath.Join(fixture.sourceDir, "child", "first.cmake"), alias); err != nil {
+		t.Fatal(err)
+	}
+	plan, firstErr := planDeclarativeFixture(fixture)
+	if !errors.Is(firstErr, task.ErrInvalidArgument) {
+		t.Errorf("child CMakeLists alias accepted: %v", firstErr)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fixture.sourceDir, "child", "second.cmake"), alias); err != nil {
+		t.Fatal(err)
+	}
+	// Before the fix the evidence names first.cmake, whose identity and digest
+	// remain valid even after CMakeLists.txt points at different declarations.
+	if firstErr == nil {
+		for _, input := range plan.Steps[0].Process.LaunchInputs {
+			if filepath.Base(filepath.FromSlash(input.Path)) == "first.cmake" {
+				if err := cmake.VerifyLaunchInput(input, maxCMakeLaunchFileBytes); err != nil {
+					t.Fatal(err)
+				}
+				t.Log("retargeted alias left the captured target evidence unchanged")
+			}
+		}
+	}
+	if _, err := planDeclarativeFixture(fixture); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Errorf("retargeted child CMakeLists alias accepted: %v", err)
+	}
+}
+
+func TestPlannerWindowsDeclarativeChildCMakeReplacement(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows production launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	writeDeclarativeFixture(t, fixture, map[string]string{
+		"CMakeLists.txt":       "add_subdirectory(child)\n",
+		"child/CMakeLists.txt": "message(first)\n",
+		"child/second.cmake":   "message(second)\n",
+	})
+	plan, err := planDeclarativeFixture(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(fixture.sourceDir, "child", "CMakeLists.txt")
+	index := slices.IndexFunc(plan.Steps[0].Process.LaunchInputs, func(input cmake.FingerprintFile) bool {
+		return cmakeLaunchPathKey(filepath.FromSlash(input.Path)) == cmakeLaunchPathKey(child)
+	})
+	if index < 0 {
+		t.Fatal("direct child CMakeLists.txt not captured")
+	}
+	state := plan.Steps[0].Process.LaunchInputs[index]
+	if err := cmake.VerifyLaunchInput(state, maxCMakeLaunchFileBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fixture.sourceDir, "child", "second.cmake"), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmake.VerifyLaunchInput(state, maxCMakeLaunchFileBytes); err == nil {
+		t.Fatal("child replaced with alias accepted by snapshot verification")
+	}
+	if _, err := planDeclarativeFixture(fixture); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Errorf("child replaced with alias accepted by Plan: %v", err)
+	}
+}
 
 func writeDeclarativeFixture(t *testing.T, fixture plannerFixture, files map[string]string) {
 	t.Helper()

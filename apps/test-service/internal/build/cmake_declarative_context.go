@@ -29,6 +29,19 @@ func isDeclarativeDirectoryVariable(value string) bool {
 	return false
 }
 
+func supportedDeclarativePathSyntax(argument cmakeArgument) bool {
+	// The closed path grammar does not interpret escape sequences. Bracket
+	// arguments are literal, so their dollar syntax must never be expanded.
+	return !argument.escaped && !(argument.bracket && strings.Contains(argument.value, "$"))
+}
+
+func (validator *cmakeLaunchValidator) resolveDeclarativeArgument(argument cmakeArgument, context cmakeDirectoryContext) (string, error) {
+	if !supportedDeclarativePathSyntax(argument) {
+		return "", errInvalidCMakeLaunchDeclaration
+	}
+	return validator.resolveDeclarativePath(argument.value, context)
+}
+
 // Only one exact, leading directory variable is expanded. Everything following
 // it is a literal path; no CMake evaluation or environment lookup is performed.
 func (validator *cmakeLaunchValidator) resolveDeclarativePath(value string, context cmakeDirectoryContext) (string, error) {
@@ -92,7 +105,7 @@ func (validator *cmakeLaunchValidator) validateInclude(invocation cmakeInvocatio
 	if len(invocation.arguments) != 1 {
 		return errInvalidCMakeLaunchDeclaration
 	}
-	path, err := validator.resolveDeclarativePath(invocation.arguments[0].value, context)
+	path, err := validator.resolveDeclarativeArgument(invocation.arguments[0], context)
 	if err != nil || !strings.EqualFold(filepath.Ext(path), ".cmake") {
 		return errInvalidCMakeLaunchDeclaration
 	}
@@ -115,26 +128,26 @@ func (validator *cmakeLaunchValidator) validateSubdirectory(invocation cmakeInvo
 			return errInvalidCMakeLaunchDeclaration
 		}
 	}
-	source, err := validator.resolveDeclarativePath(args[0].value, context)
+	source, err := validator.resolveDeclarativeArgument(args[0], context)
 	if err != nil {
 		return err
 	}
 	child := context
 	child.SourceDir, child.ListDir = source, source
-	binaryValue := args[0].value
+	var binaryArgument cmakeArgument
 	if len(args) == 2 {
-		binaryValue = args[1].value
+		binaryArgument = args[1]
 	} else {
 		// For a source within this directory, CMake derives the same relative
 		// child output even when the source was specified with an absolute base.
-		binaryValue, err = filepath.Rel(context.SourceDir, source)
+		binaryArgument.value, err = filepath.Rel(context.SourceDir, source)
 		if err != nil || !cmakeLaunchPathWithinRoots(source, []string{context.SourceDir}) {
 			return errInvalidCMakeLaunchDeclaration
 		}
 	}
 	binaryContext := context
 	binaryContext.SourceDir = context.BinaryDir
-	child.BinaryDir, err = validator.resolveDeclarativePath(binaryValue, binaryContext)
+	child.BinaryDir, err = validator.resolveDeclarativeArgument(binaryArgument, binaryContext)
 	if err != nil || !cmakeLaunchPathWithinRoots(child.BinaryDir, []string{context.BinaryRoot}) {
 		return errInvalidCMakeLaunchDeclaration
 	}
@@ -162,6 +175,9 @@ func (validator *cmakeLaunchValidator) validateScriptLoaderContext(variable, val
 
 func (validator *cmakeLaunchValidator) validateListScriptContext(variable string, values []cmakeArgument, context cmakeDirectoryContext) error {
 	for _, value := range values {
+		if !supportedDeclarativePathSyntax(value) {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		if err := validator.validateScriptLoaderContext(variable, value.value, context); err != nil {
 			return err
 		}

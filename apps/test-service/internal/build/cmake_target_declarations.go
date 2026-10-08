@@ -60,7 +60,7 @@ func (validator *cmakeLaunchValidator) validateTargetIncludes(invocation cmakeIn
 	}
 	for _, scope := range scopes {
 		for _, argument := range scope.Values {
-			path, err := validator.resolveDeclarativePath(argument.value, context)
+			path, err := validator.resolveDeclarativeArgument(argument, context)
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func (validator *cmakeLaunchValidator) validateTargetSources(invocation cmakeInv
 	}
 	for _, scope := range scopes {
 		for _, argument := range scope.Values {
-			if err := validator.validateSourceInput(argument.value, context); err != nil {
+			if err := validator.validateSourceInput(argument, context); err != nil {
 				return err
 			}
 		}
@@ -108,19 +108,19 @@ func (validator *cmakeLaunchValidator) validateDeclarationSources(invocation cma
 		return errInvalidCMakeLaunchDeclaration
 	}
 	for _, argument := range invocation.arguments[start:] {
-		if err := validator.validateSourceInput(argument.value, context); err != nil {
+		if err := validator.validateSourceInput(argument, context); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (validator *cmakeLaunchValidator) validateSourceInput(value string, context cmakeDirectoryContext) error {
-	switch value {
+func (validator *cmakeLaunchValidator) validateSourceInput(argument cmakeArgument, context cmakeDirectoryContext) error {
+	switch argument.value {
 	case "IMPORTED", "ALIAS", "FILE_SET", "HEADERS", "BASE_DIRS", "FILES", "GLOB", "GLOB_RECURSE", "WIN32", "MACOSX_BUNDLE", "EXCLUDE_FROM_ALL":
 		return errInvalidCMakeLaunchDeclaration
 	}
-	path, err := validator.resolveDeclarativePath(value, context)
+	path, err := validator.resolveDeclarativeArgument(argument, context)
 	if err != nil {
 		return err
 	}
