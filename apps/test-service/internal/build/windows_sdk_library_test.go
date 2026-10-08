@@ -208,7 +208,7 @@ func TestWindowsSDKLibraryLimitsAndLease(t *testing.T) {
 	}
 }
 
-func TestWindowsSDKLibraryRejectsRootReplacementAndAliases(t *testing.T) {
+func TestWindowsSDKLibraryRejectsRootReplacement(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows SDK authority")
 	}
@@ -230,24 +230,36 @@ func TestWindowsSDKLibraryRejectsRootReplacementAndAliases(t *testing.T) {
 	if verifyWindowsWinMMLibrary(binding) == nil {
 		t.Fatal("same bytes under replaced SDK root accepted")
 	}
+}
+
+func TestWindowsSDKLibraryRejectsDirectoryAlias(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SDK authority")
+	}
+	i, _ := windowsSDKFixture(t)
 	alias := filepath.Join(filepath.Dir(i.Sysroot), "alias")
 	if err := os.Symlink(i.Sysroot, alias); err != nil {
-		t.Logf("directory symlink unavailable: %v", err)
-		return
+		t.Fatalf("required SDK directory alias fixture: %v", err)
 	}
 	i.Sysroot = alias
 	i.Environment = []string{"WINDOWSSDKDIR=" + alias, "WINDOWSSDKVERSION=10.0.26100.0\\"}
 	if _, err := captureWindowsWinMMLibrary(i); err == nil {
 		t.Fatal("SDK directory alias accepted")
 	}
+}
+
+func TestWindowsSDKLibraryRejectsFileAlias(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SDK authority")
+	}
+	i, path := windowsSDKFixture(t)
+	_, original := windowsSDKFixture(t)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(oldRoot, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib"), path); err != nil {
-		t.Fatal(err)
+	if err := os.Symlink(original, path); err != nil {
+		t.Fatalf("required SDK library alias fixture: %v", err)
 	}
-	i.Sysroot = binding.SDKRoot
-	i.Environment = []string{"WINDOWSSDKDIR=" + i.Sysroot, "WINDOWSSDKVERSION=10.0.26100.0\\"}
 	if _, err := captureWindowsWinMMLibrary(i); err == nil {
 		t.Fatal("SDK library alias accepted")
 	}

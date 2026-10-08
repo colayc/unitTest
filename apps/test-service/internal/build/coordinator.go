@@ -126,7 +126,13 @@ func (c *Coordinator) Targets(
 	if err != nil {
 		return nil, ErrConfigureRequired
 	}
-	toolchainIdentity := effectiveToolchainIdentity(profile, toolchain.Instance{}, reply)
+	if runtime.GOOS == "windows" && profile.Origin == "preset" {
+		instance, err = c.successfulPresetToolchain(snapshot, profile, reply, previous)
+		if err != nil {
+			return nil, ErrConfigureRequired
+		}
+	}
+	toolchainIdentity := effectiveToolchainIdentity(profile, instance, reply)
 	sourceDir, err := c.config.WorkspaceRoot.ResolveRelative(project.SourceDir)
 	if err != nil {
 		return nil, ErrConfigureRequired
@@ -145,6 +151,60 @@ func (c *Coordinator) Targets(
 		return nil, ErrConfigureRequired
 	}
 	return cloneTargets(reply.Targets), nil
+}
+
+// Successful configure fingerprints already authenticate the request-selected
+// identity and optional singleton SDK authority. Recover only a unique current
+// discovered candidate that reproduces that service-owned authority, before
+// preparing the declaration graph or inspecting its actual link evidence.
+func (c *Coordinator) successfulPresetToolchain(
+	snapshot discovery.Snapshot,
+	profile cmake.BuildProfile,
+	reply cmake.FileAPIReply,
+	previous taskstore.BuildConfiguration,
+) (toolchain.Instance, error) {
+	// Keep the existing Windows discovery instance budget (128), not an
+	// unbounded external search or a new public selection mechanism.
+	if len(snapshot.Toolchains) > 128 {
+		return toolchain.Instance{}, ErrConfigureRequired
+	}
+	candidates := snapshot.Toolchains
+	if profile.ToolchainID == "" {
+		// Preserve legitimately unselected preset semantics. A reserved SDK
+		// expression still fails closed during the shared declaration closure.
+		candidates = append([]toolchain.Instance{{}}, candidates...)
+	}
+	var selected toolchain.Instance
+	matches := 0
+	matchesBinding := func(candidate toolchain.Instance, binding *windowsLinkLibraryBinding) bool {
+		identity := effectiveToolchainIdentity(profile, candidate, reply)
+		current := fingerprintInput(snapshot.Generation, profile, c.config.Installation.Identity,
+			identity, reply, c.config.Installation.UnityRunnerGenerator.Identity, nil, binding)
+		return !cmake.NeedsConfigure(cmake.BuildConfiguration{Fingerprint: previous.Fingerprint, Succeeded: true}, current)
+	}
+	// Resolve non-SDK configurations without touching SDK metadata/files.
+	for _, candidate := range candidates {
+		if matchesBinding(candidate, nil) {
+			selected = candidate
+			matches++
+		}
+	}
+	if matches == 0 {
+		for _, candidate := range candidates {
+			if candidate.Family != toolchain.FamilyMSVC && candidate.Family != toolchain.FamilyClangCL {
+				continue
+			}
+			binding, err := captureWindowsWinMMLibrary(candidate)
+			if err == nil && matchesBinding(candidate, binding) {
+				selected = candidate
+				matches++
+			}
+		}
+	}
+	if matches != 1 {
+		return toolchain.Instance{}, ErrConfigureRequired
+	}
+	return selected, nil
 }
 
 func (c *Coordinator) Start(

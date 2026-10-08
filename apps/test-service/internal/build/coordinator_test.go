@@ -124,6 +124,121 @@ func TestWindowsSDKCoordinatorEvidenceBeforeSuccessAndReuse(t *testing.T) {
 	}
 }
 
+func TestWindowsSDKPresetTargetsRecoverSuccessfulSelectedAuthority(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows SDK authority")
+	}
+	fixture := newCoordinatorFixture(t)
+	selected, library := windowsSDKFixture(t)
+	fixture.toolchain.Family = selected.Family
+	fixture.toolchain.Sysroot = selected.Sysroot
+	fixture.toolchain.Environment = selected.Environment
+	fixture.toolchain.TargetArchitecture = selected.TargetArchitecture
+	other := fixture.toolchain
+	other.ID = "unselected-native"
+	otherSDK, _ := windowsSDKFixture(t)
+	other.Sysroot, other.Environment = otherSDK.Sysroot, otherSDK.Environment
+	fixture.snapshot.Toolchains = []toolchain.Instance{other, fixture.toolchain}
+	sourceDir := filepath.Join(fixture.root.NativePath, "project")
+	fixture.profile.Origin = "preset"
+	fixture.profile.ToolchainID = ""
+	fixture.profile.ConfigurePreset = "unit-test-ide-debug"
+	fixture.profile.BinaryDir = filepath.Join(sourceDir, "build")
+	fixture.snapshot.Profiles = []cmake.BuildProfile{fixture.profile}
+	fixture.request.ToolchainID = fixture.toolchain.ID
+	writePlannerPreset(t, sourceDir, fixture.profile.ConfigurePreset)
+	contents := "project(fixture LANGUAGES CXX)\nadd_library(core STATIC helper.cpp)\ntarget_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\nadd_executable(unit-tests main.cpp)\ntarget_link_libraries(unit-tests PRIVATE core)\n"
+	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.target.Type = "EXECUTABLE"
+	fixture.target.LinkFragments = []cmake.LinkCommandFragment{{Role: "libraries", Fragment: `"` + filepath.ToSlash(library) + `" kernel32.lib`}}
+	fixture.reader.reply = fixture.validReply()
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "selected-preset.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fixture.coordinator.config.Configurations = store
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.coordinator.Succeeded(context.Background(), task.Task{}, fixture.starter.request.Plan.Steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	// A new coordinator must recover from the persisted successful authority,
+	// not an in-process remembered selection or the link token's pathname.
+	fixture.coordinator, err = newCoordinator(fixture.coordinator.config, fixture.coordinator.dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := TargetsRequest{WorkspaceGeneration: fixture.snapshot.Generation, ProjectID: fixture.project.ID, BuildProfileID: fixture.profile.ID}
+	targets, err := fixture.coordinator.Targets(context.Background(), request)
+	if err != nil || len(targets) != 1 || targets[0].Name != "unit-tests" {
+		t.Fatalf("unchanged explicit-toolchain preset Targets = %#v, error = %v", targets, err)
+	}
+	excessCandidates := make([]toolchain.Instance, 129)
+	for index := range excessCandidates {
+		excessCandidates[index] = other
+		identity := sha256.Sum256([]byte{byte(index)})
+		excessCandidates[index].ID = hex.EncodeToString(identity[:])
+	}
+	excessCandidates[128] = fixture.toolchain
+	for _, test := range []struct {
+		name       string
+		candidates []toolchain.Instance
+	}{
+		{"selected-instance-missing", []toolchain.Instance{other}},
+		{"ambiguous-selected-instance", []toolchain.Instance{fixture.toolchain, fixture.toolchain}},
+		{"different-sdk-same-id", []toolchain.Instance{{ID: fixture.toolchain.ID, Family: other.Family, CCompiler: other.CCompiler, CXXCompiler: other.CXXCompiler, Sysroot: other.Sysroot, Environment: other.Environment, TargetArchitecture: other.TargetArchitecture}}},
+		{"only-unmatched-identities", []toolchain.Instance{other, {ID: "another-unselected", Family: other.Family, CCompiler: other.CCompiler, CXXCompiler: other.CXXCompiler, Sysroot: selected.Sysroot, Environment: selected.Environment, TargetArchitecture: selected.TargetArchitecture}}},
+		{"existing-discovery-budget", excessCandidates},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture.snapshot.Toolchains = test.candidates
+			if _, err := fixture.coordinator.Targets(context.Background(), request); !errors.Is(err, ErrConfigureRequired) {
+				t.Fatalf("unrecoverable selected authority error = %v, want configure required", err)
+			}
+		})
+	}
+	fixture.snapshot.Toolchains = []toolchain.Instance{other, fixture.toolchain}
+	withoutSDK := strings.Replace(contents, "target_link_libraries(core PUBLIC \"${UNIT_TEST_IDE_WINMM_LIBRARY}\")\n", "", 1)
+	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte(withoutSDK), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), request); !errors.Is(err, ErrConfigureRequired) {
+		t.Fatalf("changed declaration final fingerprint error = %v, want configure required", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), request); err != nil {
+		t.Fatalf("restored selected authority rejected: %v", err)
+	}
+	if err := os.WriteFile(library, []byte("mutated selected SDK library"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), request); !errors.Is(err, ErrConfigureRequired) {
+		t.Fatalf("changed library Targets error = %v, want configure required", err)
+	}
+	if err := os.WriteFile(library, []byte("fixture import library bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := selected.Sysroot + "-old"
+	if err := os.Rename(selected.Sysroot, oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(library), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(oldRoot, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib"), library); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.coordinator.Targets(context.Background(), request); !errors.Is(err, ErrConfigureRequired) {
+		t.Fatalf("changed SDK root Targets error = %v, want configure required", err)
+	}
+}
+
 func TestWindowsSDKFileAPIRootsPreserveOtherSysroots(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	sdk := t.TempDir()
@@ -144,6 +259,40 @@ func TestWindowsSDKFileAPIRootsPreserveOtherSysroots(t *testing.T) {
 				t.Fatalf("preset SDK/sysroot root policy changed: %#v", roots)
 			}
 		})
+	}
+}
+
+func TestCoordinatorPresetTargetsRecoverSelectedIdentityWithoutSDK(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows preset authority")
+	}
+	fixture := newCoordinatorFixture(t)
+	fixture.toolchain.Family = toolchain.FamilyClangCL
+	fixture.toolchain.Environment = nil
+	fixture.toolchain.Sysroot = ""
+	fixture.snapshot.Toolchains = []toolchain.Instance{fixture.toolchain}
+	sourceDir := filepath.Join(fixture.root.NativePath, "project")
+	fixture.profile.Origin = "preset"
+	fixture.profile.ToolchainID = ""
+	fixture.profile.ConfigurePreset = "unit-test-ide-debug"
+	fixture.profile.BinaryDir = filepath.Join(sourceDir, "build")
+	fixture.snapshot.Profiles = []cmake.BuildProfile{fixture.profile}
+	fixture.request.ToolchainID = fixture.toolchain.ID
+	writePlannerPreset(t, sourceDir, fixture.profile.ConfigurePreset)
+	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte("project(fixture LANGUAGES CXX)\nadd_executable(unit-tests main.cpp)\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.target.Type = "EXECUTABLE"
+	fixture.reader.reply = fixture.validReply()
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.coordinator.Succeeded(context.Background(), task.Task{}, fixture.starter.request.Plan.Steps[0]); err != nil {
+		t.Fatal(err)
+	}
+	request := TargetsRequest{WorkspaceGeneration: fixture.snapshot.Generation, ProjectID: fixture.project.ID, BuildProfileID: fixture.profile.ID}
+	if targets, err := fixture.coordinator.Targets(context.Background(), request); err != nil || len(targets) != 1 {
+		t.Fatalf("selected native preset without SDK dependency Targets = %#v, error = %v", targets, err)
 	}
 }
 
