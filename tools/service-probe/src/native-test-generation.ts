@@ -1,10 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join, posix, resolve, win32 } from "node:path";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join, posix, relative, resolve, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ProtocolError,
   TestSelectionModeV14,
+  type CoverageLineDetailV16,
+  type CoverageSummaryV16,
   type CoverageRun,
   type ProtocolClient,
   type WorkspaceSnapshot,
@@ -30,6 +32,69 @@ const operationTimeoutMs = 300_000;
 const pollIntervalMs = 100;
 const hex64 = /^[0-9a-f]{64}$/u;
 const hex32 = /^[0-9a-f]{32}$/u;
+const coverageLinePageLimit = 200;
+const maxAttestedPoints = 2_000_000;
+
+export async function readNativeCoverageLineEvidence(
+  client: Pick<ProtocolClient, "listCoverageLines">,
+  binding: NativeCoverageRefreshBinding,
+): Promise<{ file: readonly CoverageLineDetailV16[]; function: readonly CoverageLineDetailV16[] }> {
+  if (!hex64.test(binding.workspaceGeneration) ||
+      ![binding.coverageReportId, binding.fileId, binding.functionId].every((id) => hex32.test(id))) {
+    throw new Error("native coverage line binding is invalid");
+  }
+  const { workspaceGeneration, coverageReportId } = binding;
+  async function read(scope: { fileId: string } | { functionId: string }): Promise<CoverageLineDetailV16[]> {
+    const items: CoverageLineDetailV16[] = [];
+    const seenLines = new Set<number>();
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await client.listCoverageLines({
+        workspaceGeneration, coverageReportId, ...scope,
+        ...(cursor === undefined ? {} : { cursor }), limit: coverageLinePageLimit,
+      });
+      if (page.workspaceGeneration !== workspaceGeneration || page.coverageReportId !== coverageReportId) {
+        throw new Error("native coverage line page identity binding changed");
+      }
+      if (page.items.length === 0) throw new Error("native coverage line page is empty");
+      if (page.items.length > coverageLinePageLimit || items.length + page.items.length > maxAttestedPoints) {
+        throw new Error("native coverage line page or accumulated point budget exceeded");
+      }
+      for (const item of page.items) {
+        if (!Number.isSafeInteger(item.line) || item.line < 1 ||
+            ![item.count, item.branchesCovered, item.branchesTotal].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+            item.branchesCovered > item.branchesTotal) {
+          throw new Error("native coverage line current counts are invalid");
+        }
+        if (item.baselineCount !== null || item.baselineBranchesCovered !== null || item.baselineBranchesTotal !== null) {
+          throw new Error("native coverage line history must have an all-null baseline");
+        }
+        if (seenLines.has(item.line)) throw new Error("native coverage line page has duplicate lines");
+        seenLines.add(item.line);
+        items.push(item);
+      }
+      if (page.nextCursor === undefined) return items;
+      if (page.nextCursor.length === 0 || seenCursors.has(page.nextCursor)) {
+        throw new Error("native coverage line cursor is empty or cyclic");
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+  }
+  return { file: await read({ fileId: binding.fileId }), function: await read({ functionId: binding.functionId }) };
+}
+
+function assertNativeLineSummary(items: readonly CoverageLineDetailV16[], summary: CoverageSummaryV16): void {
+  const covered = items.filter((item) => item.count > 0).length;
+  const branchesCovered = items.reduce((total, item) => total + item.branchesCovered, 0);
+  const branchesTotal = items.reduce((total, item) => total + item.branchesTotal, 0);
+  if (!Number.isSafeInteger(branchesCovered) || !Number.isSafeInteger(branchesTotal) ||
+      summary.lines.covered !== covered || summary.lines.total !== items.length ||
+      summary.branches.covered !== branchesCovered || summary.branches.total !== branchesTotal) {
+    throw new Error("native coverage line evidence does not match its parent summary");
+  }
+}
 
 export function shouldPreserveNativeGenerationFailureWorkspace(): boolean {
   return process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1";
@@ -463,12 +528,26 @@ async function runCoverageCycle(
         limit: 200,
       });
       const target = selectNativeGenerationTarget(files, functions, relativePath);
-      return {
+      const binding = {
         workspaceGeneration: finished.workspaceGeneration,
         coverageReportId: reportId,
         ...target,
         profileId: rebound.profile.buildProfileId,
       };
+      const evidence = await readNativeCoverageLineEvidence(client, binding);
+      assertNativeLineSummary(evidence.file, exactFile.summary);
+      assertNativeLineSummary(evidence.function, functions.items.find((item) => item.functionId === target.functionId)!.summary);
+      for (const name of ["functions", "lines", "branches"] as const) {
+        const covered = files.items.reduce((total, file) => total + file.summary[name].covered, 0);
+        const total = files.items.reduce((total, file) => total + file.summary[name].total, 0);
+        if (!Number.isSafeInteger(covered) || !Number.isSafeInteger(total) ||
+            project.summary[name].covered !== covered || project.summary[name].total !== total ||
+            project.summary[name].coveredDelta !== null || files.items.some((file) => file.summary[name].coveredDelta !== null) ||
+            functions.items.some((fn) => fn.summary[name].coveredDelta !== null)) {
+          throw new Error("native coverage project/file/function summary evidence is inconsistent");
+        }
+      }
+      return binding;
     } catch (error) {
       if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt > 0) throw error;
     }
@@ -476,21 +555,59 @@ async function runCoverageCycle(
   throw new Error("native test-generation coverage cycle exhausted retries");
 }
 
-async function runFramework(
+export async function stageNativeGenerationWorkspace(
+  root: string,
+  platform: NativePlatform,
+  framework: Framework,
+  frameworkRoot: string,
+  workspaceRoot: string,
+): Promise<void> {
+  if (platform !== "linux" && platform !== "win32" || framework !== "cpputest" && framework !== "unity") {
+    throw new Error("native test-generation staging selection is invalid");
+  }
+  const fixtureRoot = join(root, "tools/service-probe/fixtures/test-generation", framework);
+  await mkdir(workspaceRoot); // only a newly created test workspace is writable
+  for (const entry of await readdir(fixtureRoot)) {
+    await cp(join(fixtureRoot, entry), join(workspaceRoot, entry), {
+      recursive: true, force: false, errorOnExist: true,
+      filter: (path) => {
+        const input = relative(fixtureRoot, path).split("\\").join("/");
+        return input !== "windows" && !input.startsWith("windows/") &&
+          (platform !== "win32" || input !== "CMakeLists.txt" && input !== "tests/CMakeLists.txt");
+      },
+    });
+  }
+  await mkdir(join(workspaceRoot, ".unit-test-ide/inputs"), { recursive: true });
+  await cp(frameworkRoot, join(workspaceRoot, ".unit-test-ide/inputs", framework), {
+    recursive: true, force: false, errorOnExist: true,
+  });
+  if (platform === "win32") {
+    const recipeModuleUrl = pathToFileURL(join(root, "tools/framework-bundle/framework-recipes.mjs")).href;
+    const recipes = await import(recipeModuleUrl) as {
+      copyFrameworkRecipeInputs(repositoryRoot: string, workspaceRoot: string): Promise<void>;
+    };
+    await recipes.copyFrameworkRecipeInputs(root, workspaceRoot);
+    for (const path of ["CMakeLists.txt", "tests/CMakeLists.txt"]) {
+      await cp(join(fixtureRoot, "windows", path), join(workspaceRoot, path), {
+        force: false, errorOnExist: true,
+      });
+    }
+  }
+}
+
+async function inspectNativeFirstCoverageReport<T>(
   root: string,
   platform: NativePlatform,
   framework: Framework,
   boundary: FrameworkBoundary,
   workRoot: string,
-): Promise<NativeManagedGenerationReceipt> {
+  inspect: (client: ProtocolClient, binding: NativeCoverageRefreshBinding) => Promise<T>,
+): Promise<T> {
   const workspaceRoot = join(workRoot, framework, "workspace");
   const serviceDirectory = join(workRoot, framework, "service");
   await mkdir(serviceDirectory, { recursive: true });
-  await cp(join(root, "tools/service-probe/fixtures/test-generation", framework), workspaceRoot, {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-  });
+  const frameworkRoot = framework === "cpputest" ? boundary.cpputestRoot : boundary.unityRoot;
+  await stageNativeGenerationWorkspace(root, platform, framework, frameworkRoot, workspaceRoot);
   const llvmBundleRoot = platform === "linux" ? process.env.UTIDE_NATIVE_LLVM_BUNDLE : undefined;
   const toolchain = llvmBundleRoot === undefined
     ? undefined
@@ -502,13 +619,6 @@ async function runFramework(
       "utf8",
     );
   }
-  const frameworkRoot = framework === "cpputest" ? boundary.cpputestRoot : boundary.unityRoot;
-  await mkdir(join(workspaceRoot, ".unit-test-ide/inputs"), { recursive: true });
-  await cp(frameworkRoot, join(workspaceRoot, ".unit-test-ide/inputs", framework), {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-  });
   const serviceBinary = join(root, "build", platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
   const fixture = await startService(serviceBinary, serviceDirectory, {
     workspaceRoot,
@@ -526,18 +636,7 @@ async function runFramework(
     const relativePath = framework === "cpputest" ? "src/classifier.cpp" : "src/classifier.c";
     try {
       const baseline = await runCoverageCycle(fixture.client, platform, relativePath);
-      return await executeNativeManagedGeneration({
-        client: fixture.client,
-        projectId,
-        workspaceGeneration: baseline.workspaceGeneration,
-        coverageReportId: baseline.coverageReportId,
-        fileId: baseline.fileId,
-        functionId: baseline.functionId,
-        framework,
-        maxPollAttempts: 600,
-        pollIntervalMs: 500,
-        refreshCoverage: async () => runCoverageCycle(fixture.client, platform, relativePath),
-      });
+      return await inspect(fixture.client, baseline);
     } catch (error) {
       if (process.env.UNIT_TEST_IDE_DEBUG_SERVICE_CONNECTION === "1" || process.env.UT_DEBUG_PROCESS_HOST_FAILURES === "1") {
         const message = error instanceof Error ? error.message : String(error);
@@ -558,23 +657,21 @@ async function runFramework(
   }
 }
 
-export async function runNativeTestGenerationAcceptance(
+export async function withNativeFirstCoverageReport<T>(
   root: string,
   platform: NativePlatform,
-): Promise<readonly { framework: Framework; receipt: NativeManagedGenerationReceipt }[]> {
+  framework: Framework,
+  inspect: (client: ProtocolClient, binding: NativeCoverageRefreshBinding) => Promise<T>,
+): Promise<T> {
   if (platform !== process.platform) throw new Error(`native test-generation ${platform} must run on ${process.platform}`);
+  if (framework !== "cpputest" && framework !== "unity") throw new Error("native test-generation framework is invalid");
   const boundary = await prepareFrameworkBoundary(root, platform);
   const workParent = join(root, ".native-e2e/test-generation-work");
   await mkdir(workParent, { recursive: true });
   const workRoot = await mkdtemp(join(workParent, `${platform}-`));
   const preserveFailureWorkspace = shouldPreserveNativeGenerationFailureWorkspace();
   try {
-    const results: Array<{ framework: Framework; receipt: NativeManagedGenerationReceipt }> = [];
-    for (const framework of ["cpputest", "unity"] as const) {
-      process.stderr.write(`native-test-generation: ${platform} ${framework}\n`);
-      results.push({ framework, receipt: await runFramework(root, platform, framework, boundary, workRoot) });
-    }
-    return Object.freeze(results.map((result) => Object.freeze(result)));
+    return await inspectNativeFirstCoverageReport(root, platform, framework, boundary, workRoot, inspect);
   } finally {
     if (preserveFailureWorkspace) {
       process.stderr.write(`native-test-generation: preserved failure workspace ${workRoot}\n`);
@@ -582,6 +679,23 @@ export async function runNativeTestGenerationAcceptance(
       await rm(workRoot, { recursive: true, force: true });
     }
   }
+}
+
+export async function runNativeTestGenerationAcceptance(
+  root: string,
+  platform: NativePlatform,
+): Promise<readonly { framework: Framework; receipt: NativeManagedGenerationReceipt }[]> {
+  const results: Array<{ framework: Framework; receipt: NativeManagedGenerationReceipt }> = [];
+  for (const framework of ["cpputest", "unity"] as const) {
+    process.stderr.write(`native-test-generation: ${platform} ${framework}\n`);
+    const receipt = await withNativeFirstCoverageReport(root, platform, framework, async (client, binding) =>
+      executeNativeManagedGeneration({
+        client, projectId, ...binding, framework, maxPollAttempts: 600, pollIntervalMs: 500,
+        refreshCoverage: async () => runCoverageCycle(client, platform, framework === "cpputest" ? "src/classifier.cpp" : "src/classifier.c"),
+      }));
+    results.push({ framework, receipt });
+  }
+  return Object.freeze(results.map((result) => Object.freeze(result)));
 }
 
 async function publishReport(
