@@ -273,18 +273,34 @@ export function decodeCoverageFunctionPageV16(value: unknown): CoverageFunctionP
 
 export function decodeCoverageLinePageV16(value: unknown): CoverageLinePageV16 {
   const wire = record(value, "coverage detail line page");
+  if (Object.keys(wire).some((key) => !["workspaceGeneration", "coverageReportId", "items", "nextCursor"].includes(key))) {
+    throw new Error("invalid coverage detail line page field");
+  }
   const items = uniqueItems(wireArray(wire.items, "coverage detail lines").map((entry) => {
     const line = record(entry, "coverage detail line");
+    if (Object.keys(line).some((key) => !["line", "count", "branchesCovered", "branchesTotal", "baselineCount", "baselineBranchesCovered", "baselineBranchesTotal", "coverageGapId"].includes(key))) {
+      throw new Error("invalid coverage detail line field");
+    }
+    const number = safeInteger(line.line, "line number");
+    if (number < 1) throw new Error("invalid line number");
+    const count = safeInteger(line.count, "line count");
     const branchesCovered = safeInteger(line.branchesCovered, "line branches covered");
     const branchesTotal = safeInteger(line.branchesTotal, "line branches total");
-    const baselineBranchesCovered = safeInteger(line.baselineBranchesCovered, "baseline branches covered");
-    const baselineBranchesTotal = safeInteger(line.baselineBranchesTotal, "baseline branches total");
-    if (branchesCovered > branchesTotal || baselineBranchesCovered > baselineBranchesTotal) {
+    const baselineCount = line.baselineCount === null ? null : safeInteger(line.baselineCount, "baseline line count");
+    const baselineBranchesCovered = line.baselineBranchesCovered === null ? null : safeInteger(line.baselineBranchesCovered, "baseline branches covered");
+    const baselineBranchesTotal = line.baselineBranchesTotal === null ? null : safeInteger(line.baselineBranchesTotal, "baseline branches total");
+    if ([count, branchesCovered, branchesTotal, baselineCount, baselineBranchesCovered, baselineBranchesTotal].some((value) => value !== null && value < 0)) {
+      throw new Error("invalid negative line count");
+    }
+    if ((baselineCount === null) !== (baselineBranchesCovered === null) ||
+        (baselineCount === null) !== (baselineBranchesTotal === null)) {
+      throw new Error("line comparison state is inconsistent");
+    }
+    if (branchesCovered > branchesTotal || baselineBranchesCovered !== null && baselineBranchesTotal !== null && baselineBranchesCovered > baselineBranchesTotal) {
       throw new Error("line branches covered exceeds total");
     }
     return {
-      line: safeInteger(line.line, "line number"), count: safeInteger(line.count, "line count"),
-      baselineCount: safeInteger(line.baselineCount, "baseline line count"),
+      line: number, count, baselineCount,
       branchesCovered, branchesTotal, baselineBranchesCovered, baselineBranchesTotal,
       ...(line.coverageGapId === undefined ? {} : { coverageGapId: wireString(line.coverageGapId, "coverage gap id") })
     };

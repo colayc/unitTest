@@ -34,6 +34,19 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 		return coveragedetail.Index{}, storageError("begin attested CoverageDetail read", err)
 	}
 	defer tx.Rollback()
+	index, err := readValidatedCoverageIndexSnapshot(ctx, tx, q)
+	if err != nil {
+		return coveragedetail.Index{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return coveragedetail.Index{}, storageError("commit attested CoverageDetail read", err)
+	}
+	return index, nil
+}
+
+// readValidatedCoverageIndexSnapshot retains the complete attestation within
+// the caller's snapshot; transaction ownership stays with the caller.
+func readValidatedCoverageIndexSnapshot(ctx context.Context, tx *sql.Tx, q coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
 	if err := preflightAttestedRowSizes(ctx, tx, q.ReportID); err != nil {
 		return coveragedetail.Index{}, err
 	}
@@ -89,9 +102,6 @@ func (s *Store) ReadValidatedCoverageIndex(ctx context.Context, q coveragedetail
 	}
 	if err := validateDetailIndex(index); err != nil || !validDetailReportSemantics(index, report) {
 		return coveragedetail.Index{}, storageError("validate attested CoverageDetail graph", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return coveragedetail.Index{}, storageError("commit attested CoverageDetail read", err)
 	}
 	return index, nil
 }

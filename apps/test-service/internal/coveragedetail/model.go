@@ -149,8 +149,12 @@ type FunctionPage struct {
 	Items      []Function
 	NextCursor string
 }
+
+// LineDetail is a current, validated page projection, not a persisted observation.
+type LineDetail struct{ Line, Count, BranchesCovered, BranchesTotal int64 }
+
 type LinePage struct {
-	Items      []Line
+	Items      []LineDetail
 	NextCursor string
 }
 

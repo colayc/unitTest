@@ -114,9 +114,9 @@ type CoverageLinePageV16 struct {
 }
 
 type CoverageLineDetailV16 struct {
-	BaselineBranchesCovered int64   `json:"baselineBranchesCovered"`
-	BaselineBranchesTotal   int64   `json:"baselineBranchesTotal"`
-	BaselineCount           int64   `json:"baselineCount"`
+	BaselineBranchesCovered *int64  `json:"baselineBranchesCovered"`
+	BaselineBranchesTotal   *int64  `json:"baselineBranchesTotal"`
+	BaselineCount           *int64  `json:"baselineCount"`
 	BranchesCovered         int64   `json:"branchesCovered"`
 	BranchesTotal           int64   `json:"branchesTotal"`
 	Count                   int64   `json:"count"`

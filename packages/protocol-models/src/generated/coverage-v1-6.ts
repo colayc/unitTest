@@ -125,9 +125,9 @@ export interface CoverageLinePageV16 {
 }
 
 export interface CoverageLineDetailV16 {
-    baselineBranchesCovered: number;
-    baselineBranchesTotal:   number;
-    baselineCount:           number;
+    baselineBranchesCovered: number | null;
+    baselineBranchesTotal:   number | null;
+    baselineCount:           number | null;
     branchesCovered:         number;
     branchesTotal:           number;
     count:                   number;

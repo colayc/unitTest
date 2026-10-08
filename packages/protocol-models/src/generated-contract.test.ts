@@ -132,6 +132,16 @@ test("protocol 1.6 decoded coverage metrics reject covered greater than total", 
   ]) assert.equal(validateCoverageMetricV16(metric), false);
 });
 
+test("protocol 1.6 generated line history fields are required nullable counts", () => {
+  const line: CoverageLineDetailV16 = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+    baselineCount: null, baselineBranchesCovered: null, baselineBranchesTotal: null };
+  assert.equal(line.baselineCount, null);
+  assert.equal(line.baselineBranchesCovered, null);
+  assert.equal(line.baselineBranchesTotal, null);
+  assert.equal(line.branchesCovered, 3);
+  assert.equal(line.branchesTotal, 4);
+});
+
 test("protocol 1.6 nullable summaries retain current count bounds and consistent comparison", () => {
   const metric = { covered: 2, total: 4, coveredDelta: null };
   assert.equal(validateCoverageMetricV16(metric), true);

@@ -18,7 +18,7 @@ type detailRouteBackend struct {
 	ready      bool
 	err        error
 	calls      int
-	lines      []coveragedetail.Line
+	lines      []coveragedetail.LineDetail
 	files      []coveragedetail.File
 	functions  []coveragedetail.Function
 	reasons    []string
@@ -316,9 +316,83 @@ func TestCoverageDetailV16RoutesDispatchAndRejectClosedPayloads(t *testing.T) {
 		t.Fatalf("cursor error: %#v", got.Response)
 	}
 	b.err = nil
-	b.lines = []coveragedetail.Line{{Line: 5, Count: 1}}
+	b.lines = []coveragedetail.LineDetail{{Line: 5, Count: 1, BranchesCovered: 2, BranchesTotal: 1}}
 	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, cases[3].method, cases[3].payload))
 	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
 		t.Fatalf("line evidence silently zero-filled: %#v", got.Response)
+	}
+}
+
+func TestCoverageDetailLinesExposeCurrentEvidenceAndRequiredNullHistory(t *testing.T) {
+	b := &detailRouteBackend{ready: true, noBaseline: true, lines: []coveragedetail.LineDetail{
+		{Line: 1, Count: 1, BranchesCovered: 3, BranchesTotal: 4}, {Line: 9, Count: 0},
+	}}
+	s := readyDetailSession(t, b)
+	for _, parent := range []string{"fileId", "functionId"} {
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), parent: strings.Repeat("c", 32),
+		}))
+		if got.Response.Error != nil {
+			t.Fatalf("valid current line page rejected: %#v", got.Response)
+		}
+		raw, err := json.Marshal(got.Response.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Items []map[string]json.RawMessage `json:"items"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil || len(page.Items) != 2 {
+			t.Fatalf("page=%s err=%v", raw, err)
+		}
+		for key, want := range map[string]string{"line": "1", "count": "1", "branchesCovered": "3", "branchesTotal": "4"} {
+			if string(page.Items[0][key]) != want {
+				t.Fatalf("%s=%s want=%s", key, page.Items[0][key], want)
+			}
+		}
+		for _, item := range page.Items {
+			for _, key := range []string{"baselineCount", "baselineBranchesCovered", "baselineBranchesTotal"} {
+				if string(item[key]) != "null" {
+					t.Fatalf("required %s not null: %s", key, raw)
+				}
+			}
+		}
+	}
+}
+
+func TestCoverageDetailLinesRetainCurrentProjectGate(t *testing.T) {
+	b := &detailRouteBackend{ready: true}
+	s := readyDetailSession(t, b)
+	for _, tc := range []struct {
+		status coveragedetail.Status
+		code   string
+	}{
+		{coveragedetail.StatusStale, "WORKSPACE_CHANGED"}, {coveragedetail.StatusIncomplete, "SERVICE_UNHEALTHY"},
+	} {
+		b.status = tc.status
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), "fileId": strings.Repeat("c", 32),
+		}))
+		if got.Response.Error == nil || got.Response.Error.Code != tc.code || got.Response.Payload != nil {
+			t.Fatalf("%s empty line page bypassed current project gate: %#v", tc.status, got.Response)
+		}
+	}
+}
+
+func TestCoverageDetailLinesRejectInvalidCurrentCounts(t *testing.T) {
+	b := &detailRouteBackend{ready: true}
+	s := readyDetailSession(t, b)
+	for _, line := range []coveragedetail.LineDetail{
+		{Line: 0}, {Line: coveragedomain.MaxSafeInteger + 1}, {Line: 1, Count: -1},
+		{Line: 1, Count: coveragedomain.MaxSafeInteger + 1}, {Line: 1, BranchesCovered: -1},
+		{Line: 1, BranchesTotal: coveragedomain.MaxSafeInteger + 1}, {Line: 1, BranchesCovered: 2, BranchesTotal: 1},
+	} {
+		b.lines = []coveragedetail.LineDetail{line}
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), "fileId": strings.Repeat("c", 32),
+		}))
+		if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" || got.Response.Payload != nil {
+			t.Fatalf("invalid current line exposed: %#v response=%#v", line, got.Response)
+		}
 	}
 }

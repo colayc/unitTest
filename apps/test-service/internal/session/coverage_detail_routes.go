@@ -138,17 +138,23 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 		}
 		return handled(protocol.Success(version, request, out))
 	case "coverage/details/lines/list":
+		if _, err := detailSummaryProject(ctx, backend, reportID); err != nil {
+			return detailFailure(version, request, err)
+		}
 		page, err := backend.ListCoverageLines(ctx, coveragedetail.LineQuery{ReportID: reportID, WorkspaceGeneration: generation, FileID: fileID, FunctionID: functionID, Cursor: cursor, Limit: limit})
 		if err != nil {
 			return detailFailure(version, request, err)
 		}
-		// The durable v1.6 index currently retains line counts but not a
-		// per-line baseline/branch projection. Those fields are required by
-		// the wire schema; never fabricate zeroes for nonempty pages.
-		if len(page.Items) != 0 {
-			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "line and branch evidence is incomplete", false))
-		}
 		out := coveragev16.CoverageLinePageV16{CoverageReportID: reportID, WorkspaceGeneration: generation, Items: make([]coveragev16.CoverageLineDetailV16, 0, len(page.Items)), NextCursor: detailNext(page.NextCursor)}
+		for _, line := range page.Items {
+			if line.Line < 1 || line.Line > coveragedomain.MaxSafeInteger || line.Count < 0 || line.Count > coveragedomain.MaxSafeInteger || line.BranchesCovered < 0 || line.BranchesTotal < line.BranchesCovered || line.BranchesTotal > coveragedomain.MaxSafeInteger {
+				return detailFailure(version, request, coveragedetail.ErrInvalidDetail)
+			}
+			out.Items = append(out.Items, coveragev16.CoverageLineDetailV16{
+				Line: line.Line, Count: line.Count, BranchesCovered: line.BranchesCovered, BranchesTotal: line.BranchesTotal,
+				BaselineCount: nil, BaselineBranchesCovered: nil, BaselineBranchesTotal: nil,
+			})
+		}
 		return handled(protocol.Success(version, request, out))
 	}
 	return invalidPayload(version, request)

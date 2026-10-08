@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { MAX_MESSAGE_BYTES } from "./client.js";
 import { Connection } from "./connection.js";
-import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
+import { decodeCoverageLinePageV16, decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
 import { ABSENT_BLOCK_DIGEST_V16, ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
@@ -510,6 +510,49 @@ test("protocol 1.6 summary routes decode required null comparisons and reject mi
         } else await assert.rejects(call, comparison === "mixed" ? /detail comparison state is inconsistent/ : /invalid|integer|total/i);
       } finally { fixture.client.close(); }
     }
+  }
+});
+
+test("protocol 1.6 line decoder requires consistent nullable history and exact current evidence", () => {
+  const line = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+    baselineCount: null, baselineBranchesCovered: null, baselineBranchesTotal: null };
+  const page = (items: unknown[]) => ({ workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, items });
+  assert.deepEqual(decodeCoverageLinePageV16(page([line])).items, [line]);
+  const zeros = { ...line, baselineCount: 0, baselineBranchesCovered: 0, baselineBranchesTotal: 0 };
+  assert.deepEqual(decodeCoverageLinePageV16(page([zeros])).items, [zeros]);
+  for (const key of ["baselineCount", "baselineBranchesCovered", "baselineBranchesTotal"]) {
+    const missing: JsonObject = { ...line };
+    delete missing[key];
+    assert.throws(() => decodeCoverageLinePageV16(page([missing])), /integer|comparison|invalid/i, `missing ${key}`);
+    for (const value of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0"]) {
+      assert.throws(() => decodeCoverageLinePageV16(page([{ ...line, [key]: value }])), /integer|comparison|invalid/i, `${key}=${value}`);
+    }
+  }
+  for (const malformed of [{ ...line, line: 0 }, { ...line, count: -1 }, { ...line, branchesCovered: -1 }, { ...line, branchesCovered: 5 },
+    { ...line, branchesTotal: Number.MAX_SAFE_INTEGER + 1 }, { ...zeros, baselineBranchesCovered: 1 },
+    { ...zeros, baselineCount: -1 }, { ...zeros, baselineBranchesCovered: -1 }, { ...zeros, baselineBranchesTotal: -1 }, { ...line, extra: true }]) {
+    assert.throws(() => decodeCoverageLinePageV16(page([malformed])), /integer|total|invalid/i);
+  }
+  assert.throws(() => decodeCoverageLinePageV16(page([line, line])), /duplicate/i);
+  assert.throws(() => decodeCoverageLinePageV16({ ...page([line]), extra: true }), /invalid/i);
+});
+
+test("protocol 1.6 line routes decode unavailable history without guessing from zeros", async () => {
+  for (const baseline of [null, 0]) {
+    const line = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+      baselineCount: baseline, baselineBranchesCovered: baseline, baselineBranchesTotal: baseline };
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+      : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+      : response(request, { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, items: [line] }, "1.6"));
+    try {
+      await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+      for (const parent of [{ fileId: FILE_ID }, { functionId: FUNCTION_ID }]) {
+        const result = await fixture.client.listCoverageLines({ workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, ...parent })
+          .catch((error: Error) => { throw new Error(`baseline=${baseline}: ${error.message.slice(0, 350)}`); });
+        assert.deepEqual(result.items, [line]);
+      }
+    } finally { fixture.client.close(); }
   }
 });
 

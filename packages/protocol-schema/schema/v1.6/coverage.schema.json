@@ -284,7 +284,7 @@
     "lineDetail": {
       "title": "CoverageLineDetailV16", "type": "object", "additionalProperties": false,
       "required": ["line", "count", "baselineCount", "branchesCovered", "branchesTotal", "baselineBranchesCovered", "baselineBranchesTotal"],
-      "properties": { "line": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "coverageGapId": { "$ref": "#/$defs/id" }, "count": { "$ref": "#/$defs/safeCount" }, "baselineCount": { "$ref": "#/$defs/safeCount" }, "branchesCovered": { "$ref": "#/$defs/safeCount" }, "branchesTotal": { "$ref": "#/$defs/safeCount" }, "baselineBranchesCovered": { "$ref": "#/$defs/safeCount" }, "baselineBranchesTotal": { "$ref": "#/$defs/safeCount" } }
+      "properties": { "line": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "coverageGapId": { "$ref": "#/$defs/id" }, "count": { "$ref": "#/$defs/safeCount" }, "baselineCount": { "anyOf": [{ "$ref": "#/$defs/safeCount" }, { "type": "null" }] }, "branchesCovered": { "$ref": "#/$defs/safeCount" }, "branchesTotal": { "$ref": "#/$defs/safeCount" }, "baselineBranchesCovered": { "anyOf": [{ "$ref": "#/$defs/safeCount" }, { "type": "null" }] }, "baselineBranchesTotal": { "anyOf": [{ "$ref": "#/$defs/safeCount" }, { "type": "null" }] } }
     },
     "filePage": {
       "title": "CoverageFilePageV16", "type": "object", "additionalProperties": false,

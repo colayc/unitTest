@@ -146,6 +146,34 @@ func assertFirstReportPages(t *testing.T, exchange func(string, any) json.RawMes
 		t.Fatalf("project=%+v", project)
 	}
 	assertFirstReportSummary(t, project.Summary, index.Project.Summary)
+	for _, parent := range []map[string]any{
+		{"fileId": index.Files[0].ID},
+		{"functionId": index.Files[0].Functions[0].ID},
+	} {
+		payload := map[string]any{"coverageReportId": index.ReportID, "workspaceGeneration": index.WorkspaceGeneration, "limit": 2}
+		for key, value := range parent {
+			payload[key] = value
+		}
+		data := exchange("coverage/details/lines/list", payload)
+		var page struct {
+			ReportID   string                       `json:"coverageReportId"`
+			Generation string                       `json:"workspaceGeneration"`
+			Items      []map[string]json.RawMessage `json:"items"`
+			NextCursor string                       `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			t.Fatal(err)
+		}
+		if page.ReportID != index.ReportID || page.Generation != index.WorkspaceGeneration || len(page.Items) != 2 || page.NextCursor == "" {
+			t.Fatalf("nonempty bound lines page=%s", data)
+		}
+		for key, value := range map[string]string{"line": "1", "count": "1", "branchesCovered": "3", "branchesTotal": "4",
+			"baselineCount": "null", "baselineBranchesCovered": "null", "baselineBranchesTotal": "null"} {
+			if string(page.Items[0][key]) != value {
+				t.Fatalf("%s=%s want %s: %s", key, page.Items[0][key], value, data)
+			}
+		}
+	}
 	var files struct {
 		Items []struct {
 			FileID        string          `json:"fileId"`

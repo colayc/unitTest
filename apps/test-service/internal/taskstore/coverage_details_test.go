@@ -3,6 +3,7 @@ package taskstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,7 +30,8 @@ func detailStoreFixtureWithPrefix(t *testing.T, store *Store, number int, prefix
 	report := *mutation.FinishCoverage.Report
 	fileA, _ := coveragedetail.StableFileID(mutation.FinishCoverage.Run.Request.ProjectID, "src/a.cpp")
 	fileB, _ := coveragedetail.StableFileID(mutation.FinishCoverage.Run.Request.ProjectID, "src/b.cpp")
-	functionID, _ := coveragedetail.StableFunctionID(fileA, "linkage:_Z3foov")
+	linkage := "_Z3foov"
+	functionID, _ := coveragedetail.StableFunctionID(fileA, fmt.Sprintf("linkage:%d:%s:signature:", len(linkage), linkage))
 	index := coveragedetail.Index{
 		WorkspaceGeneration: mutation.FinishCoverage.Run.Request.WorkspaceGeneration,
 		ProjectID:           mutation.FinishCoverage.Run.Request.ProjectID,

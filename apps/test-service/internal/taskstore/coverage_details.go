@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 
 	"unit-test-ide.local/test-service/internal/coveragedetail"
@@ -774,100 +773,6 @@ func (s *Store) ListCoverageFunctions(ctx context.Context, q coveragedetail.Func
 	}
 	if err := tx.Commit(); err != nil {
 		return coveragedetail.FunctionPage{}, storageError("commit CoverageDetail read", err)
-	}
-	return page, nil
-}
-
-func (s *Store) ListCoverageLines(ctx context.Context, q coveragedetail.LineQuery) (coveragedetail.LinePage, error) {
-	if s != nil && !s.detailAvailable {
-		return coveragedetail.LinePage{}, task.ErrStorageUnavailable
-	}
-	if s == nil || ctx == nil || !validDetailQuery(q.ReportID, q.WorkspaceGeneration, q.Sort, q.Limit, detailLineLimit) || (q.FileID == "" && q.FunctionID == "") || (q.FileID != "" && !lowerHex(q.FileID, 32)) || (q.FunctionID != "" && !lowerHex(q.FunctionID, 32)) || (q.Filter != "" && q.Filter != "covered" && q.Filter != "uncovered") {
-		return coveragedetail.LinePage{}, task.ErrInvalidArgument
-	}
-	tx, h, err := s.detailRead(ctx, q.ReportID, q.WorkspaceGeneration)
-	if err != nil {
-		return coveragedetail.LinePage{}, err
-	}
-	defer tx.Rollback()
-	if q.FileID == "" {
-		if err := tx.QueryRowContext(ctx, `SELECT file_id FROM coverage_detail_functions WHERE report_id=? AND function_id=?`, q.ReportID, q.FunctionID).Scan(&q.FileID); isNoRows(err) {
-			return coveragedetail.LinePage{}, task.ErrNotFound
-		} else if err != nil {
-			return coveragedetail.LinePage{}, storageError("resolve CoverageDetail function", err)
-		}
-	}
-	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM coverage_detail_files WHERE report_id=? AND file_id=?`, q.ReportID, q.FileID).Scan(&exists); isNoRows(err) {
-		return coveragedetail.LinePage{}, task.ErrNotFound
-	} else if err != nil {
-		return coveragedetail.LinePage{}, storageError("validate CoverageDetail file parent", err)
-	}
-	if q.FunctionID != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM coverage_detail_functions WHERE report_id=? AND file_id=? AND function_id=?`, q.ReportID, q.FileID, q.FunctionID).Scan(&exists); isNoRows(err) {
-			return coveragedetail.LinePage{}, task.ErrNotFound
-		} else if err != nil {
-			return coveragedetail.LinePage{}, storageError("validate CoverageDetail function parent", err)
-		}
-	}
-	scope := detailScope("lines", q.ReportID, q.WorkspaceGeneration, q.FileID+":"+q.FunctionID, q.Filter, q.Sort, q.Limit)
-	last := ""
-	if q.Cursor != "" {
-		last, err = decodeDetailCursor(h.key, scope, q.Cursor)
-		if err != nil {
-			return coveragedetail.LinePage{}, err
-		}
-	}
-	table, parentColumn, parentID := "coverage_detail_file_lines", "file_id", q.FileID
-	if q.FunctionID != "" {
-		table, parentColumn, parentID = "coverage_detail_function_lines", "function_id", q.FunctionID
-	}
-	query := `SELECT line,count FROM ` + table + ` WHERE report_id=? AND ` + parentColumn + `=?`
-	args := []any{q.ReportID, parentID}
-	if q.Filter == "covered" {
-		query += ` AND count>0`
-	} else if q.Filter == "uncovered" {
-		query += ` AND count=0`
-	}
-	if last != "" {
-		var number int64
-		if _, err := fmt.Sscanf(last, "%d", &number); err != nil || number < 1 || fmt.Sprint(number) != last {
-			return coveragedetail.LinePage{}, task.ErrInvalidArgument
-		}
-		op := ">"
-		if q.Sort == "desc" {
-			op = "<"
-		}
-		query += ` AND line ` + op + ` ?`
-		args = append(args, number)
-	}
-	query += ` ORDER BY line ` + detailOrder(q.Sort) + ` LIMIT ?`
-	args = append(args, q.Limit+1)
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return coveragedetail.LinePage{}, storageError("list CoverageDetail lines", err)
-	}
-	items := []coveragedetail.Line{}
-	for rows.Next() {
-		var line coveragedetail.Line
-		if err := rows.Scan(&line.Line, &line.Count); err != nil || !validDetailLine(line) {
-			rows.Close()
-			return coveragedetail.LinePage{}, storageError("scan CoverageDetail line", err)
-		}
-		items = append(items, line)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return coveragedetail.LinePage{}, storageError("list CoverageDetail lines", err)
-	}
-	rows.Close()
-	page := coveragedetail.LinePage{Items: items}
-	if len(items) > q.Limit {
-		page.Items = items[:q.Limit]
-		page.NextCursor = encodeDetailCursor(h.key, scope, fmt.Sprint(page.Items[len(page.Items)-1].Line))
-	}
-	if err := tx.Commit(); err != nil {
-		return coveragedetail.LinePage{}, storageError("commit CoverageDetail read", err)
 	}
 	return page, nil
 }
