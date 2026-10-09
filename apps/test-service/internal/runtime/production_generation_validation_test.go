@@ -183,9 +183,9 @@ func productionValidationCoverage(covered int64) []byte {
 	return []byte(fmt.Sprintf(`{"schemaVersion":"1.0","provenance":{"platform":"windows","architecture":"x64","compiler":{"family":"clang-cl","version":"22.1.8"},"driver":{"name":"llvm-cov","version":"22.1.8"},"collector":{"name":"llvm-cov","version":"22.1.8"},"normalizerVersion":"1","instrumentationFingerprint":"%s"},"completeness":{"outcome":"available","reasons":[]},"summary":{"functions":{"covered":0,"total":0},"lines":{"covered":%d,"total":1},"branches":{"covered":0,"total":0}},"files":[{"uri":"source.c","sha256":"%s","summary":{"functions":{"covered":0,"total":0},"lines":{"covered":%d,"total":1},"branches":{"covered":0,"total":0}},"lines":[{"line":1,"count":%d,"branches":{"covered":0,"total":0}}]}]}`, strings.Repeat("a", 64), covered, strings.Repeat("b", 64), covered, covered))
 }
 
-func productionValidationFixture(t *testing.T) (*productionGenerationValidation, testgendomain.Run, generationTarget, productionPipelineResult, *productionValidationAuthorityFixture, *productionGenerationArtifactFixture) {
+func productionValidationFixture(t *testing.T, ids ...string) (*productionGenerationValidation, testgendomain.Run, generationTarget, productionPipelineResult, *productionValidationAuthorityFixture, *productionGenerationArtifactFixture) {
 	t.Helper()
-	pipeline, target, _, _ := productionPipelineFixture(t)
+	pipeline, target, _, _ := productionPipelineFixture(t, ids...)
 	result, err := pipeline.Generate(context.Background(), target)
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +330,113 @@ func TestProductionValidationPersistsManagedCaseAndReceiptEvidence(t *testing.T)
 	_, replayed, replayReceipt, replayDigest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
 	if err != nil || !reflect.DeepEqual(replayed, cases) || !bytes.Equal(replayReceipt, receipt) || replayDigest != digest {
 		t.Fatalf("replayed managed evidence cases=%+v digest=%s err=%v", replayed, replayDigest, err)
+	}
+}
+
+func TestProductionValidationPreservesDurableToolchainIdentity(t *testing.T) {
+	for _, id := range productionToolchainIdentityTestIDs()[:3] {
+		adapter, run, _, _, _, _ := productionValidationFixture(t, id)
+		pipeline, target, _, _ := productionPipelineFixture(t, id)
+		target.managed, target.sourceRelativePath = true, "src/classify.cpp"
+		target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+		result, err := pipeline.Generate(context.Background(), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Request = target.request
+		validated, err := adapter.Validate(context.Background(), run, target, result)
+		if err != nil || len(validated.Candidates) != 1 {
+			t.Fatalf("validate: %v", err)
+		}
+		for _, artifact := range validated.Artifacts {
+			run.ArtifactDigests = append(run.ArtifactDigests, testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256})
+		}
+		_, cases, receipt, digest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
+		if err != nil || len(cases) == 0 || !validProductionDigest(digest) || productionBytesDigest(receipt) != digest {
+			t.Fatalf("evidence: %v", err)
+		}
+		for _, item := range cases {
+			if item.ToolchainID != id {
+				t.Fatalf("ID rewritten: %q", item.ToolchainID)
+			}
+		}
+		adapter.mu.Lock()
+		adapter.records = make(map[string]productionValidatedRecord)
+		adapter.mu.Unlock()
+		_, replayed, replayReceipt, replayDigest, err := adapter.ManagedEvidence(context.Background(), run, validated.Candidates)
+		if err != nil || !reflect.DeepEqual(replayed, cases) || !bytes.Equal(receipt, replayReceipt) || digest != replayDigest {
+			t.Fatalf("durable identity changed: %v", err)
+		}
+	}
+}
+
+func TestProductionManagedCaseKeepsSourceDigestStrict(t *testing.T) {
+	_, _, set, source, target, pipeline := productionManagedFixture(t)
+	target.toolchainID = "Local.Clang_1"
+	cases, err := productionManagedCases(target, pipeline, source)
+	if err != nil || len(cases) == 0 || !validProductionManagedCases(cases, set, source) {
+		t.Fatalf("legal ID rejected: %v", err)
+	}
+	for _, bad := range []string{"clang-" + strings.Repeat("a", 58), strings.Repeat("A", 64), strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+		changed := append([]productionManagedCaseEvidence(nil), cases...)
+		changed[0].SourceDigest = bad
+		if validProductionManagedCases(changed, set, source) {
+			t.Fatalf("bad managed source SHA accepted: %q", bad)
+		}
+	}
+}
+
+func TestProductionManagedCaseRejectsMalformedToolchainIdentity(t *testing.T) {
+	_, _, set, source, target, pipeline := productionManagedFixture(t)
+	cases, err := productionManagedCases(target, pipeline, source)
+	if err != nil || len(cases) == 0 {
+		t.Fatalf("managed cases missing: %v", err)
+	}
+	for _, id := range []string{"", strings.Repeat("x", 129), " leading", "trailing ", "a\tb", "a\nb", "a\x00b", "a/b", "a\\b", "工具链", "aé"} {
+		changed := append([]productionManagedCaseEvidence(nil), cases...)
+		changed[0].ToolchainID = id
+		if validProductionManagedCases(changed, set, source) {
+			t.Fatalf("malformed managed ID accepted: %q", id)
+		}
+	}
+}
+
+func TestProductionValidationKeepsArtifactAndReceiptDigestsStrict(t *testing.T) {
+	adapter, run, target, pipeline, _, _ := productionValidationFixture(t, "Local.Clang_1")
+	result, err := adapter.Validate(context.Background(), run, target, pipeline)
+	if err != nil || len(result.Candidates) != 1 {
+		t.Fatalf("validate: %v", err)
+	}
+	record, ok := adapter.cachedRecord(run.ID)
+	if !ok || !validProductionReceipts(record.receipts) {
+		t.Fatal("valid receipt missing")
+	}
+	for _, bad := range []string{"clang-" + strings.Repeat("a", 58), strings.Repeat("A", 64), strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+		for _, field := range []string{"source artifact", "code"} {
+			candidate := testgendomain.CloneCandidate(result.Candidates[0])
+			if field == "source artifact" {
+				candidate.StagedSourceArtifact.Digest = bad
+			} else {
+				candidate.CodeDigest = bad
+			}
+			if testgendomain.ValidateCandidate(candidate) == nil {
+				t.Fatalf("bad %s SHA accepted: %q", field, bad)
+			}
+		}
+		for _, field := range []string{"receipt", "output", "coverage"} {
+			receipts := append([]testgenvalidate.StageReceipt(nil), record.receipts...)
+			switch field {
+			case "receipt":
+				receipts[0].Digest = bad
+			case "output":
+				receipts[0].OutputDigest = bad
+			case "coverage":
+				receipts[0].CoverageDigest = bad
+			}
+			if validProductionReceipts(receipts) {
+				t.Fatalf("bad %s SHA accepted: %q", field, bad)
+			}
+		}
 	}
 }
 

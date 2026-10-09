@@ -107,6 +107,20 @@ func validProductionDigest(value string) bool {
 	return true
 }
 
+func validProductionToolchainID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validProductionObjectID(value string) bool {
 	return len(value) == 32 && validProductionDigest(value+value)
 }
@@ -211,7 +225,7 @@ func (target generationTarget) valid() bool {
 		target.projectID == "" || len(target.projectID) > 128 ||
 		!validProductionDigest(target.workspaceGeneration) || !validProductionObjectID(target.fileID) || !target.validResolvedScope() ||
 		!validProductionObjectID(target.coverageReportID) || !validProductionDigest(target.sourceDigest) ||
-		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.cmakeTargetDigest) || !validProductionDigest(target.toolchainID) ||
+		!validProductionDigest(target.compileSnapshotDigest) || !validProductionDigest(target.cmakeTargetDigest) || !validProductionToolchainID(target.toolchainID) ||
 		!validProductionDigest(target.buildProfileID) || !validProductionDigest(target.testTargetID) ||
 		!validProductionDigest(target.frameworkDigest) || !validProductionDigest(target.analyzerBundleDigest) ||
 		!validProductionCTestName(target.ctestName) ||

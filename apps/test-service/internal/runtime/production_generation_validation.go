@@ -213,7 +213,7 @@ func validProductionManagedCases(cases []productionManagedCaseEvidence, set test
 			item.TestRelativePath != path || item.GeneratorVersion != "unit-test-service-v1" ||
 			item.CaseID != document.Blocks[index].CaseID || item.FunctionID != document.Blocks[index].FunctionID ||
 			item.ProjectID == "" || item.SourceFileID == "" || item.SourceRelativePath == "" || item.ScenarioID == "" ||
-			item.Framework != "cpputest" && item.Framework != "unity" || !validProductionDigest(item.ToolchainID) || !validProductionDigest(item.SourceDigest) || seen[item.CaseID] {
+			item.Framework != "cpputest" && item.Framework != "unity" || !validProductionToolchainID(item.ToolchainID) || !validProductionDigest(item.SourceDigest) || seen[item.CaseID] {
 			return false
 		}
 		stable, err := managedtest.StableCaseID(item.ProjectID, item.SourceRelativePath, item.FunctionID, item.ScenarioID)

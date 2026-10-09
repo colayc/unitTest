@@ -78,7 +78,7 @@ func (authority *productionManagedSelectionAuthority) resolveBinding(ctx context
 		return productionManagedSelectionBinding{}, err
 	}
 	if index.ProjectID != run.Request.ProjectID || index.ReportID != run.Request.CoverageReportID ||
-		index.WorkspaceGeneration != run.Request.WorkspaceGeneration || !validProductionDigest(index.ToolchainID) {
+		index.WorkspaceGeneration != run.Request.WorkspaceGeneration || !validProductionToolchainID(index.ToolchainID) {
 		return productionManagedSelectionBinding{}, errProductionManagedUnavailable
 	}
 	selected, err := productionSelectedCoverage(index)

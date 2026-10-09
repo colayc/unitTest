@@ -59,8 +59,11 @@ func (fixture *pipelineOracleFixture) Bind(_ context.Context, program analysis.P
 	return program, observations, nil
 }
 
-func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, generationTarget, *pipelineAnalyzerFixture, *pipelineOracleFixture) {
+func productionPipelineFixture(t *testing.T, ids ...string) (*productionGenerationPipeline, generationTarget, *pipelineAnalyzerFixture, *pipelineOracleFixture) {
 	t.Helper()
+	if len(ids) > 1 {
+		t.Fatal("at most one fixture toolchain ID")
+	}
 	program := analysis.Program{Version: analysis.IRVersion, Digest: strings.Repeat("a", 64), Functions: []analysis.Function{{
 		SymbolID: strings.Repeat("c", 64), Name: "classify",
 		ReturnType: analysis.Type{Kind: analysis.TypeInteger, Spelling: "int", BitWidth: 32, Signed: true},
@@ -85,6 +88,9 @@ func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, gen
 		renderTarget: render.TargetMetadata{TestTarget: "unit_tests", ProductionTarget: "core", FrameworkTarget: "CppUTest", CMakePath: "tests/CMakeLists.txt", TestPath: "tests/generated/classify_test.cpp", ExistingCMake: "add_executable(unit_tests existing.cpp)\ntarget_link_libraries(unit_tests PRIVATE core CppUTest)\n"},
 		wallTime:     time.Second, candidateLimit: 16, memoryBytes: 1 << 20, concurrency: 1,
 	}
+	if len(ids) == 1 {
+		target.toolchainID = ids[0]
+	}
 	target.request = testgendomain.Request{
 		IdempotencyKey: strings.Repeat("9", 32), WorkspaceGeneration: target.workspaceGeneration,
 		ProjectID: target.projectID, Scope: testgendomain.ScopeCoverageGap,
@@ -98,6 +104,66 @@ func productionPipelineFixture(t *testing.T) (*productionGenerationPipeline, gen
 		BaselineReportDigest: strings.Repeat("f", 64), ProcessOwnerDigest: strings.Repeat("0", 64),
 	}
 	return newProductionGenerationPipeline(analyzer, oracle), target, analyzer, oracle
+}
+
+func TestProductionPipelineAcceptsExactToolchainIdentity(t *testing.T) {
+	for _, id := range productionToolchainIdentityTestIDs() {
+		pipeline, target, analyzer, _ := productionPipelineFixture(t, id)
+		target.managed, target.sourceRelativePath = true, "src/classify.cpp"
+		target.renderTarget.TestPath = "tests/generated/src/classify.cpp_test.cpp"
+		result, err := pipeline.Generate(context.Background(), target)
+		if err != nil {
+			t.Fatalf("%q: %v", id, err)
+		}
+		source, ok := exactGeneratedSource(result.editSet.Files)
+		if !ok || target.toolchainID != id || analyzer.calls != 1 {
+			t.Fatalf("ID/render boundary failed for %q", id)
+		}
+		document, err := managedtest.ParseDocument(source, int64(len(source)), 4096)
+		if err != nil || len(document.Blocks) == 0 {
+			t.Fatalf("managed render failed: %v", err)
+		}
+	}
+}
+
+func TestProductionPipelineRejectsMalformedToolchainIdentityBeforeAnalysis(t *testing.T) {
+	for _, id := range []string{"", strings.Repeat("x", 129), " leading", "trailing ", "a\tb", "a\nb", "a\x00b", "a/b", "a\\b", "工具链", "aé"} {
+		pipeline, target, analyzer, _ := productionPipelineFixture(t, id)
+		if _, err := pipeline.Generate(context.Background(), target); err == nil || analyzer.calls != 0 {
+			t.Fatalf("malformed ID accepted/analyzed: %q err=%v calls=%d", id, err, analyzer.calls)
+		}
+	}
+}
+
+func TestProductionPipelineKeepsRealDigestsStrict(t *testing.T) {
+	fields := map[string]func(*generationTarget, string){
+		"workspace": func(x *generationTarget, v string) { x.workspaceGeneration = v; x.request.WorkspaceGeneration = v },
+		"source": func(x *generationTarget, v string) {
+			x.sourceDigest = v
+			x.request.SourceDigest = v
+			x.analysis.SourceDigest = v
+		},
+		"compile": func(x *generationTarget, v string) {
+			x.compileSnapshotDigest = v
+			x.request.CompileSnapshotDigest = v
+			x.analysis.CompileSnapshotDigest = v
+			x.gap.CompileSnapshot = v
+		},
+		"cmake":       func(x *generationTarget, v string) { x.cmakeTargetDigest = v; x.request.CMakeTargetDigest = v },
+		"profile":     func(x *generationTarget, v string) { x.buildProfileID = v },
+		"test target": func(x *generationTarget, v string) { x.testTargetID = v },
+		"framework":   func(x *generationTarget, v string) { x.frameworkDigest = v; x.request.FrameworkBundleDigest = v },
+		"analyzer":    func(x *generationTarget, v string) { x.analyzerBundleDigest = v; x.request.AnalyzerBundleDigest = v },
+	}
+	for name, mutate := range fields {
+		for _, bad := range []string{"clang-" + strings.Repeat("a", 58), strings.Repeat("A", 64), strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+			pipeline, target, analyzer, _ := productionPipelineFixture(t, "Local.Clang_1")
+			mutate(&target, bad)
+			if _, err := pipeline.Generate(context.Background(), target); err == nil || analyzer.calls != 0 {
+				t.Fatalf("bad %s digest accepted/analyzed: %q err=%v calls=%d", name, bad, err, analyzer.calls)
+			}
+		}
+	}
 }
 
 func TestProductionGenerationPipelineIsDeterministicAndUsesExistingModules(t *testing.T) {

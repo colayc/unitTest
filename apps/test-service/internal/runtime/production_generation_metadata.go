@@ -31,7 +31,7 @@ type productionCompileBinding struct {
 
 func resolveProductionCompileBinding(root workspace.Root, sourceRelative string, targets []cmake.Target, toolchainID string) (productionCompileBinding, error) {
 	if root.NativePath == "" || root.ID == "" || !validProductionRelative(sourceRelative) ||
-		!validProductionDigest(toolchainID) || len(targets) == 0 || len(targets) > 1024 {
+		!validProductionToolchainID(toolchainID) || len(targets) == 0 || len(targets) > 1024 {
 		return productionCompileBinding{}, errProductionGenerationUnavailable
 	}
 	source, err := root.ResolveRelative(filepath.FromSlash(sourceRelative))

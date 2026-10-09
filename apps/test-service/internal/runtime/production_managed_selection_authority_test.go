@@ -27,51 +27,56 @@ func (fixture productionManagedSelectionResolverFixture) ResolveRequest(context.
 }
 
 func TestProductionManagedSelectionAuthorityResolvesCurrentFileAndFunctionCoverage(t *testing.T) {
-	run, index, _, _, target, _ := productionManagedFixture(t)
-	metric := coveragedomain.Summary{
-		Functions: coveragedomain.Metric{Covered: 0, Total: 1},
-		Lines:     coveragedomain.Metric{Covered: 2, Total: 4},
-		Branches:  coveragedomain.Metric{Covered: 1, Total: 2},
-	}
-	index.Project.Summary = metric
-	index.Files[0].Summary = metric
-	index.Files[0].Functions[0].Summary = metric
-	rootPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(rootPath, "src"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rootPath, "src", "classify.cpp"), []byte("int classify(int value) { return value; }\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	root, err := workspace.OpenRoot(rootPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	authority, err := newProductionManagedSelectionAuthority(productionManagedSelectionAuthorityConfig{
-		root: root, store: productionManagedSelectionStoreFixture{run: run},
-		resolver: productionManagedSelectionResolverFixture{target: target}, current: productionManagedIndexFixture{index: index},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := authority.Resolve(context.Background(), run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantSource, err := testgenvalidate.WorkspaceSnapshotDigest(root.NativePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantCoverage := testgenvalidate.SelectedCoverage{
-		Project: metric,
-		Files:   []testgenvalidate.SelectedFileCoverage{{ID: index.Files[0].ID, Summary: metric}},
-		Functions: []testgenvalidate.SelectedFunctionCoverage{{
-			ID: index.Files[0].Functions[0].ID, FileID: index.Files[0].ID, Summary: metric,
-		}},
-	}
-	if got.SnapshotDigest != run.Record.SnapshotDigest || got.ToolchainID != index.ToolchainID || got.SourceDigest != wantSource ||
-		!reflect.DeepEqual(got.Baseline, wantCoverage) || len(got.PreviousReceipt) != 0 {
-		t.Fatalf("context=%+v wantCoverage=%+v", got, wantCoverage)
+	for _, id := range productionToolchainIdentityTestIDs()[:3] {
+		t.Run(id, func(t *testing.T) {
+			run, index, _, _, target, _ := productionManagedFixture(t)
+			index.ToolchainID, target.toolchainID = id, id
+			metric := coveragedomain.Summary{
+				Functions: coveragedomain.Metric{Covered: 0, Total: 1},
+				Lines:     coveragedomain.Metric{Covered: 2, Total: 4},
+				Branches:  coveragedomain.Metric{Covered: 1, Total: 2},
+			}
+			index.Project.Summary = metric
+			index.Files[0].Summary = metric
+			index.Files[0].Functions[0].Summary = metric
+			rootPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(rootPath, "src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rootPath, "src", "classify.cpp"), []byte("int classify(int value) { return value; }\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := workspace.OpenRoot(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authority, err := newProductionManagedSelectionAuthority(productionManagedSelectionAuthorityConfig{
+				root: root, store: productionManagedSelectionStoreFixture{run: run},
+				resolver: productionManagedSelectionResolverFixture{target: target}, current: productionManagedIndexFixture{index: index},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := authority.Resolve(context.Background(), run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSource, err := testgenvalidate.WorkspaceSnapshotDigest(root.NativePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCoverage := testgenvalidate.SelectedCoverage{
+				Project: metric,
+				Files:   []testgenvalidate.SelectedFileCoverage{{ID: index.Files[0].ID, Summary: metric}},
+				Functions: []testgenvalidate.SelectedFunctionCoverage{{
+					ID: index.Files[0].Functions[0].ID, FileID: index.Files[0].ID, Summary: metric,
+				}},
+			}
+			if got.SnapshotDigest != run.Record.SnapshotDigest || got.ToolchainID != id || got.SourceDigest != wantSource ||
+				!reflect.DeepEqual(got.Baseline, wantCoverage) || len(got.PreviousReceipt) != 0 {
+				t.Fatalf("context=%+v wantCoverage=%+v", got, wantCoverage)
+			}
+		})
 	}
 }
 

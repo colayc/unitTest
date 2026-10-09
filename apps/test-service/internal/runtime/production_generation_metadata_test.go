@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,75 @@ import (
 	"unit-test-ide.local/test-service/internal/testgenrender"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
+
+func productionToolchainIdentityTestIDs() []string {
+	return []string{
+		"clang-cl-6c3869c0ae502e45d43c7cdb0aaead95681ee493e9489b710cbd48a",
+		"clang-" + strings.Repeat("a", 58), "Local.Clang_1",
+		"local.clang_1", "x", strings.Repeat("x", 128), "._-",
+		strings.Repeat("a", 64),
+	}
+}
+
+func TestProductionCompileBindingPreservesToolchainIdentity(t *testing.T) {
+	seen := map[string]string{}
+	root, target := productionCompileBindingFixture(t)
+	for _, id := range productionToolchainIdentityTestIDs() {
+		t.Run(id, func(t *testing.T) {
+			got, err := resolveProductionCompileBinding(root, "src/choose.c", []cmake.Target{target}, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := struct {
+				Version       int      `json:"version"`
+				ToolchainID   string   `json:"toolchainId"`
+				TargetID      string   `json:"targetId"`
+				TargetName    string   `json:"targetName"`
+				Configuration string   `json:"configuration"`
+				Source        string   `json:"source"`
+				Header        string   `json:"header"`
+				Arguments     []string `json:"arguments"`
+			}{1, id, target.ID, target.Name, target.Configuration, "src/choose.c", "include/choose.h", []string{"-std=c17", "-DFEATURE=1", "-Iinclude"}}
+			encoded, err := json.Marshal(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := productionBytesDigest(append([]byte("production-compile-snapshot-v1\x00"), encoded...))
+			if got.compileSnapshotDigest != want || !validProductionDigest(want) {
+				t.Fatalf("ID was not bound verbatim: got=%s want=%s", got.compileSnapshotDigest, want)
+			}
+			if prior, ok := seen[want]; ok && prior != id {
+				t.Fatalf("different IDs collide: %q %q", prior, id)
+			}
+			seen[want] = id
+		})
+	}
+}
+
+func TestProductionCompileBindingRejectsMalformedToolchainIdentity(t *testing.T) {
+	for _, id := range []string{"", strings.Repeat("x", 129), " leading", "trailing ", "a\tb", "a\nb", "a\x00b", "a/b", "a\\b", "工具链", "aé"} {
+		root, target := productionCompileBindingFixture(t)
+		if _, err := resolveProductionCompileBinding(root, "src/choose.c", []cmake.Target{target}, id); err == nil {
+			t.Fatalf("malformed ID accepted: %q", id)
+		}
+	}
+}
+
+func TestProductionCompileBindingKeepsTargetAndProfileDigestsStrict(t *testing.T) {
+	for _, bad := range []string{"clang-" + strings.Repeat("a", 58), strings.Repeat("A", 64), strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+		for _, field := range []string{"target", "profile"} {
+			root, target := productionCompileBindingFixture(t)
+			if field == "target" {
+				target.ID = bad
+			} else {
+				target.ProfileID = bad
+			}
+			if _, err := resolveProductionCompileBinding(root, "src/choose.c", []cmake.Target{target}, "Local.Clang_1"); err == nil {
+				t.Fatalf("bad %s digest accepted: %q", field, bad)
+			}
+		}
+	}
+}
 
 func TestResolveProductionCompileBindingUsesExactCMakeUnit(t *testing.T) {
 	root, target := productionCompileBindingFixture(t)
