@@ -1,11 +1,11 @@
 # Windows protected tool digest reuse
 
 Date: 2026-10-09
-Status: presented design approved; written-spec review pending; implementation not authorized.
+Status: written spec approved by the human's subsequent “继续”; implementation plan prepared, execution choice pending; implementation not started.
 
 ## 0. Resumed design-only scope and version boundary
 
-On 2026-10-09 the human explicitly paused the eleven-capability product expansion and deferred it to version 2, returning to this Windows protected tool digest reuse design. Reuse this existing spec (first committed as a45902f2), rather than create another competing design. This turn records the design and pause only: no implementation plan, production change, test run or native launch is authorized.
+On 2026-10-09 the human explicitly paused the eleven-capability product expansion and deferred it to version 2, returning to this Windows protected tool digest reuse design. Reuse this existing spec (first committed as a45902f2), rather than create another competing design. At that design-only checkpoint, only the design and pause were recorded; no implementation plan, production change, test run or native launch was authorized. The subsequent “继续” accepts written-spec review and advances to implementation-plan preparation only. The plan is docs/superpowers/plans/2026-10-09-windows-protected-tool-digest-reuse.md; execution method is still awaiting the human's choice. No production code, tests or native runs are performed in this planning turn.
 
 The requested contract remains: reuse tool digests only within one coverage-index attestation; compute the first complete hash while holding a Windows write/delete-denying guard; recheck path and file identity on every reuse; keep both full workspace discoveries and all source/report/permission checks; fall back to original full verification when optional protection cannot be established; fail on bound identity drift; retain at most 128 tool files and release guards on success/error/cancellation. Focused reuse/change/release/concurrency tests precede any future implementation acceptance; Linux retains the original logic and native is not automatically rerun. This reduces repeated hashing, without a promise to eliminate all of the observed 27-second latency.
 
@@ -115,7 +115,7 @@ No push, PR update, master synchronization, merge, force operation, Release, sig
 
 The newly requested all-function/class boundary/random generation, manual/data-driven wizard, true statement/MC/DC metrics, static-test management and transfer/report features are a separate version 2 requirements expansion, explicitly paused by the human. This deferral includes the unified-maintainable-case implementation plan; preserve its completed and partial work for later resumption. These features must not broaden this performance fix or be reported as implemented by it.
 
-Written-spec review is required before writing-plans. The later plan must define exact source ownership, focused tests, review gates and return to original W4. Original dual-framework/native/maintenance/clean-SHA/global/whole-PR/hosted/package and Phase 8 release gates remain open.
+Written-spec review has been accepted for the planning handoff. The implementation plan defines exact source ownership, focused tests, review gates and return to original W4; it is not implementation or native acceptance evidence. Original dual-framework/native/maintenance/clean-SHA/global/whole-PR/hosted/package and Phase 8 release gates remain open.
 
 ## References
 
