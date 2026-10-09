@@ -26,15 +26,16 @@ import (
 // path, OS identity, and content immediately before and after probing and fails
 // closed if that publication contract is violated.
 type fileSnapshot struct {
-	path         string
-	file         *os.File
-	info         os.FileInfo
-	digest       string
-	osIdentity   string
-	toolEvidence *toolhash.Evidence
-	toolContext  context.Context
-	maximum      int64
-	onFullHash   func()
+	path                string
+	file                *os.File
+	info                os.FileInfo
+	digest              string
+	osIdentity          string
+	toolEvidence        *toolhash.Evidence
+	toolContext         context.Context
+	maximum             int64
+	onFullHash          func()
+	beforePostPathCheck func() // observes the real late path check; cannot provide identity or digest
 }
 
 // LaunchInputLease retains stable no-write/no-delete handles for every parsed
@@ -124,7 +125,12 @@ func captureFileSnapshot(path string, maximum int64) (*fileSnapshot, error) {
 	return captureSnapshot(context.Background(), path, maximum, false, nil)
 }
 
-func captureSnapshot(ctx context.Context, path string, maximum int64, eligible bool, onFullHash func()) (*fileSnapshot, error) {
+func captureSnapshot(ctx context.Context, path string, maximum int64, eligible bool, onFullHash func()) (_ *fileSnapshot, resultErr error) {
+	defer func() {
+		if eligible {
+			toolhash.RejectRetained(ctx, path, resultErr)
+		}
+	}()
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -213,7 +219,8 @@ func (snapshot *fileSnapshot) ReadAll(maximum int64) ([]byte, error) {
 	return data, nil
 }
 
-func (snapshot *fileSnapshot) Verify() error {
+func (snapshot *fileSnapshot) Verify() (resultErr error) {
+	defer func() { snapshot.rejectToolFailure(resultErr) }()
 	if snapshot == nil || snapshot.file == nil {
 		return fmt.Errorf("file snapshot is closed")
 	}
@@ -250,6 +257,9 @@ func (snapshot *fileSnapshot) Verify() error {
 	if digest != snapshot.digest {
 		return fmt.Errorf("file content changed")
 	}
+	if snapshot.beforePostPathCheck != nil {
+		snapshot.beforePostPathCheck()
+	}
 	after, err := directRegularPathInfo(snapshot.path)
 	if err != nil {
 		return err
@@ -258,6 +268,12 @@ func (snapshot *fileSnapshot) Verify() error {
 		return fmt.Errorf("path changed while verifying")
 	}
 	return nil
+}
+
+func (snapshot *fileSnapshot) rejectToolFailure(err error) {
+	if snapshot != nil {
+		snapshot.toolEvidence.Reject(err)
+	}
 }
 
 func directRegularPathInfo(path string) (os.FileInfo, error) {

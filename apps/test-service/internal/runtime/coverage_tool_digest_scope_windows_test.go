@@ -11,11 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/discovery"
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/toolhash"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -26,6 +29,107 @@ type digestScopeCoordinator struct {
 	results          []toolhash.Result
 	contexts         []context.Context
 	afterDigest      func(context.Context, int) error
+}
+
+type optionalConsumerAdapter struct {
+	toolchain.Adapter
+	discover func(context.Context) ([]toolchain.Instance, error)
+}
+
+func (a *optionalConsumerAdapter) Discover(ctx context.Context) ([]toolchain.Instance, error) {
+	return a.discover(ctx)
+}
+
+type noNativeDigestRunner struct{}
+
+func (noNativeDigestRunner) Run(context.Context, probe.Spec) (probe.Result, error) {
+	return probe.Result{}, errors.New("unexpected native probe request")
+}
+
+type inspectorDigestCoordinator struct {
+	runtimeCoordinator
+	inspector *discovery.Inspector
+	snapshots []discovery.Snapshot
+}
+
+func (c *inspectorDigestCoordinator) Inspect(ctx context.Context) (discovery.Snapshot, error) {
+	s, err := c.inspector.Inspect(ctx)
+	if err == nil {
+		c.snapshots = append(c.snapshots, s)
+	}
+	return s, err
+}
+
+// Controlled optional adapter/output and stored index metadata; actual CMake
+// consumer, Registry, Inspector, guards and runtime gates. No native execution
+// or claim of an on-disk replacement beneath a retained deny-delete guard.
+func TestRuntimeToolDigestScopeSwallowedConsumerFailure(t *testing.T) {
+	r, stored, _, q := newDigestScopeRuntime(t)
+	dir := t.TempDir()
+	path, alias := filepath.Join(dir, "cmake.exe"), filepath.Join(dir, "alias.exe")
+	if err := os.WriteFile(path, []byte("optional tool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	var consumerErrors []error
+	adapter := &optionalConsumerAdapter{discover: func(ctx context.Context) ([]toolchain.Instance, error) {
+		calls++
+		selected := path
+		if calls == 2 {
+			selected = alias
+		}
+		_, err := cmake.Resolve(ctx, noNativeDigestRunner{}, cmake.ResolverConfig{Override: selected})
+		consumerErrors = append(consumerErrors, err)
+		return nil, err
+	}}
+	registry, err := toolchain.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspector, err := discovery.NewInspector(r.workspaceRoot, noNativeDigestRunner{}, cmake.ResolverConfig{}, registry, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := inspector.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, consumerErrors = 0, nil
+	q.WorkspaceGeneration = baseline.Generation
+	stored.index.WorkspaceGeneration = baseline.Generation
+	stored.run.Request.WorkspaceGeneration = baseline.Generation
+	c := &inspectorDigestCoordinator{inspector: inspector}
+	r.coordinator = c
+	index, err := r.ReadCurrentCoverageIndex(context.Background(), q)
+	if !errors.Is(err, task.ErrStorageUnavailable) || !reflect.DeepEqual(index, coveragedetail.Index{}) {
+		t.Errorf("swallowed bound failure returned index=%+v err=%v", index, err)
+	}
+	if calls != 2 || len(c.snapshots) != 2 {
+		t.Fatalf("inspections=%d snapshots=%d", calls, len(c.snapshots))
+	}
+	if !errors.Is(consumerErrors[0], cmake.ErrCTestUnavailable) || !errors.Is(consumerErrors[1], cmake.ErrInvalidExecutable) {
+		t.Fatalf("consumer errors=%v", consumerErrors)
+	}
+	for _, snapshot := range c.snapshots {
+		if snapshot.Generation != baseline.Generation || len(snapshot.Toolchains) != 0 || len(snapshot.Profiles) != 0 {
+			t.Fatal("optional failure changed generation/output")
+		}
+		found := false
+		for _, d := range snapshot.Diagnostics {
+			if d.Code == "TOOLCHAIN_DISCOVERY_FAILED" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("Inspector did not preserve best-effort diagnostic")
+		}
+	}
+	if err := os.WriteFile(path, []byte("released"), 0600); err != nil {
+		t.Fatal("guard leaked", err)
+	}
 }
 
 func (c *digestScopeCoordinator) Inspect(ctx context.Context) (discovery.Snapshot, error) {

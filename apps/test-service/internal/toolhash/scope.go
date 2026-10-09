@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -17,6 +18,7 @@ const MaxEligibleBytes int64 = 512 * 1024 * 1024
 type Scope struct {
 	mu           sync.Mutex
 	entries      map[string]*entry
+	spellings    map[string]*entry // at most MaxEntries additional spellings
 	parent, work context.Context
 	stop         context.CancelFunc
 	closed       bool
@@ -49,6 +51,7 @@ type identity struct {
 type entry struct {
 	mu            sync.Mutex
 	path          string
+	inputPath     string // immutable original spelling, also usable after canonicalization fails
 	guard         *os.File
 	guardCloseErr error // entry.mu: retained even after another closer consumed guard
 	original      identity
@@ -69,7 +72,7 @@ type scopeKey struct{}
 
 func newScope(ctx context.Context, ops scopeOps, maxEntries int, maxBytes int64) *Scope {
 	work, stop := context.WithCancel(ctx)
-	return &Scope{entries: make(map[string]*entry), parent: ctx, work: work, stop: stop, ops: ops, maxEntries: maxEntries, maxBytes: maxBytes}
+	return &Scope{entries: make(map[string]*entry), spellings: make(map[string]*entry), parent: ctx, work: work, stop: stop, ops: ops, maxEntries: maxEntries, maxBytes: maxBytes}
 }
 func contextError(ctx context.Context) error {
 	if ctx == nil {
@@ -120,6 +123,10 @@ func (s *Scope) poison(err error) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.poisonLocked(err)
+}
+
+func (s *Scope) poisonLocked(err error) error {
 	// A worker unwinding internal cancellation after Close cannot manufacture a
 	// sticky external failure or change the idempotent Close result.
 	if !s.closed && s.failed == nil {
@@ -127,6 +134,63 @@ func (s *Scope) poison(err error) error {
 		s.stop()
 	}
 	return err
+}
+
+// Reject records a consumer's bound validation failure without replacing its
+// error mapping. Nil evidence is deliberately a no-op for ordinary inputs.
+func (e *Evidence) Reject(err error) {
+	if e != nil && e.scope != nil {
+		e.scope.poison(err)
+	}
+}
+
+// RejectRetained records a pre-capture rejection only when the tool path was
+// already retained. Check the lexical spelling even if filesystem resolution
+// fails. Canonicalization performs no hashing and runs outside the scope lock;
+// matching never acquires an entry lock or merges distinct hard-link names.
+func RejectRetained(ctx context.Context, path string, err error) {
+	if err == nil || ctx == nil || !filepath.IsAbs(path) {
+		return
+	}
+	s, _ := ctx.Value(scopeKey{}).(*Scope)
+	if s == nil {
+		return
+	}
+	cleaned := filepath.Clean(path)
+	canonical, _ := filepath.EvalSymlinks(cleaned)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.spellingOwnerLocked(cleaned) != nil || canonical != "" && s.entries[filepath.Clean(canonical)] != nil {
+		s.poisonLocked(err)
+	}
+}
+
+// Caller holds only scope.mu. Names are exact, not folded or inode-matched.
+func (s *Scope) spellingOwnerLocked(path string) *entry {
+	if item := s.entries[path]; item != nil {
+		return item
+	}
+	if item := s.spellings[path]; item != nil {
+		return item
+	}
+	for _, item := range s.entries {
+		if item.inputPath == path {
+			return item
+		}
+	}
+	return nil
+}
+
+func (s *Scope) admitSpellingLocked(item *entry, path string) bool {
+	path = filepath.Clean(path)
+	if owner := s.spellingOwnerLocked(path); owner != nil {
+		return owner == item
+	}
+	if len(s.spellings) >= MaxEntries {
+		return false
+	}
+	s.spellings[path] = item
+	return true
 }
 
 func (e *entry) finish() { e.finishOnce.Do(func() { close(e.ready) }) }
@@ -181,6 +245,7 @@ func (s *Scope) Close() error {
 		}
 		s.mu.Lock()
 		s.entries = make(map[string]*entry)
+		s.spellings = make(map[string]*entry)
 		s.stats.Retained = 0
 		s.failed = errors.Join(s.failed, closeErr)
 		s.closeErr = errors.Join(s.failed, s.parent.Err())

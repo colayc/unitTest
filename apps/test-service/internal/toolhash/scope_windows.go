@@ -145,6 +145,12 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 		s.mu.Unlock()
 		return Result{}, false, nil
 	}
+	for _, spelling := range []string{filepath.Clean(path), canonical} {
+		if owner := s.spellingOwnerLocked(spelling); owner != nil && owner.path != canonical {
+			s.mu.Unlock()
+			return Result{}, false, s.poison(errors.New("retained tool spelling changed"))
+		}
+	}
 	if e := s.entries[canonical]; e != nil {
 		s.mu.Unlock()
 		select {
@@ -161,6 +167,7 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 		err := s.liveLocked(ctx)
 		complete := e.complete
 		evidence := e.evidence
+		tracked := err == nil && complete && s.admitSpellingLocked(e, path)
 		s.mu.Unlock()
 		if err != nil {
 			return Result{}, false, s.poison(err)
@@ -168,7 +175,9 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 		if !complete {
 			return Result{}, false, nil
 		}
-		digest, err := evidence.Verify(ctx, path, consumer, maximum)
+		// Even an untracked optional miss must complete the bound identity and
+		// live-guard checks; the spelling budget cannot hide a bound failure.
+		digest, err := evidence.verify(ctx, path, consumer, maximum, false)
 		if err != nil {
 			return Result{}, false, err
 		}
@@ -176,6 +185,10 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 		if err := s.liveLocked(ctx); err != nil {
 			s.mu.Unlock()
 			return Result{}, false, s.poison(err)
+		}
+		if !tracked {
+			s.mu.Unlock()
+			return Result{}, false, nil
 		}
 		s.stats.Reuses++
 		result := Result{SHA256: digest, Size: e.size, Evidence: evidence, Reused: true}
@@ -186,7 +199,7 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 		s.mu.Unlock()
 		return Result{}, false, nil
 	}
-	e := &entry{path: canonical, ready: make(chan struct{})}
+	e := &entry{path: canonical, inputPath: filepath.Clean(path), ready: make(chan struct{})}
 	s.entries[canonical] = e
 	// Open/register under admission serialization, so Close cannot miss a late
 	// guard. There is no entry-lock acquisition under the membership lock.
@@ -274,6 +287,10 @@ func Digest(ctx context.Context, path string, consumer *os.File, maximum int64) 
 }
 
 func (e *Evidence) Verify(ctx context.Context, path string, consumer *os.File, maximum int64) (string, error) {
+	return e.verify(ctx, path, consumer, maximum, true)
+}
+
+func (e *Evidence) verify(ctx context.Context, path string, consumer *os.File, maximum int64, trackSpelling bool) (string, error) {
 	if e == nil || e.scope == nil || e.entry == nil {
 		return "", errors.New("tool hash evidence unavailable")
 	}
@@ -292,6 +309,12 @@ func (e *Evidence) Verify(ctx context.Context, path string, consumer *os.File, m
 	err = s.liveLocked(ctx)
 	if err == nil && (!item.complete || item.evidence != e || canonical != item.path || s.entries[item.path] != item || maximum > 0 && item.size > maximum) {
 		err = errors.New("tool evidence binding changed")
+	}
+	if owner := s.spellingOwnerLocked(filepath.Clean(path)); err == nil && owner != nil && owner != item {
+		err = errors.New("retained tool spelling changed")
+	}
+	if err == nil && trackSpelling && !s.admitSpellingLocked(item, path) {
+		err = errors.New("tool evidence spelling budget exhausted")
 	}
 	original, digest := item.original, item.digest
 	s.mu.Unlock()

@@ -10,12 +10,348 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestToolHashRetainedRejectionMatching(t *testing.T) {
+	for _, mode := range []string{"canonical-unavailable", "later-spelling", "canonical-alias", "unbound-alias", "distinct-hardlink", "unbound-missing"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "real")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "tool.exe")
+			if err := os.WriteFile(path, []byte("real bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			input, rejected := path, filepath.Join(root, "missing.exe")
+			switch mode {
+			case "canonical-unavailable", "later-spelling":
+				alias := filepath.Join(root, "alias")
+				if err := os.Symlink(dir, alias); err != nil {
+					t.Fatal(err)
+				}
+				input, rejected = filepath.Join(alias, "tool.exe"), filepath.Join(alias, "tool.exe")
+				if mode == "later-spelling" {
+					input = path
+				}
+			case "canonical-alias", "unbound-alias":
+				target := path
+				if mode == "unbound-alias" {
+					target = filepath.Join(dir, "other.exe")
+					if err := os.WriteFile(target, []byte("real bytes"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rejected = filepath.Join(root, "alias.exe")
+				if err := os.Symlink(target, rejected); err != nil {
+					t.Fatal(err)
+				}
+			case "distinct-hardlink":
+				rejected = filepath.Join(root, "hardlink.exe")
+				if err := os.Link(path, rejected); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, s, err := Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			f, err := os.Open(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			r, ok, err := Digest(ctx, input, f, 4096)
+			if err != nil || !ok {
+				t.Fatalf("capture: %v %v", ok, err)
+			}
+			if mode == "later-spelling" {
+				if _, ok, err := Digest(ctx, rejected, f, 4096); err != nil || !ok {
+					t.Fatalf("later spelling not bound: %v %v", ok, err)
+				}
+			}
+			if mode == "canonical-unavailable" || mode == "later-spelling" {
+				if err := os.Remove(filepath.Dir(rejected)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := filepath.EvalSymlinks(rejected); err == nil {
+					t.Fatal("canonical path still available")
+				}
+			}
+			sentinel := errors.New("consumer precheck rejection")
+			RejectRetained(ctx, rejected, sentinel)
+			_, verifyErr := r.Evidence.Verify(ctx, path, f, 4096)
+			if mode == "canonical-unavailable" || mode == "later-spelling" || mode == "canonical-alias" {
+				if !errors.Is(s.Err(), sentinel) || verifyErr == nil || !errors.Is(s.Close(), sentinel) {
+					t.Fatal("retained rejection lost")
+				}
+			} else if s.Err() != nil || verifyErr != nil || s.Close() != nil {
+				t.Fatal("unbound or distinct hard-link name poisoned scope")
+			}
+		})
+	}
+}
+
+func TestToolHashConcurrentConsumerRejection(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tool.exe")
+	if err := os.WriteFile(p, []byte("real bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, s, err := Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r, ok, err := Digest(ctx, p, f, 4096)
+	if err != nil || !ok {
+		t.Fatalf("capture: %v %v", ok, err)
+	}
+	sentinel := errors.New("consumer rejection")
+	var workers sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		workers.Add(1)
+		go func(i int) {
+			defer workers.Done()
+			switch i % 3 {
+			case 0:
+				RejectRetained(ctx, p, sentinel)
+			case 1:
+				r.Evidence.Reject(sentinel)
+			case 2:
+				_, _ = r.Evidence.Verify(ctx, p, f, 4096)
+			}
+		}(i)
+	}
+	workers.Wait()
+	if !errors.Is(s.Err(), sentinel) {
+		t.Fatal("concurrent rejection lost")
+	}
+	closed := async(t, s.Close)
+	RejectRetained(ctx, p, sentinel)
+	if !errors.Is(receive(t, closed), sentinel) {
+		t.Fatal("Close lost rejection")
+	}
+	if _, _, err := Digest(ctx, p, f, 4096); err == nil {
+		t.Fatal("closed rejected scope revived")
+	}
+}
+
+func TestToolHashAdditionalSpellingBudget(t *testing.T) {
+	for _, mode := range []string{"bound-verify", "invalid-guard"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "real")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(dir, "tool.exe")
+			if err := os.WriteFile(p, []byte("real bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, s, err := Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			f, err := os.Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			r, ok, err := Digest(ctx, p, f, 4096)
+			if err != nil || !ok {
+				t.Fatalf("capture: %v %v", ok, err)
+			}
+			var last string
+			for i := 0; i < 129; i++ {
+				alias := filepath.Join(root, "alias-"+strconv.Itoa(i))
+				if err := os.Symlink(dir, alias); err != nil {
+					t.Fatal(err)
+				}
+				last = filepath.Join(alias, "tool.exe")
+				got, protected, err := Digest(ctx, last, f, 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i < 128 && (!protected || !got.Reused) {
+					t.Fatalf("spelling %d was not admitted", i)
+				}
+				if i == 128 && (protected || got.Evidence != nil) {
+					t.Error("additional spelling budget was not bounded")
+				}
+			}
+			if s.Err() != nil {
+				t.Fatal("unseen optional spelling poisoned scope")
+			}
+			if _, err := r.Evidence.Verify(ctx, p, f, 4096); err != nil {
+				t.Fatal("known spelling stopped working", err)
+			}
+			if mode == "invalid-guard" {
+				if err := s.closeEntry(r.Evidence.entry); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := Digest(ctx, last, f, 4096); err == nil {
+					t.Fatal("overflow hid invalidated guard")
+				}
+			} else {
+				if _, err := r.Evidence.Verify(ctx, last, f, 4096); err == nil {
+					t.Error("bound Verify silently exceeded spelling budget")
+				}
+			}
+			if s.Err() == nil || s.Close() == nil {
+				t.Error("bound spelling rejection was not sticky")
+			}
+		})
+	}
+}
+
+func TestToolHashConcurrentSpellingAdmission(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "real")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tool.exe")
+	if err := os.WriteFile(p, []byte("real bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, s, err := Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, ok, err := Digest(ctx, p, f, 4096); err != nil || !ok {
+		t.Fatalf("capture: %v %v", ok, err)
+	}
+	var paths []string
+	for i := 0; i < 129; i++ {
+		alias := filepath.Join(root, "alias-"+strconv.Itoa(i))
+		if err := os.Symlink(dir, alias); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, filepath.Join(alias, "tool.exe"))
+	}
+	start := make(chan struct{})
+	var results []<-chan digestOutcome
+	for _, path := range paths {
+		results = append(results, async(t, func() digestOutcome {
+			consumer, err := os.Open(path)
+			if err != nil {
+				return digestOutcome{err: err}
+			}
+			defer consumer.Close()
+			<-start
+			r, ok, err := Digest(ctx, path, consumer, 4096)
+			return digestOutcome{r, ok, err}
+		}))
+	}
+	close(start)
+	protected, misses := 0, 0
+	for _, done := range results {
+		result := receive(t, done)
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.ok {
+			protected++
+		} else {
+			misses++
+		}
+	}
+	if protected != 128 || misses != 1 || s.Stats().FullHashCalls != 1 {
+		t.Fatalf("protected=%d misses=%d stats=%+v", protected, misses, s.Stats())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.spellings) != 0 {
+		t.Fatal("spelling ledger survived Close")
+	}
+}
+
+func TestToolHashKnownSpellingCannotChangeOwner(t *testing.T) {
+	for _, first := range []bool{true, false} {
+		for _, retainedTarget := range []bool{true, false} {
+			t.Run(strconv.FormatBool(first)+"/target-retained-"+strconv.FormatBool(retainedTarget), func(t *testing.T) {
+				root := t.TempDir()
+				left, right, alias := filepath.Join(root, "left"), filepath.Join(root, "right"), filepath.Join(root, "alias")
+				for _, dir := range []string{left, right} {
+					if err := os.Mkdir(dir, 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, "tool.exe"), []byte("same bytes"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(left, alias); err != nil {
+					t.Fatal(err)
+				}
+				ctx, s, err := Begin(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+				f, err := os.Open(filepath.Join(left, "tool.exe"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				input := filepath.Join(left, "tool.exe")
+				if first {
+					input = filepath.Join(alias, "tool.exe")
+				}
+				if _, ok, err := Digest(ctx, input, f, 4096); err != nil || !ok {
+					t.Fatalf("first: %v %v", ok, err)
+				}
+				if !first {
+					if _, ok, err := Digest(ctx, filepath.Join(alias, "tool.exe"), f, 4096); err != nil || !ok {
+						t.Fatalf("alias: %v %v", ok, err)
+					}
+				}
+				g, err := os.Open(filepath.Join(right, "tool.exe"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer g.Close()
+				if retainedTarget {
+					if _, ok, err := Digest(ctx, filepath.Join(right, "tool.exe"), g, 4096); err != nil || !ok {
+						t.Fatalf("target: %v %v", ok, err)
+					}
+				}
+				if err := os.Remove(alias); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(right, alias); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := Digest(ctx, filepath.Join(alias, "tool.exe"), g, 4096); err == nil {
+					t.Fatal("known spelling changed owner")
+				}
+				if s.Err() == nil || s.Close() == nil {
+					t.Fatal("ownership rejection not sticky")
+				}
+			})
+		}
+	}
+}
 
 func TestToolHashScopeReusesProtectedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tool.exe")

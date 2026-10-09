@@ -853,7 +853,12 @@ func openExecutableSnapshotWithDigestObserver(
 	maximum int64,
 	beforeDigest func(),
 	onFullHash func(),
-) (*executableSnapshot, error) {
+) (_ *executableSnapshot, resultErr error) {
+	defer func() {
+		if eligibleExecutableDigest(path) {
+			toolhash.RejectRetained(ctx, path, resultErr)
+		}
+	}()
 	if ctx == nil {
 		return nil, errors.New("snapshot context is nil")
 	}
@@ -937,7 +942,12 @@ func (snapshot *executableSnapshot) Close() error {
 	return snapshot.file.Close()
 }
 
-func (snapshot *executableSnapshot) Verify(ctx context.Context) error {
+func (snapshot *executableSnapshot) Verify(ctx context.Context) (resultErr error) {
+	defer func() {
+		if snapshot != nil {
+			snapshot.toolEvidence.Reject(resultErr)
+		}
+	}()
 	if snapshot == nil || snapshot.file == nil {
 		return errors.New("snapshot is closed")
 	}

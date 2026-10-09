@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/probe"
+	"unit-test-ide.local/test-service/internal/toolhash"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -137,6 +138,7 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	}
 	root, err := canonicalBundleRoot(config.BundleRoot)
 	if err != nil {
+		rejectRetainedBundleTools(ctx, config.BundleRoot, policy, key, err)
 		return Installation{}, err
 	}
 	manifestPath, err := containedRegularPath(root, "manifest.json")
@@ -166,6 +168,7 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	snapshots = append(snapshots, stateSnapshot)
 	installRoot, err := containedDirectoryPath(root, filepath.Join(platformRelative, filepath.FromSlash(archive.RootDirectory)))
 	if err != nil {
+		rejectRetainedBundleTools(ctx, root, policy, key, err)
 		return Installation{}, fmt.Errorf("%w: install root: %v", ErrBundleIntegrity, err)
 	}
 
@@ -174,6 +177,9 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	for relative, expectedDigest := range archive.InstalledFiles {
 		filePath, err := containedRegularPath(installRoot, filepath.FromSlash(relative))
 		if err != nil {
+			if relative == archive.Executable || relative == archive.CTestExecutable {
+				toolhash.RejectRetained(ctx, filepath.Join(installRoot, filepath.FromSlash(relative)), err)
+			}
 			return Installation{}, fmt.Errorf("%w: installed file %q: %v", ErrBundleIntegrity, relative, err)
 		}
 		var snapshot *fileSnapshot
@@ -188,7 +194,9 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		snapshots = append(snapshots, snapshot)
 		actualDigest := snapshot.digest
 		if actualDigest != expectedDigest {
-			return Installation{}, fmt.Errorf("%w: installed file %q digest mismatch", ErrBundleIntegrity, relative)
+			err := fmt.Errorf("%w: installed file %q digest mismatch", ErrBundleIntegrity, relative)
+			snapshot.rejectToolFailure(err)
+			return Installation{}, err
 		}
 		resolvedFiles[relative] = filePath
 		installed = append(installed, installedFileIdentity{
@@ -205,6 +213,7 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		return Installation{}, fmt.Errorf("%w: executable snapshot is missing", ErrBundleIntegrity)
 	}
 	if err := requireExecutableMode(executable, executableSnapshot.info); err != nil {
+		executableSnapshot.rejectToolFailure(err)
 		return Installation{}, err
 	}
 	ctestExecutable := resolvedFiles[archive.CTestExecutable]
@@ -213,6 +222,7 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		return Installation{}, fmt.Errorf("%w: CTest executable snapshot is missing", ErrBundleIntegrity)
 	}
 	if err := requireExecutableMode(ctestExecutable, ctestSnapshot.info); err != nil {
+		ctestSnapshot.rejectToolFailure(err)
 		return Installation{}, err
 	}
 	if err := verifyBundleSnapshots(root, snapshots); err != nil {
@@ -271,6 +281,16 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	}, nil
 }
 
+// Only failed publication boundaries invalidate the two retained tool paths.
+// Manifest, state and other installed-file failures remain ordinary errors.
+func rejectRetainedBundleTools(ctx context.Context, root string, policy Manifest, key string, err error) {
+	archive := policy.Archives[key]
+	installation := filepath.Join(root, policy.CMakeVersion, key, filepath.FromSlash(archive.RootDirectory))
+	for _, relative := range []string{archive.Executable, archive.CTestExecutable} {
+		toolhash.RejectRetained(ctx, filepath.Join(installation, filepath.FromSlash(relative)), err)
+	}
+}
+
 func platformKey(platform, architecture string) (string, error) {
 	if architecture != "x64" {
 		return "", fmt.Errorf("%w: unsupported architecture %q", ErrCMakeUnavailable, architecture)
@@ -307,7 +327,8 @@ func verifyStandaloneExecutable(executable string) (string, *fileSnapshot, error
 	return verifyStandaloneExecutableWithContext(context.Background(), executable)
 }
 
-func verifyStandaloneExecutableWithContext(ctx context.Context, executable string) (string, *fileSnapshot, error) {
+func verifyStandaloneExecutableWithContext(ctx context.Context, executable string) (_ string, _ *fileSnapshot, resultErr error) {
+	defer func() { toolhash.RejectRetained(ctx, executable, resultErr) }()
 	if executable == "" || !filepath.IsAbs(executable) {
 		return "", nil, fmt.Errorf("%w: path must be absolute", ErrInvalidExecutable)
 	}
@@ -388,7 +409,8 @@ func closeFileSnapshots(snapshots []*fileSnapshot) {
 	}
 }
 
-func verifyStandaloneSnapshot(canonical string, snapshot *fileSnapshot) error {
+func verifyStandaloneSnapshot(canonical string, snapshot *fileSnapshot) (resultErr error) {
+	defer func() { snapshot.rejectToolFailure(resultErr) }()
 	parent, err := workspace.OpenRoot(filepath.Dir(canonical))
 	if err != nil {
 		return fmt.Errorf("reopen executable parent boundary: %w", err)
@@ -410,7 +432,10 @@ func verifyStandalonePair(
 	ctestSnapshot *fileSnapshot,
 ) error {
 	if filepath.Dir(cmakePath) != filepath.Dir(ctestPath) {
-		return fmt.Errorf("CMake and CTest are not in the same installation directory")
+		err := fmt.Errorf("CMake and CTest are not in the same installation directory")
+		cmakeSnapshot.rejectToolFailure(err)
+		ctestSnapshot.rejectToolFailure(err)
+		return err
 	}
 	if err := verifyStandaloneSnapshot(cmakePath, cmakeSnapshot); err != nil {
 		return err
@@ -421,14 +446,23 @@ func verifyStandalonePair(
 func verifyBundleSnapshots(root string, snapshots []*fileSnapshot) error {
 	boundary, err := workspace.OpenRoot(root)
 	if err != nil {
+		for _, snapshot := range snapshots {
+			snapshot.rejectToolFailure(err)
+		}
 		return fmt.Errorf("reopen bundle boundary: %w", err)
 	}
 	if identityPath(boundary.NativePath) != identityPath(root) {
-		return fmt.Errorf("bundle root identity changed")
+		err := fmt.Errorf("bundle root identity changed")
+		for _, snapshot := range snapshots {
+			snapshot.rejectToolFailure(err)
+		}
+		return err
 	}
 	for _, snapshot := range snapshots {
 		if !boundary.Contains(snapshot.path) {
-			return fmt.Errorf("%q: no longer contained by bundle root", snapshot.path)
+			err := fmt.Errorf("%q: no longer contained by bundle root", snapshot.path)
+			snapshot.rejectToolFailure(err)
+			return err
 		}
 		if err := snapshot.Verify(); err != nil {
 			return fmt.Errorf("%q: %w", snapshot.path, err)

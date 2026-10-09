@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,6 +155,36 @@ func TestToolchainToolDigestSmallerLimitAndCancelled(t *testing.T) {
 		if full != 0 || s.Stats().FullHashCalls != 1 {
 			t.Fatalf("smaller limit rehashed: fallback=%d core=%+v", full, s.Stats())
 		}
+		if s.Err() == nil || snap.Verify(ctx) == nil || s.Close() == nil {
+			t.Fatal("retained capture limit rejection was not sticky")
+		}
+	})
+	t.Run("child verify cancellation only", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "tool.exe")
+		if err := os.WriteFile(p, []byte("tool"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, s, err := toolhash.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		snap, err := openExecutableSnapshotWithLimit(ctx, p, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer snap.Close()
+		child, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := snap.Verify(child); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Verify: %v", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("parent cancelled")
+		}
+		if !errors.Is(s.Err(), context.Canceled) || snap.Verify(ctx) == nil || !errors.Is(s.Close(), context.Canceled) {
+			t.Fatal("bound child cancellation was not sticky")
+		}
 	})
 	t.Run("cancelled open and verify", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "tool.exe")
@@ -272,8 +303,17 @@ func TestToolchainToolDigestDifferentConsumerRejected(t *testing.T) {
 	if full != 0 || s.Stats().FullHashCalls != 1 {
 		t.Fatal("different consumer triggered fallback hashing")
 	}
-	if err := snap.Verify(ctx); err != nil {
-		t.Fatal("valid original consumer rejected", err)
+	if s.Err() == nil {
+		t.Error("bound consumer rejection did not poison scope")
+	}
+	if err := snap.Verify(ctx); err == nil {
+		t.Error("restored consumer revived evidence")
+	}
+	if _, _, err := toolhash.Digest(ctx, p, original, 4096); err == nil {
+		t.Error("restored consumer revived Digest")
+	}
+	if err := s.Close(); err == nil {
+		t.Error("bound consumer rejection lost at Close")
 	}
 }
 
@@ -312,5 +352,81 @@ func TestToolchainToolDigestSelectedSDKExcluded(t *testing.T) {
 				t.Fatal("excluded file stopped full hashing")
 			}
 		})
+	}
+}
+
+func TestToolchainToolDigestUnboundPrechecksStayHealthy(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "tool.exe")
+	if err := os.WriteFile(p, []byte("real tool"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, s, err := toolhash.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	snap, err := openExecutableSnapshotWithLimit(ctx, p, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	for _, name := range []string{"missing.exe", "setup.cmd", "sdk.lib"} {
+		if _, err := openExecutableSnapshotWithLimit(ctx, filepath.Join(root, name), 4096); err == nil {
+			t.Fatal("missing optional file accepted")
+		}
+	}
+	if s.Err() != nil || snap.Verify(ctx) != nil || s.Close() != nil {
+		t.Fatal("unbound optional failure poisoned scope")
+	}
+}
+
+func TestToolchainToolDigestSpellingBudgetFallback(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "real")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tool.exe")
+	if err := os.WriteFile(p, []byte("tool bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, s, err := toolhash.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	snap, err := openExecutableSnapshotWithLimit(ctx, p, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	for i := 0; i < 129; i++ {
+		alias := filepath.Join(root, "alias-"+strconv.Itoa(i))
+		if err := os.Symlink(dir, alias); err != nil {
+			t.Fatal(err)
+		}
+		full := 0
+		other, err := openExecutableSnapshotWithDigestObserver(ctx, filepath.Join(alias, "tool.exe"), 4096, nil, func() { full++ })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i < 128 && (other.toolEvidence == nil || full != 0) {
+			t.Error("admitted spelling did not reuse")
+		}
+		if i == 128 {
+			if other.toolEvidence != nil || full != 2 || other.digest != snap.digest {
+				t.Error("overflow did not fully hash capture and Verify")
+			}
+			if err := other.Verify(ctx); err != nil || full != 3 {
+				t.Error("overflow Verify did not fully hash", err)
+			}
+		}
+		if err := other.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Err() != nil || snap.Verify(ctx) != nil || s.Close() != nil {
+		t.Fatal("optional spelling overflow poisoned scope")
 	}
 }

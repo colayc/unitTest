@@ -166,6 +166,9 @@ func TestCMakeToolDigestBundleExcludesMetadata(t *testing.T) {
 	if _, err := resolveFixtureBundle(t, ctx, runner, config); !errors.Is(err, ErrBundleIntegrity) {
 		t.Fatalf("license SHA mismatch accepted: %v", err)
 	}
+	if s.Err() != nil {
+		t.Fatal("license failure poisoned tool scope")
+	}
 }
 
 func TestCMakeToolDigestClosedScopeFails(t *testing.T) {
@@ -354,8 +357,17 @@ func TestCMakeToolDigestPathDriftStillFails(t *testing.T) {
 		t.Fatal("path drift entered byte-hash fallback")
 	}
 	snap.path = p
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
+	if s.Err() == nil {
+		t.Error("bound path rejection did not poison scope")
+	}
+	if err := snap.Verify(); err == nil {
+		t.Error("restored path revived evidence")
+	}
+	if _, _, err := toolhash.Digest(ctx, p, snap.file, 0); err == nil {
+		t.Error("restored path revived Digest")
+	}
+	if err := s.Close(); err == nil {
+		t.Error("bound path rejection lost at Close")
 	}
 	if file, err := os.OpenFile(p, os.O_WRONLY, 0); err == nil {
 		file.Close()
@@ -371,5 +383,109 @@ func TestCMakeToolDigestPathDriftStillFails(t *testing.T) {
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCMakeToolDigestOuterRejections(t *testing.T) {
+	for _, mode := range []string{"parent", "containment", "pair", "capture-limit", "unbound-optional", "metadata"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			p := filepath.Join(root, "cmake.exe")
+			if err := os.WriteFile(p, []byte("tool"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, s, err := toolhash.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			snap, err := captureToolFileSnapshot(ctx, p, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer snap.Close()
+			switch mode {
+			case "parent":
+				err = verifyStandaloneSnapshot(filepath.Join(root, "missing", "cmake.exe"), snap)
+			case "containment":
+				err = verifyBundleSnapshots(t.TempDir(), []*fileSnapshot{snap})
+			case "pair":
+				err = verifyStandalonePair(p, snap, filepath.Join(t.TempDir(), "ctest.exe"), snap)
+			case "capture-limit":
+				_, err = captureToolFileSnapshot(ctx, p, 1)
+			case "unbound-optional":
+				_, _, err = verifyStandaloneExecutableWithContext(ctx, filepath.Join(root, "missing.exe"))
+			case "metadata":
+				metadata, e := captureFileSnapshot(p, 0)
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer metadata.Close()
+				metadata.path = filepath.Join(root, "missing.json")
+				err = verifyBundleSnapshots(root, []*fileSnapshot{metadata, snap})
+			}
+			if err == nil {
+				t.Fatal("verification unexpectedly succeeded")
+			}
+			if mode == "unbound-optional" || mode == "metadata" {
+				if s.Err() != nil || snap.Verify() != nil || s.Close() != nil {
+					t.Fatal("unbound failure poisoned scope")
+				}
+			} else if s.Err() == nil || snap.Verify() == nil || s.Close() == nil {
+				t.Fatal("outer bound failure was not sticky")
+			}
+		})
+	}
+}
+
+func TestCMakeToolDigestLatePathRejection(t *testing.T) {
+	root := t.TempDir()
+	p, other := filepath.Join(root, "cmake.exe"), filepath.Join(root, "other.exe")
+	for _, path := range []string{p, other} {
+		if err := os.WriteFile(path, []byte("same bytes"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, s, err := toolhash.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	snap, err := captureToolFileSnapshot(ctx, p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	observed := false
+	snap.beforePostPathCheck = func() { observed = true; snap.path = other }
+	err = snap.Verify()
+	snap.path, snap.beforePostPathCheck = p, nil
+	if !observed || err == nil {
+		t.Fatal("late real path check did not reject other object")
+	}
+	if s.Err() == nil || snap.Verify() == nil || s.Close() == nil {
+		t.Fatal("late rejection was not sticky")
+	}
+}
+
+func TestCMakeToolDigestBundleToolMismatch(t *testing.T) {
+	root := createBundle(t, "win32-x64")
+	policy, err := loadManifest(filepath.Join(root, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := policy.Archives["win32-x64"]
+	path := filepath.Join(root, policy.CMakeVersion, "win32-x64", filepath.FromSlash(archive.RootDirectory), filepath.FromSlash(archive.Executable))
+	if err := os.WriteFile(path, []byte("wrong tool bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, s, err := toolhash.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	_, err = resolveFixtureBundle(t, ctx, &versionRunner{t: t, version: policy.CMakeVersion}, ResolverConfig{BundleRoot: root, Platform: "win32", Architecture: "x64"})
+	if !errors.Is(err, ErrBundleIntegrity) || s.Err() == nil || s.Close() == nil {
+		t.Fatalf("bound tool mismatch: %v scope=%v", err, s.Err())
 	}
 }
