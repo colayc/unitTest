@@ -2,7 +2,7 @@
 
 Date: 2026-10-09
 
-Status: Human approved Option 1's direction. Written-spec review is pending; no diagnostic implementation or new native execution has been authorized by this document alone.
+Status: Human approved the written spec with “确认设计文档” on 2026-10-09. Implementation-plan execution choice is pending; no diagnostic code or new native execution has been performed by this document alone.
 
 ## Purpose and evidence limit
 
@@ -29,7 +29,7 @@ Exactly two existing source paths may change after written-spec and implementati
 
 The design/plan and the controller-owned original W4 report/evidence may record the diagnostic outcome. Runtime logs remain ignored artifacts, not source or acceptance receipts.
 
-Both source paths already contain uncommitted original W4 changes. Preserve those changes and their pre-diagnostic hashes; this diagnostic must not prematurely stage/commit the whole files and thereby consume the original W4 changes before its native gate. Diagnostic source commits are explicitly deferred to the original W4's conditional exact-path source commit. This is a proposed exception to the usual per-subtask commit flow, requiring this written-spec approval. Before editing, retain each pre-edit file's raw Git blob identity and SHA-256; the task review must receive the actual before/after blob diff plus full two-file context and hashes, not a commit-only package that omits the dirty trace. Review approval is bound to those working-file hashes, not a clean commit. Design/plan document-only commits remain separate.
+Both source paths already contain uncommitted original W4 changes. Preserve those changes and their pre-diagnostic hashes; this diagnostic must not prematurely stage/commit the whole files and thereby consume the original W4 changes before its native gate. Diagnostic source commits are explicitly deferred to the original W4's conditional exact-path source commit. This exception to the usual per-subtask commit flow was included in the human-approved written spec. Before editing, retain each pre-edit file's raw Git blob identity and SHA-256; the task review must receive the actual before/after blob diff plus full two-file context and hashes, not a commit-only package that omits the dirty trace. Review approval is bound to those working-file hashes, not a clean commit. Design/plan document-only commits remain separate.
 
 Do not change `test-generation-e2e.ts`, `probe.ts`, packages/test-client, protocol schemas, any Go code, registry/selection authority, CMake fixtures, recipes, manifests, bundle locks, public generation DTOs, or workflow files. Preserve all existing dirty W4 source and retained attempts. No dependency installation, new worktree, database/SQLite inspection, token access, network request, remote push, merge, Release or signing is included.
 
@@ -74,6 +74,8 @@ The setup and restart phase records may reveal that no observed ordinary RPC has
 Limit detailed `phase`/`before`/`returned`/`threw` history to 4,096 records per framework trace context, with one fixed `history-budget-exhausted` record. Do not stop delegating calls when the history budget is reached.
 
 Independently retain an aggregate of outstanding calls indexed by the fixed phase and audited method; each entry has an in-flight count and first/latest local call sequences. This finite key space, rather than an unbounded list of completed calls, retains every outstanding operation kind even after detail suppression. The current pipeline delegates RPCs serially, but overlapping test calls must not disappear from the aggregate. Client slots are local identifiers of the existing initial/reopened clients, not product identities.
+
+Sequence bounds are explicitly cohort bounds: first/latest calls initiated during the group's nonempty in-flight epoch. They do not assert that both endpoint calls still remain unresolved. The count proves how many calls in that group remain outstanding; individual sequence settlement comes from the detailed events only. This avoids both false per-request attribution and an unbounded per-call list.
 
 Every 10 seconds emit one `pending` snapshot only when an observed call remains unresolved, including the fixed current phase and the outstanding aggregate. Limit this channel to 128 snapshots per framework context; the 20-minute external run budget gives at most 120 periodic ticks. Emit a final `closed` snapshot when the trace context is disposed normally. Each trace line is bounded to 65,536 UTF-8 bytes; serialize only the closed schema and finite aggregate. If any diagnostic bound is unexpectedly exceeded, emit only a fixed `trace-inconclusive` marker when possible and report that limit, never fabricate a located root.
 
