@@ -1,6 +1,7 @@
 package casedesign
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -220,5 +221,61 @@ func TestCaseIdentityDigestBindsAllIntent(t *testing.T) {
 				t.Fatal("mutable intent missing from digest", err)
 			}
 		})
+	}
+}
+
+func TestCaseIdentityRejectsInvalidUTF8Strings(t *testing.T) {
+	for _, raw := range []string{"\xff", "\xfe"} {
+		leaf := solver.Value{Kind: analysis.TypeString, String: raw}
+		nested := solver.Value{Kind: analysis.TypeRecord, Fields: []solver.FieldValue{{Name: "text", Value: solver.Value{Kind: analysis.TypeArray, Elements: []solver.Value{{Kind: analysis.TypePointer, Pointee: &leaf}}}}}}
+		for name, value := range map[string]solver.Value{"scalar": leaf, "nested": nested} {
+			for _, target := range []string{"input", "expectation"} {
+				t.Run(name+"/"+target+"/"+strconv.Itoa(int(raw[0])), func(t *testing.T) {
+					d := manualFixture(t)
+					if target == "input" {
+						d.Inputs[0].Value = value
+					} else {
+						d.Expectations[0].Value = value
+					}
+					if _, err := Seal(d); err != ErrInvalid {
+						t.Fatalf("invalid UTF-8 %x accepted: %v", []byte(raw), err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCaseIdentityValidUTF8JSONRoundTripPreservesDigest(t *testing.T) {
+	digests := map[string]bool{}
+	for _, raw := range []string{"\ufffd", "text\ufffd", "你好", "plain"} {
+		leaf := solver.Value{Kind: analysis.TypeString, String: raw}
+		nested := solver.Value{Kind: analysis.TypeRecord, Fields: []solver.FieldValue{{Name: "text", Value: solver.Value{Kind: analysis.TypeArray, Elements: []solver.Value{{Kind: analysis.TypePointer, Pointee: &leaf}}}}}}
+		d := manualFixture(t)
+		d.Inputs[0].Value = nested
+		d.Expectations[0].Value = leaf
+		sealed, err := Seal(d)
+		if err != nil {
+			t.Fatalf("valid UTF-8 %q rejected: %v", raw, err)
+		}
+		encoded, err := json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded Definition
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Inputs[0].Value.Fields[0].Value.Elements[0].Pointee.String != raw || decoded.Expectations[0].Value.String != raw {
+			t.Fatal("accepted string bytes changed during JSON round-trip")
+		}
+		resealed, err := Seal(decoded)
+		if err != nil || resealed.Digest != sealed.Digest {
+			t.Fatal("JSON round-trip changed content digest", err)
+		}
+		if digests[sealed.Digest] {
+			t.Fatal("distinct accepted strings share content digest")
+		}
+		digests[sealed.Digest] = true
 	}
 }

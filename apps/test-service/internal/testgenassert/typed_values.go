@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"unicode/utf8"
 
 	analysis "unit-test-ide.local/test-service/internal/testgenanalysis"
 	solver "unit-test-ide.local/test-service/internal/testgensolver"
@@ -57,7 +58,7 @@ func valueShape(v solver.Value, depth int, budget *int) bool {
 	case analysis.TypeEnum:
 		return identifier(v.Enum)
 	case analysis.TypeString:
-		return len(v.String) <= 256 && !hostPath(v.String)
+		return utf8.ValidString(v.String) && len(v.String) <= 256 && !hostPath(v.String)
 	case analysis.TypePointer:
 		if v.Null {
 			return v.Pointee == nil

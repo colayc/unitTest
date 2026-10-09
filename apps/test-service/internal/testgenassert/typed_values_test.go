@@ -1,6 +1,8 @@
 package testgenassert
 
 import (
+	"encoding/json"
+	"strconv"
 	"testing"
 	analysis "unit-test-ide.local/test-service/internal/testgenanalysis"
 	solver "unit-test-ide.local/test-service/internal/testgensolver"
@@ -83,5 +85,56 @@ func TestTypedValueShapeDoesNotAuthorizePointerOrIntegerType(t *testing.T) {
 	value.Null = true
 	if ValidateValueShape(value) {
 		t.Fatal("ambiguous pointer accepted")
+	}
+}
+
+// Removing UTF-8 validation must fail even when the malformed string is a
+// leaf below any recursive Value container.
+func TestTypedValueRejectsInvalidUTF8Strings(t *testing.T) {
+	stringType := analysis.Type{Kind: analysis.TypeString, MaxLength: 256}
+	for _, raw := range []string{"\xff", "\xfe"} {
+		leaf := solver.Value{Kind: analysis.TypeString, String: raw}
+		for name, tc := range map[string]struct {
+			value solver.Value
+			typ   analysis.Type
+		}{
+			"scalar":  {leaf, stringType},
+			"array":   {solver.Value{Kind: analysis.TypeArray, Elements: []solver.Value{leaf}}, analysis.Type{Kind: analysis.TypeArray, Bound: 1, Element: &stringType}},
+			"record":  {solver.Value{Kind: analysis.TypeRecord, Fields: []solver.FieldValue{{Name: "text", Value: leaf}}}, analysis.Type{Kind: analysis.TypeRecord, Proven: true, Fields: []analysis.Field{{Name: "text", Type: stringType}}}},
+			"pointee": {solver.Value{Kind: analysis.TypePointer, Pointee: &leaf}, analysis.Type{Kind: analysis.TypePointer, Owned: true, Element: &stringType}},
+		} {
+			t.Run(name+"/"+strconv.Itoa(int(raw[0])), func(t *testing.T) {
+				if ValidateValueShape(tc.value) || ValidateTypedValue(tc.value, tc.typ) || ValidateTypedRule(tc.value, tc.typ, RuleEqual, "") {
+					t.Fatalf("invalid UTF-8 %x accepted", []byte(raw))
+				}
+			})
+		}
+	}
+}
+
+func TestTypedValueValidUTF8JSONRoundTrip(t *testing.T) {
+	typ := analysis.Type{Kind: analysis.TypeString, MaxLength: 256}
+	digests := map[string]bool{}
+	for _, raw := range []string{"\ufffd", "text\ufffd", "你好", "plain"} {
+		value := solver.Value{Kind: analysis.TypeString, String: raw}
+		if !ValidateValueShape(value) || !ValidateTypedValue(value, typ) || !ValidateTypedRule(value, typ, RuleEqual, "") {
+			t.Fatalf("valid UTF-8 %q rejected", raw)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded solver.Value
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.String != raw || ValueDigest(decoded) != ValueDigest(value) {
+			t.Fatal("accepted typed string changed during JSON round-trip")
+		}
+		digest := ValueDigest(value)
+		if digests[digest] {
+			t.Fatal("distinct accepted strings share value digest")
+		}
+		digests[digest] = true
 	}
 }
