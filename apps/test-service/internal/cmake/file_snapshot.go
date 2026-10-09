@@ -33,6 +33,7 @@ type fileSnapshot struct {
 	osIdentity          string
 	toolEvidence        *toolhash.Evidence
 	toolContext         context.Context
+	toolInputPath       string // validated caller spelling; canonical path remains the snapshot identity
 	maximum             int64
 	onFullHash          func()
 	beforePostPathCheck func() // observes the real late path check; cannot provide identity or digest
@@ -125,10 +126,21 @@ func captureFileSnapshot(path string, maximum int64) (*fileSnapshot, error) {
 	return captureSnapshot(context.Background(), path, maximum, false, nil)
 }
 
-func captureSnapshot(ctx context.Context, path string, maximum int64, eligible bool, onFullHash func()) (_ *fileSnapshot, resultErr error) {
+func captureToolFileSnapshotWithInput(ctx context.Context, canonicalPath, inputPath string, maximum int64) (*fileSnapshot, error) {
+	return captureSnapshotWithToolInput(ctx, canonicalPath, inputPath, maximum, true, nil)
+}
+
+func captureSnapshot(ctx context.Context, path string, maximum int64, eligible bool, onFullHash func()) (*fileSnapshot, error) {
+	return captureSnapshotWithToolInput(ctx, path, path, maximum, eligible, onFullHash)
+}
+
+func captureSnapshotWithToolInput(ctx context.Context, path, toolInput string, maximum int64, eligible bool, onFullHash func()) (_ *fileSnapshot, resultErr error) {
 	defer func() {
 		if eligible {
 			toolhash.RejectRetained(ctx, path, resultErr)
+			if toolInput != path {
+				toolhash.RejectRetained(ctx, toolInput, resultErr)
+			}
 		}
 	}()
 	pathInfo, err := os.Lstat(path)
@@ -166,12 +178,12 @@ func captureSnapshot(ctx context.Context, path string, maximum int64, eligible b
 	}
 	snapshot := &fileSnapshot{
 		path: path, file: file, info: info, osIdentity: osIdentity,
-		maximum: maximum, onFullHash: onFullHash,
+		maximum: maximum, onFullHash: onFullHash, toolInputPath: toolInput,
 	}
 	var result toolhash.Result
 	protected := false
 	if eligible {
-		result, protected, err = toolhash.Digest(ctx, path, file, maximum)
+		result, protected, err = toolhash.Digest(ctx, toolInput, file, maximum)
 	}
 	if err != nil {
 		return fail(err)
@@ -247,7 +259,7 @@ func (snapshot *fileSnapshot) Verify() (resultErr error) {
 	}
 	var digest string
 	if snapshot.toolEvidence != nil {
-		digest, err = snapshot.toolEvidence.Verify(snapshot.toolContext, snapshot.path, snapshot.file, snapshot.maximum)
+		digest, err = snapshot.toolEvidence.Verify(snapshot.toolContext, snapshot.toolInputPath, snapshot.file, snapshot.maximum)
 	} else {
 		digest, err = snapshot.fullDigest()
 	}

@@ -64,13 +64,27 @@ func (c *inspectorDigestCoordinator) Inspect(ctx context.Context) (discovery.Sna
 // consumer, Registry, Inspector, guards and runtime gates. No native execution
 // or claim of an on-disk replacement beneath a retained deny-delete guard.
 func TestRuntimeToolDigestScopeSwallowedConsumerFailure(t *testing.T) {
+	testRuntimeToolDigestScopeConsumerFailure(t, false)
+}
+
+func TestRuntimeToolDigestScopeMissingParentAlias(t *testing.T) {
+	testRuntimeToolDigestScopeConsumerFailure(t, true)
+}
+
+func testRuntimeToolDigestScopeConsumerFailure(t *testing.T, missingParent bool) {
+	t.Helper()
 	r, stored, _, q := newDigestScopeRuntime(t)
 	dir := t.TempDir()
 	path, alias := filepath.Join(dir, "cmake.exe"), filepath.Join(dir, "alias.exe")
 	if err := os.WriteFile(path, []byte("optional tool"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(path, alias); err != nil {
+	linkTarget, linkPath := path, alias
+	if missingParent {
+		linkTarget, linkPath = dir, filepath.Join(t.TempDir(), "parent-alias")
+		alias = filepath.Join(linkPath, "cmake.exe")
+	}
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
 		t.Fatal(err)
 	}
 	calls := 0
@@ -78,8 +92,16 @@ func TestRuntimeToolDigestScopeSwallowedConsumerFailure(t *testing.T) {
 	adapter := &optionalConsumerAdapter{discover: func(ctx context.Context) ([]toolchain.Instance, error) {
 		calls++
 		selected := path
+		if missingParent {
+			selected = alias
+		}
 		if calls == 2 {
 			selected = alias
+			if missingParent {
+				if err := os.Remove(linkPath); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 		_, err := cmake.Resolve(ctx, noNativeDigestRunner{}, cmake.ResolverConfig{Override: selected})
 		consumerErrors = append(consumerErrors, err)

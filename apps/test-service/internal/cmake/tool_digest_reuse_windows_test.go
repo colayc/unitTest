@@ -13,6 +13,269 @@ import (
 	"unit-test-ide.local/test-service/internal/toolhash"
 )
 
+// Each alias names the real final regular file through a directory symlink.
+// Losing an accepted parent spelling must not lose its bound scope failure.
+func newCMakeParentAliasFixture(t *testing.T) (canonical, first, second string) {
+	t.Helper()
+	root := t.TempDir()
+	parent := filepath.Join(root, "real")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "cmake.exe")
+	if err := os.WriteFile(path, []byte("cmake parent alias fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	canonical = canonicalPath(t, path)
+	for _, name := range []string{"first", "second"} {
+		if err := os.Symlink(filepath.Dir(canonical), filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return canonical, filepath.Join(root, "first", "cmake.exe"), filepath.Join(root, "second", "cmake.exe")
+}
+
+func TestCMakeToolDigestParentAliases(t *testing.T) {
+	for _, mode := range []string{"original", "later", "unbound"} {
+		t.Run(mode, func(t *testing.T) {
+			canonical, first, second := newCMakeParentAliasFixture(t)
+			ctx, scope, err := toolhash.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer scope.Close()
+			inputs := []string{first, first}
+			removed := first
+			if mode == "later" {
+				inputs, removed = []string{canonical, second}, second
+			} else if mode == "unbound" {
+				inputs, removed = []string{canonical, canonical}, second
+			}
+			var evidence *toolhash.Evidence
+			for _, input := range inputs {
+				got, snapshot, err := verifyStandaloneExecutableWithContext(ctx, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer snapshot.Close()
+				if got != canonical || snapshot.path != canonical || snapshot.toolEvidence == nil {
+					t.Fatalf("canonical=%q snapshot=%q evidence=%v", got, snapshot.path, snapshot.toolEvidence)
+				}
+				info, err := os.Stat(input)
+				if err != nil || !os.SameFile(snapshot.info, info) {
+					t.Fatalf("alias identity: %v", err)
+				}
+				if err := snapshot.Verify(); err != nil {
+					t.Fatal(err)
+				}
+				evidence = snapshot.toolEvidence
+				if err := snapshot.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stats := scope.Stats(); stats.FullHashCalls != 1 || stats.Retained != 1 || stats.Reuses != 1 {
+				t.Fatalf("scope=%+v", stats)
+			}
+			if file, err := os.OpenFile(canonical, os.O_WRONLY, 0); err == nil {
+				file.Close()
+				t.Fatal("closing consumers released the scope guard")
+			}
+			if err := os.Remove(filepath.Dir(removed)); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = verifyStandaloneExecutableWithContext(ctx, removed)
+			if !errors.Is(err, ErrInvalidExecutable) {
+				t.Fatalf("mapping: %v", err)
+			}
+			if mode != "unbound" && scope.Err() == nil {
+				t.Error("accepted CMake spelling rejection was not sticky")
+			}
+			if mode == "unbound" && scope.Err() != nil {
+				t.Fatal("unbound missing parent poisoned scope", scope.Err())
+			}
+			if err := os.Symlink(filepath.Dir(canonical), filepath.Dir(removed)); err != nil {
+				t.Fatal(err)
+			}
+			consumer, err := os.Open(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, verifyErr := evidence.Verify(ctx, removed, consumer, 0)
+			_, protected, digestErr := toolhash.Digest(ctx, removed, consumer, 0)
+			if mode == "unbound" {
+				if verifyErr != nil || digestErr != nil || !protected || scope.Err() != nil {
+					t.Errorf("unbound failure impaired reuse: verify=%v digest=%v protected=%v", verifyErr, digestErr, protected)
+				}
+			} else if verifyErr == nil || digestErr == nil || protected {
+				t.Errorf("restored alias revived reuse: verify=%v digest=%v protected=%v", verifyErr, digestErr, protected)
+			}
+			if err := consumer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			closeErr := scope.Close()
+			if mode == "unbound" && closeErr != nil {
+				t.Fatal("unbound failure lost scope health", closeErr)
+			} else if mode != "unbound" && closeErr == nil {
+				t.Error("bound failure lost at Close")
+			}
+			if err := os.WriteFile(canonical, []byte("released"), 0600); err != nil {
+				t.Fatal("guard leaked", err)
+			}
+		})
+	}
+}
+
+func TestCMakeToolDigestInputFallbackBoundaries(t *testing.T) {
+	const wantSHA = "ed28abbe35cbfd1f3b382e17bdec5af9b4782a469c950b1b21033c0452a8ff1b"
+	for _, mode := range []string{"unscoped", "unsupported-extended", "additional-spelling-budget", "distinct-hard-link"} {
+		t.Run(mode, func(t *testing.T) {
+			canonical, first, _ := newCMakeParentAliasFixture(t)
+			ctx := context.Background()
+			var scope *toolhash.Scope
+			if mode != "unscoped" {
+				var err error
+				ctx, scope, err = toolhash.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scope.Close()
+			}
+			input := first
+			if mode == "unsupported-extended" {
+				input = `\\?\` + canonical
+			}
+			if mode == "additional-spelling-budget" {
+				_, initial, err := verifyStandaloneExecutableWithContext(ctx, canonical)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer initial.Close()
+				if err := initial.Close(); err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i < 129; i++ {
+					parent := filepath.Join(filepath.Dir(first), "..", fmt.Sprintf("budget-%d", i))
+					if err := os.Symlink(filepath.Dir(canonical), parent); err != nil {
+						t.Fatal(err)
+					}
+					input = filepath.Join(parent, "cmake.exe")
+					got, snapshot, err := verifyStandaloneExecutableWithContext(ctx, input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer snapshot.Close()
+					if got != canonical || snapshot.digest != wantSHA || (snapshot.toolEvidence != nil) != (i < 128) {
+						t.Fatalf("spelling %d: canonical=%q evidence=%v SHA=%s", i, got, snapshot.toolEvidence, snapshot.digest)
+					}
+					if err := snapshot.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stats := scope.Stats(); stats.FullHashCalls != 1 || stats.Retained != 1 || stats.Reuses != 128 {
+					t.Fatalf("budget scope=%+v", stats)
+				}
+			}
+			if mode == "distinct-hard-link" {
+				hardLink := filepath.Join(filepath.Dir(canonical), "other.exe")
+				if err := os.Link(canonical, hardLink); err != nil {
+					t.Fatal(err)
+				}
+				_, original, err := verifyStandaloneExecutableWithContext(ctx, first)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer original.Close()
+				got, distinct, err := verifyStandaloneExecutableWithContext(ctx, hardLink)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer distinct.Close()
+				if got != canonicalPath(t, hardLink) || got == canonical || !os.SameFile(original.info, distinct.info) ||
+					original.file == distinct.file || original.toolEvidence == distinct.toolEvidence || distinct.digest != wantSHA {
+					t.Fatal("hard-link names or independently owned handles collapsed")
+				}
+				if stats := scope.Stats(); stats.FullHashCalls != 2 || stats.Retained != 2 {
+					t.Fatalf("distinct names scope=%+v", stats)
+				}
+				if err := original.Close(); err != nil {
+					t.Fatal(err)
+				}
+				original.file = nil
+				if err := distinct.Verify(); err != nil {
+					t.Fatal("one consumer close invalidated another", err)
+				}
+				if err := scope.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if file, err := os.OpenFile(hardLink, os.O_WRONLY, 0); err == nil {
+					file.Close()
+					t.Fatal("scope close released independently owned consumer")
+				}
+				if err := distinct.Close(); err != nil {
+					t.Fatal(err)
+				}
+				distinct.file = nil
+				if err := os.WriteFile(canonical, []byte("released"), 0600); err != nil {
+					t.Fatal("guard or consumer leaked", err)
+				}
+				return
+			}
+			got, resolved, err := verifyStandaloneExecutableWithContext(ctx, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resolved.Close()
+			if got != canonical || resolved.toolEvidence != nil || resolved.digest != wantSHA {
+				t.Fatalf("fallback canonical=%q evidence=%v SHA=%s", got, resolved.toolEvidence, resolved.digest)
+			}
+			if err := resolved.Close(); err != nil {
+				t.Fatal(err)
+			}
+			full := 0
+			observed, err := captureSnapshot(ctx, input, 0, true, func() { full++ })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer observed.Close()
+			if err := observed.Verify(); err != nil {
+				t.Fatal(err)
+			}
+			if observed.toolEvidence != nil || observed.digest != wantSHA || full != 3 {
+				t.Fatalf("legacy fallback evidence=%v SHA=%s hashes=%d", observed.toolEvidence, observed.digest, full)
+			}
+			if err := observed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if scope != nil {
+				if scope.Err() != nil {
+					t.Fatal("optional miss poisoned scope", scope.Err())
+				}
+				if mode == "additional-spelling-budget" {
+					_, admitted, err := verifyStandaloneExecutableWithContext(ctx, filepath.Join(filepath.Dir(first), "..", "budget-0", "cmake.exe"))
+					if err != nil || admitted.toolEvidence == nil {
+						t.Fatalf("budget exhaustion impaired admitted spelling: %v", err)
+					}
+					if err := admitted.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Remove(filepath.Dir(input)); err != nil {
+						t.Fatal(err)
+					}
+					_, _, err = verifyStandaloneExecutableWithContext(ctx, input)
+					if !errors.Is(err, ErrInvalidExecutable) || scope.Err() != nil {
+						t.Fatalf("unadmitted missing spelling poisoned scope: %v scope=%v", err, scope.Err())
+					}
+				} else if scope.Stats().FullHashCalls != 0 || scope.Stats().Retained != 0 {
+					t.Fatal("unsupported initial input acquired protection")
+				}
+				if err := scope.Close(); err != nil {
+					t.Fatal("optional miss lost scope health", err)
+				}
+			}
+		})
+	}
+}
+
 func TestCMakeToolDigestScopeReusesOnlyToolBytes(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cmake.exe")
 	if err := os.WriteFile(p, []byte("cmake fixture"), 0600); err != nil {

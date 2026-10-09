@@ -347,7 +347,7 @@ func verifyStandaloneExecutableWithContext(ctx context.Context, executable strin
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: resolve executable: %v", ErrInvalidExecutable, err)
 	}
-	snapshot, err := captureToolFileSnapshot(ctx, canonical, 0)
+	snapshot, err := captureToolFileSnapshotWithInput(ctx, canonical, executable, 0)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: snapshot executable: %v", ErrInvalidExecutable, err)
 	}
