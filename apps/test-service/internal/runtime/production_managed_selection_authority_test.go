@@ -2,15 +2,18 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragedetail"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -77,6 +80,50 @@ func TestProductionManagedSelectionAuthorityResolvesCurrentFileAndFunctionCovera
 				t.Fatalf("context=%+v wantCoverage=%+v", got, wantCoverage)
 			}
 		})
+	}
+}
+
+func TestProductionManagedSelectionRejectsSecondReadIdentityDrift(t *testing.T) {
+	resolver, contextAuthority, input, selected := productionResolverFixture(t)
+	secondID := "Other.Clang_1"
+	contextAuthority.context.snapshot.Toolchains = append(contextAuthority.context.snapshot.Toolchains, toolchain.Instance{ID: secondID, Family: toolchain.FamilyClangCL})
+	target, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, _, _, _, _ := productionManagedFixture(t)
+	run.Request = target.request
+	run.Record = testgendomain.NewGenerationRecord(run.Request)
+	run.Record.MinimizedCaseIDs = []string{run.ID}
+	if err := testgendomain.ValidateRun(run); err != nil {
+		t.Fatalf("invalid declared run fixture: %v", err)
+	}
+	current := contextAuthority.context.index
+	current.Files = append([]coveragedetail.File(nil), current.Files...)
+	for i := range current.Files {
+		current.Files[i].Functions = append([]coveragedetail.Function(nil), current.Files[i].Functions...)
+	}
+	metric := coveragedomain.Summary{Functions: coveragedomain.Metric{Total: 2}, Lines: coveragedomain.Metric{Total: 2}}
+	current.Project.Summary, current.Files[0].Summary = metric, metric
+	for i := range current.Files[0].Functions {
+		current.Files[0].Functions[i].Summary = coveragedomain.Summary{Functions: coveragedomain.Metric{Total: 1}, Lines: coveragedomain.Metric{Total: 1}}
+	}
+	authority, err := newProductionManagedSelectionAuthority(productionManagedSelectionAuthorityConfig{
+		root: resolver.config.root, store: productionManagedSelectionStoreFixture{run: run},
+		resolver: resolver, current: productionManagedIndexFixture{index: current},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := authority.Resolve(context.Background(), run.ID)
+	if err != nil || got.ToolchainID != target.toolchainID {
+		t.Fatalf("matching second read failed: %v", err)
+	}
+	current.ToolchainID = secondID
+	authority.config.current = productionManagedIndexFixture{index: current}
+	_, err = authority.Resolve(context.Background(), run.ID)
+	if !errors.Is(err, errProductionManagedUnavailable) {
+		t.Fatalf("different valid second-read ID accepted: %v", err)
 	}
 }
 

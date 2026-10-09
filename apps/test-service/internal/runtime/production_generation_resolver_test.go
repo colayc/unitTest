@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	generationv16 "unit-test-ide.local/test-service/internal/protocolmodel/v1_6/testgeneration"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenrender"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -31,9 +33,13 @@ func (fixture *productionResolverAuthorityFixture) ResolveProductionContext(_ co
 
 type productionLayoutAuthorityFixture struct {
 	layout productionTestLayout
+	calls  *int
 }
 
 func (fixture productionLayoutAuthorityFixture) ResolveProductionTestLayout(_ context.Context, _ productionResolverContext, binding productionCompileBinding, requested testgendomain.Framework) (productionTestLayout, error) {
+	if fixture.calls != nil {
+		(*fixture.calls)++
+	}
 	if binding.target.Name != "core" || requested != testgendomain.FrameworkAuto && requested != fixture.layout.framework {
 		return productionTestLayout{}, errProductionGenerationUnavailable
 	}
@@ -135,6 +141,79 @@ func TestProductionManagedProtocolSelectionRejectsAmbiguousSelectors(t *testing.
 	}
 }
 
+func TestProductionResolverPreservesExplicitToolchainSelection(t *testing.T) {
+	for _, id := range productionToolchainIdentityTestIDs()[:4] {
+		resolver, authority, input, selected := productionResolverFixture(t)
+		authority.context.profile.ToolchainID = id
+		authority.context.index.ToolchainID = id
+		authority.context.snapshot.Toolchains[0].ID = id
+		if strings.HasPrefix(id, "clang-") {
+			authority.context.snapshot.Toolchains[0].Family = toolchain.FamilyClang
+		}
+		target, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected)
+		if err != nil || target.toolchainID != id {
+			t.Fatalf("selected ID=%q target=%q err=%v", id, target.toolchainID, err)
+		}
+		again, err := resolver.ResolveRequest(context.Background(), target.request)
+		if err != nil || !reflect.DeepEqual(again, target) {
+			t.Fatalf("re-resolution changed: %v", err)
+		}
+	}
+}
+
+func TestProductionResolverRejectsUnboundOrAmbiguousSelectionBeforeLayout(t *testing.T) {
+	tests := map[string]func(*productionResolverContext){
+		"missing instance":         func(c *productionResolverContext) { c.snapshot.Toolchains = nil },
+		"same family different ID": func(c *productionResolverContext) { c.snapshot.Toolchains[0].ID = "Other.Clang_1" },
+		"duplicate identical instance": func(c *productionResolverContext) {
+			c.snapshot.Toolchains = append(c.snapshot.Toolchains, c.snapshot.Toolchains[0])
+		},
+		"profile mismatch":        func(c *productionResolverContext) { c.profile.ToolchainID = "Other.Clang_1" },
+		"empty generated profile": func(c *productionResolverContext) { c.profile.ToolchainID = ""; c.profile.Origin = "generated" },
+		"empty preset profile": func(c *productionResolverContext) {
+			c.profile.ToolchainID = ""
+			c.profile.Origin = "preset"
+			c.profile.ConfigurePreset = "debug"
+		},
+		"malformed selected ID": func(c *productionResolverContext) {
+			c.profile.ToolchainID = "bad/id"
+			c.index.ToolchainID = "bad/id"
+			c.snapshot.Toolchains[0].ID = "bad/id"
+		},
+		"stale index generation": func(c *productionResolverContext) { c.index.WorkspaceGeneration = strings.Repeat("f", 64) },
+		"stale profile project":  func(c *productionResolverContext) { c.profile.ProjectID = "other" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			resolver, authority, input, selected := productionResolverFixture(t)
+			calls := 0
+			layout := resolver.config.layout.(productionLayoutAuthorityFixture)
+			layout.calls = &calls
+			resolver.config.layout = layout
+			mutate(&authority.context)
+			_, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected)
+			if !errors.Is(err, testgendomain.ErrStaleSnapshot) || calls != 0 {
+				t.Fatalf("selection reached layout: err=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestProductionResolverRejectsChangedValidSelectedIDForExistingRequest(t *testing.T) {
+	resolver, authority, input, selected := productionResolverFixture(t)
+	target, err := resolver.ResolveManagedStart(context.Background(), strings.Repeat("9", 64), input, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := "Other.Clang_1"
+	authority.context.profile.ToolchainID = next
+	authority.context.index.ToolchainID = next
+	authority.context.snapshot.Toolchains[0].ID = next
+	if _, err := resolver.ResolveRequest(context.Background(), target.request); !errors.Is(err, testgendomain.ErrStaleSnapshot) {
+		t.Fatalf("stale immutable request accepted: %v", err)
+	}
+}
+
 func productionResolverFixture(t *testing.T) (*productionGenerationTargetResolver, *productionResolverAuthorityFixture, generationv16.TestGenerationStartRequestV16, testgendomain.ManagedTarget) {
 	t.Helper()
 	root, target := productionCompileBindingFixture(t)
@@ -154,13 +233,15 @@ func productionResolverFixture(t *testing.T) (*productionGenerationTargetResolve
 		{ID: strings.Repeat("3", 32), Name: "other", LinkageName: "other", Status: coveragedetail.StatusCurrent},
 	}
 	profile := cmake.BuildProfile{ID: target.ProfileID, ProjectID: "core", BinaryDir: root.NativePath, Configuration: "Debug"}
+	selectedID := productionToolchainIdentityTestIDs()[0]
+	profile.ToolchainID, profile.Origin, profile.Generator = selectedID, "generated", "Ninja"
 	authority := &productionResolverAuthorityFixture{context: productionResolverContext{
-		snapshot: discovery.Snapshot{Generation: generation},
+		snapshot: discovery.Snapshot{Generation: generation, Toolchains: []toolchain.Instance{{ID: selectedID, Family: toolchain.FamilyClangCL}}},
 		project:  workspace.ProjectConfig{ID: "core", SourceDir: "."},
 		profile:  profile, targets: []cmake.Target{target},
 		index: coveragedetail.Index{
 			WorkspaceGeneration: generation, ProjectID: "core", ReportID: reportID, RunID: strings.Repeat("4", 32),
-			ToolchainID: strings.Repeat("5", 64), Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent},
+			ToolchainID: selectedID, Project: coveragedetail.Project{Status: coveragedetail.StatusCurrent},
 			Files: []coveragedetail.File{{ID: fileID, RelativePath: "src/choose.c", SourceSHA256: sourceDigest, Status: coveragedetail.StatusCurrent, Functions: functions}},
 		},
 		baselineReportDigest: strings.Repeat("6", 64),

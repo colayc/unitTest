@@ -149,8 +149,18 @@ func (resolver *productionGenerationTargetResolver) resolveContext(ctx context.C
 	if contextValue.snapshot.Generation != request.WorkspaceGeneration || contextValue.project.ID != request.ProjectID ||
 		contextValue.profile.ID == "" || contextValue.profile.ProjectID != request.ProjectID ||
 		contextValue.index.WorkspaceGeneration != request.WorkspaceGeneration || contextValue.index.ProjectID != request.ProjectID ||
-		contextValue.index.ReportID != request.CoverageReportID || contextValue.index.ToolchainID == "" ||
+		contextValue.index.ReportID != request.CoverageReportID || !validProductionToolchainID(contextValue.index.ToolchainID) ||
+		contextValue.profile.ToolchainID == "" || contextValue.profile.ToolchainID != contextValue.index.ToolchainID ||
 		!validProductionDigest(contextValue.baselineReportDigest) || selected.SourceDigest == "" {
+		return generationTarget{}, testgendomain.ErrStaleSnapshot
+	}
+	matches := 0
+	for _, instance := range contextValue.snapshot.Toolchains {
+		if instance.ID == contextValue.index.ToolchainID {
+			matches++
+		}
+	}
+	if matches != 1 {
 		return generationTarget{}, testgendomain.ErrStaleSnapshot
 	}
 	binding, err := resolveProductionCompileBinding(resolver.config.root, selected.File, contextValue.targets, contextValue.index.ToolchainID)
