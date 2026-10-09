@@ -197,6 +197,10 @@ func (r *Runtime) ListCoverageLines(ctx context.Context, q coveragedetail.LineQu
 // validates the persisted graph in one snapshot; runtime then binds every
 // indexed source to current workspace bytes before exposing any identity.
 func (r *Runtime) ReadCurrentCoverageIndex(ctx context.Context, q coveragedetail.CurrentIndexQuery) (coveragedetail.Index, error) {
+	return r.readCurrentCoverageIndex(ctx, q, beginCoverageToolScope)
+}
+
+func (r *Runtime) readCurrentCoverageIndex(ctx context.Context, q coveragedetail.CurrentIndexQuery, factory coverageToolScopeFactory) (index coveragedetail.Index, err error) {
 	reader, err := r.detailReader()
 	if err != nil {
 		return coveragedetail.Index{}, err
@@ -216,6 +220,28 @@ func (r *Runtime) ReadCurrentCoverageIndex(ctx context.Context, q coveragedetail
 	if run.Request.ProjectID != q.ProjectID || run.Request.WorkspaceGeneration != q.WorkspaceGeneration {
 		return coveragedetail.Index{}, task.ErrInvalidArgument
 	}
+	if factory == nil {
+		return coveragedetail.Index{}, task.ErrStorageUnavailable
+	}
+	scoped, scope, beginErr := factory(ctx)
+	defer func() {
+		if scope == nil {
+			return
+		}
+		if closeErr := scope.Close(); closeErr != nil {
+			index = coveragedetail.Index{}
+			if err == nil {
+				err = task.ErrStorageUnavailable
+			}
+		}
+	}()
+	if beginErr != nil || scoped == nil {
+		if ctx.Err() != nil {
+			return coveragedetail.Index{}, ctx.Err()
+		}
+		return coveragedetail.Index{}, task.ErrStorageUnavailable
+	}
+	ctx = scoped
 	snapshot, err := r.InspectWorkspace(ctx)
 	if err != nil {
 		return coveragedetail.Index{}, err
@@ -223,7 +249,7 @@ func (r *Runtime) ReadCurrentCoverageIndex(ctx context.Context, q coveragedetail
 	if snapshot.Generation != q.WorkspaceGeneration {
 		return coveragedetail.Index{}, coveragedetail.ErrStale
 	}
-	index, err := attested.ReadValidatedCoverageIndex(ctx, q)
+	index, err = attested.ReadValidatedCoverageIndex(ctx, q)
 	if err != nil {
 		return coveragedetail.Index{}, err
 	}
@@ -239,6 +265,12 @@ func (r *Runtime) ReadCurrentCoverageIndex(ctx context.Context, q coveragedetail
 	}
 	if snapshot.Generation != q.WorkspaceGeneration {
 		return coveragedetail.Index{}, coveragedetail.ErrStale
+	}
+	if ctx.Err() != nil {
+		return coveragedetail.Index{}, ctx.Err()
+	}
+	if scope != nil && scope.Err() != nil {
+		return coveragedetail.Index{}, task.ErrStorageUnavailable
 	}
 	return index, nil
 }
