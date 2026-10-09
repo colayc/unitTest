@@ -1,5 +1,7 @@
 # Unified Maintainable Test Cases Implementation Plan
 
+**Status:** 2026-10-09 按用户要求暂停，归入第二版。Task 1 已完成本地实现与独立审查（53924e42、575208a5）；Task 2 部分代码保留，尚未提交和完成审查；Task 3–15 未实施。不得仅凭下方原执行说明恢复，须先取得新的明确请求。当前仅整理 Windows protected tool digest reuse 设计文档，不启动其实现。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在现有离线 C/C++ 链路上贯通统一可维护用例、手动向导、本地 JSON 输入和一键执行／文件函数覆盖率。

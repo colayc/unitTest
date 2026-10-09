@@ -3,6 +3,14 @@
 Date: 2026-10-09
 Status: presented design approved; written-spec review pending; implementation not authorized.
 
+## 0. Resumed design-only scope and version boundary
+
+On 2026-10-09 the human explicitly paused the eleven-capability product expansion and deferred it to version 2, returning to this Windows protected tool digest reuse design. Reuse this existing spec (first committed as a45902f2), rather than create another competing design. This turn records the design and pause only: no implementation plan, production change, test run or native launch is authorized.
+
+The requested contract remains: reuse tool digests only within one coverage-index attestation; compute the first complete hash while holding a Windows write/delete-denying guard; recheck path and file identity on every reuse; keep both full workspace discoveries and all source/report/permission checks; fall back to original full verification when optional protection cannot be established; fail on bound identity drift; retain at most 128 tool files and release guards on success/error/cancellation. Focused reuse/change/release/concurrency tests precede any future implementation acceptance; Linux retains the original logic and native is not automatically rerun. This reduces repeated hashing, without a promise to eliminate all of the observed 27-second latency.
+
+The partially executed unified-maintainable-case plan is paused. Its Task 1 foundational local commits 53924e42/575208a5 and uncommitted, unreviewed Task 2 work are preserved; they do not establish that the expanded functions are complete. Do not resume that plan without a new explicit request. Existing first-version generation/execution/coverage behavior and the original W4 evidence boundaries are not removed or relabeled by this deferral.
+
 ## 1. Purpose and evidence boundary
 
 Reduce redundant hashing of the same verified tool files during one current-coverage-index attestation on Windows, without changing discovery, source freshness, ownership or publication authority.
@@ -105,7 +113,7 @@ No public protocol, UI/helper contract, generated-test maintenance, publisher, c
 
 No push, PR update, master synchronization, merge, force operation, Release, signing, dependency download or installation is authorized by this design. Document-only local commit is separate from implementation/native acceptance.
 
-The newly requested all-function/class boundary/random generation, manual/data-driven wizard, true statement/MC/DC metrics, static-test management and transfer/report features are a separate requirements expansion. They must not broaden this performance fix or be reported as implemented by it.
+The newly requested all-function/class boundary/random generation, manual/data-driven wizard, true statement/MC/DC metrics, static-test management and transfer/report features are a separate version 2 requirements expansion, explicitly paused by the human. This deferral includes the unified-maintainable-case implementation plan; preserve its completed and partial work for later resumption. These features must not broaden this performance fix or be reported as implemented by it.
 
 Written-spec review is required before writing-plans. The later plan must define exact source ownership, focused tests, review gates and return to original W4. Original dual-framework/native/maintenance/clean-SHA/global/whole-PR/hosted/package and Phase 8 release gates remain open.
 
