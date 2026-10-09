@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 唯一设计依据：[已确认设计](../specs/2026-10-08-windows-cmake-coverage-compatibility-design.md)，用户于本轮确认书面设计。
+- 本兼容计划基础设计依据：[已确认设计](../specs/2026-10-08-windows-cmake-coverage-compatibility-design.md)；2026-10-09 的有界补充按下文独立计划执行。
 - 工作区：`C:/Users/DELL/.codex/worktrees/phase10-production-generation/unitTest`；分支：`codex/phase10-production-generation`；设计提交：`6356dee49de95683d8362e93bbd6cf077a7cbd10`。执行前读最新 HEAD，不把设计 SHA 当成未来验收 SHA。
 - 完全离线；不引入 Mock/CMock、CppUTestExt Mock 扩展、云模型、新服务端、协议版本或另一套生成算法。
 - 保留 APP_ID 进程闭包、输入快照/身份/摘要、受管输出、报告来源、分页预算及候选覆盖率提升且不回退要求。
@@ -22,7 +22,7 @@
 - 保留 128 个 CMake 文件、单文件 512 KiB、总计 4 MiB、8192 条命令、65536 个参数和 64 个启动计划条目；不放大既有 wire/File API 预算。
 - 未知命令/变量、环境展开、生成器表达式、输入变化、越界/别名路径、目标或证据不一致均失败关闭。不得删除或静默跳过安全测试，不提交临时诊断代码。
 - Linux 行为保持不变；本轮 Windows SDK 配方不替换 Linux fixture 的原集成方式。
-- 2026-10-09 有界修订待书面审阅：[已选工具链 ID 契约修正设计](../specs/2026-10-09-selected-toolchain-identity-contract-design.md)。确认后，仅共享生成 runtime 的实例 ID 词法/精确选择修正及测试覆盖例外于上一条；Linux fixture/集成及其他约束不变。空 profile ID 的生成拒绝、普通构建不变；该修正须按补充实施计划执行，不由旧 W4 推定授权。
+- 2026-10-09 已书面确认的有界修订：[已选工具链 ID 契约修正设计](../specs/2026-10-09-selected-toolchain-identity-contract-design.md)。仅共享生成 runtime 的实例 ID 词法/精确选择修正及测试覆盖例外于上一条；Linux fixture/集成及其他约束不变。空 profile ID 的生成拒绝、普通构建不变；该修正按[独立补充实施计划](2026-10-09-selected-toolchain-identity-contract.md)执行，不由旧 W4 推定授权，尚未实施。
 - Task 1–3 的历史 RED/GREEN、审查与原 Task 4 的现有现场继续有效；本轮计划完成不等于 Phase 10 验收完成。
 - 本地实施者不推送。已有分支推送/更新 PR #39/hosted 授权仅在本地关键门槛与审查通过后由控制器使用；不合并、不操作 master、不发布 Release、不签名、不强推。
 

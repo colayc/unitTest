@@ -2,7 +2,7 @@
 
 日期：2026-10-09（Asia/Shanghai）
 
-状态：用户已确认方案 1 的技术边界；本文等待书面审阅。尚未实施本修正，不代表 W4、Phase 10 或打包验收完成。
+状态：用户于 2026-10-09 回复“确认设计文档”，已确认本文书面设计；[补充实施计划](../plans/2026-10-09-selected-toolchain-identity-contract.md)已保存，等待选择执行方式。尚未实施本修正，不代表 W4、Phase 10 或打包验收完成。
 
 工作区：`C:/Users/DELL/.codex/worktrees/phase10-production-generation/unitTest`。
 
