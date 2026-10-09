@@ -2,7 +2,9 @@
 
 日期：2026-10-08
 
-状态：用户已确认方案 1 和本文书面设计；新增实施计划已保存，新增批次尚未实施。
+状态：用户已确认原方案 1 和本文书面设计；W1–W3 已完成，W4 及整个分支验收仍未完成。
+
+2026-10-09 范围修订：W1–W3 已完成；W4 仍未验收完成。用户已选择[已选工具链 ID 契约修正方案 1](2026-10-09-selected-toolchain-identity-contract-design.md)，该补充书面设计待审阅。确认后，仅共享生成 runtime 的 ID/选择校验修正取代本文第 10 节对应的“Linux 行为保持不变”限制；Linux CMake 集成及其余约束不变。空工具链 ID 的 profile 不支持生成，普通构建不变；书面审阅前不实施该修正。
 
 实施计划：[Windows CMake 覆盖率受控兼容](../plans/2026-10-08-windows-cmake-coverage-compatibility.md)。
 
