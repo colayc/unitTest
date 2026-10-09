@@ -54,13 +54,13 @@ func resolveWithPolicy(ctx context.Context, runner probe.Runner, config Resolver
 }
 
 func resolveStandalone(ctx context.Context, runner probe.Runner, executable, source string) (Installation, error) {
-	canonical, snapshot, err := verifyStandaloneExecutable(executable)
+	canonical, snapshot, err := verifyStandaloneExecutableWithContext(ctx, executable)
 	if err != nil {
 		return Installation{}, err
 	}
 	defer snapshot.Close()
 	ctestPath := filepath.Join(filepath.Dir(canonical), pairedCTestName())
-	ctestCanonical, ctestSnapshot, err := verifyStandaloneExecutable(ctestPath)
+	ctestCanonical, ctestSnapshot, err := verifyStandaloneExecutableWithContext(ctx, ctestPath)
 	if err != nil {
 		return Installation{}, fmt.Errorf("%w: %v", ErrCTestUnavailable, err)
 	}
@@ -176,7 +176,12 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		if err != nil {
 			return Installation{}, fmt.Errorf("%w: installed file %q: %v", ErrBundleIntegrity, relative, err)
 		}
-		snapshot, err := captureFileSnapshot(filePath, 0)
+		var snapshot *fileSnapshot
+		if relative == archive.Executable || relative == archive.CTestExecutable {
+			snapshot, err = captureToolFileSnapshot(ctx, filePath, 0)
+		} else {
+			snapshot, err = captureFileSnapshot(filePath, 0)
+		}
 		if err != nil {
 			return Installation{}, fmt.Errorf("%w: snapshot installed file %q: %v", ErrBundleIntegrity, relative, err)
 		}
@@ -299,6 +304,10 @@ func canonicalBundleRoot(root string) (string, error) {
 }
 
 func verifyStandaloneExecutable(executable string) (string, *fileSnapshot, error) {
+	return verifyStandaloneExecutableWithContext(context.Background(), executable)
+}
+
+func verifyStandaloneExecutableWithContext(ctx context.Context, executable string) (string, *fileSnapshot, error) {
 	if executable == "" || !filepath.IsAbs(executable) {
 		return "", nil, fmt.Errorf("%w: path must be absolute", ErrInvalidExecutable)
 	}
@@ -317,7 +326,7 @@ func verifyStandaloneExecutable(executable string) (string, *fileSnapshot, error
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: resolve executable: %v", ErrInvalidExecutable, err)
 	}
-	snapshot, err := captureFileSnapshot(canonical, 0)
+	snapshot, err := captureToolFileSnapshot(ctx, canonical, 0)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: snapshot executable: %v", ErrInvalidExecutable, err)
 	}
