@@ -153,6 +153,41 @@ func (c *Coordinator) Fail(ctx context.Context, taskID string) (testgendomain.Ru
 	return c.terminalize(ctx, taskID, testgendomain.StateFailed)
 }
 
+func (c *Coordinator) FailWithDiagnostic(ctx context.Context, runID, taskID string, expected int64, d testgendomain.FailureDiagnostic) (testgendomain.Run, error) {
+	if c == nil || c.store == nil || ctx == nil {
+		return testgendomain.Run{}, ErrUnavailable
+	}
+	if expected < 1 || !d.Valid() {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		r, err := c.store.GetGenerationByTask(ctx, taskID)
+		if err != nil {
+			return testgendomain.Run{}, err
+		}
+		if r.ID != runID || r.TaskID != taskID {
+			return testgendomain.Run{}, task.ErrConflict
+		}
+		if testgendomain.IsTerminal(r.State) {
+			return r, nil
+		}
+		if r.Revision != expected {
+			return testgendomain.Run{}, task.ErrConflict
+		}
+		next := testgendomain.CloneRun(r)
+		next.State = testgendomain.StateFailed
+		next.Revision++
+		now := time.Now().UTC()
+		next.FinishedAt = &now
+		saved, err := c.store.CheckpointGenerationWithFailure(ctx, expected, next, d)
+		if errors.Is(err, task.ErrConflict) {
+			continue
+		}
+		return saved, err
+	}
+	return testgendomain.Run{}, task.ErrConflict
+}
+
 func (c *Coordinator) terminalize(ctx context.Context, taskID string, state testgendomain.State) (testgendomain.Run, error) {
 	if c == nil || c.store == nil {
 		return testgendomain.Run{}, ErrUnavailable

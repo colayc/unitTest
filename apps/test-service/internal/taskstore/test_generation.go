@@ -251,8 +251,27 @@ func generationRecordMatches(raw []byte, hash string, record testgendomain.Gener
 }
 
 func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next testgendomain.Run, candidates []testgendomain.Candidate, artifacts []task.Artifact) (testgendomain.Run, error) {
+	return s.checkpointGeneration(ctx, expected, next, candidates, artifacts, nil)
+}
+
+func (s *Store) CheckpointGenerationWithFailure(ctx context.Context, expected int64, next testgendomain.Run, failure testgendomain.FailureDiagnostic) (testgendomain.Run, error) {
+	return s.checkpointGeneration(ctx, expected, next, nil, nil, &failure)
+}
+
+func (s *Store) checkpointGeneration(ctx context.Context, expected int64, next testgendomain.Run, candidates []testgendomain.Candidate, artifacts []task.Artifact, failure *testgendomain.FailureDiagnostic) (testgendomain.Run, error) {
 	if s == nil || ctx == nil || expected < 1 || testgendomain.ValidateRun(next) != nil || next.Revision != expected+1 || testgendomain.ValidateCandidates(candidates) != nil || len(artifacts) > 1000 {
 		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	failureCode := ""
+	if failure != nil {
+		if next.State != testgendomain.StateFailed {
+			return testgendomain.Run{}, task.ErrInvalidArgument
+		}
+		var encodeErr error
+		failureCode, encodeErr = failure.Encode()
+		if encodeErr != nil {
+			return testgendomain.Run{}, task.ErrInvalidArgument
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -358,7 +377,7 @@ func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next t
 			outcome = string(task.OutcomeSucceeded)
 		}
 	}
-	result, e = tx.ExecContext(ctx, `UPDATE tasks SET status=?,outcome=?,started_at=COALESCE(started_at,?),finished_at=?,active_step=? WHERE task_id=? AND last_sequence=?`, status, outcome, started, finished, string(next.State), next.TaskID, current.LastSequence)
+	result, e = tx.ExecContext(ctx, `UPDATE tasks SET status=?,outcome=?,started_at=COALESCE(started_at,?),finished_at=?,active_step=?,error_code=CASE WHEN ? THEN ? ELSE error_code END,error_message=CASE WHEN ? THEN '' ELSE error_message END WHERE task_id=? AND last_sequence=? AND kind='test_generation'`, status, outcome, started, finished, string(next.State), failure != nil, failureCode, failure != nil, next.TaskID, current.LastSequence)
 	if e != nil {
 		return testgendomain.Run{}, storageError("generation task checkpoint", e)
 	}
