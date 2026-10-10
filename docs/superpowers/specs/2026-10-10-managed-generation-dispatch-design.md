@@ -2,7 +2,7 @@
 
 日期：2026-10-10（Asia/Shanghai）。
 
-状态：用户回复“确认”，批准方案 1 的最小修复方向。本文等待书面设计审阅；尚未编写实施计划、修改产品代码或运行测试。
+状态：用户于 2026-10-10 回复“确认”，批准本文书面设计。[有界实施计划](../plans/2026-10-10-managed-generation-dispatch.md)已保存，等待选择执行方式；尚未实施本修正或运行测试。
 
 工作区：`C:/Users/DELL/.codex/worktrees/phase10-production-generation/unitTest`。
 
