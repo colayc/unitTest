@@ -2,7 +2,7 @@
 
 日期：2026-10-10（Asia/Shanghai）。
 
-状态：用户已确认方案 1 和设计方向；本文保存该方案，等待用户审阅书面设计。尚未实施或运行测试。
+状态：用户于 2026-10-10 回复“确认设计文档”，批准本文书面设计。[实施计划](../plans/2026-10-10-generation-failure-diagnostics.md)已保存，等待选择执行方式；尚未实施或运行测试。
 
 工作区：`C:/Users/DELL/.codex/worktrees/phase10-production-generation/unitTest`。分支：`codex/phase10-production-generation`。设计基线 HEAD：`68eb72ef89f3b5adeedf34166b060964dad10bf9`；保留中的 W4／第二版修改不属于本文，不声称工作区干净。
 
