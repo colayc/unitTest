@@ -190,6 +190,7 @@ func (p *ManagedRuntimeProvider) StartManaged(ctx context.Context, owner string,
 	if err != nil {
 		return generationv16.TestGenerationRunV16{}, err
 	}
+	p.generationService.launch(current.ID)
 	count := int64(current.CandidateCount)
 	result := generationv16.TestGenerationRunV16{RunID: current.ID, TaskID: current.TaskID, ProjectID: current.Request.ProjectID,
 		WorkspaceGeneration: current.Request.WorkspaceGeneration, State: generationv16.TestGenerationStateV16(current.State),
