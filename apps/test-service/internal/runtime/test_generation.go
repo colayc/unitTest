@@ -768,7 +768,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		}
 		ledger, err := generationLedger(run)
 		if err != nil {
-			s.fail(run)
+			s.fail(run, generationFailureDiagnostic(string(next), "ledger", err))
 			return
 		}
 		amount := s.driver.StageBudget(run, next)
@@ -779,7 +779,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		reservation, err := ledger.Reserve(ctx, amount)
 		if err != nil {
 			if ctx.Err() == nil {
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "reserve_budget", err))
 			}
 			return
 		}
@@ -789,10 +789,14 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		})
 		stageContextErr := stageCtx.Err()
 		if stageErr != nil || stageContextErr != nil {
+			d := generationFailureDiagnostic(string(next), "stage_run", stageErr)
+			if stageContextErr != nil {
+				d = generationFailureDiagnostic(string(next), "stage_context", stageContextErr)
+			}
 			cancel()
 			reservation.Release()
 			if ctx.Err() == nil {
-				s.fail(run)
+				s.fail(run, d)
 			}
 			return
 		}
@@ -802,7 +806,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		if !testgendomain.ValidTransition(run.State, result.Next) {
 			cancel()
 			reservation.Release()
-			s.fail(run)
+			s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "transition", Reason: "invalid_transition"})
 			return
 		}
 		record := run.Record
@@ -819,7 +823,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			if result.PreviewSet == nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "preview_set", Reason: "invalid_preview"})
 				return
 			}
 			previewRun := testgendomain.CloneRun(run)
@@ -828,21 +832,21 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			if setErr != nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "authoritative_set", setErr))
 				return
 			}
 			plan, planErr := s.publisher.Plan(stageCtx, set)
 			if planErr != nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "publish_plan", planErr))
 				return
 			}
 			planDiffHash := sha256.Sum256([]byte(plan.Diff))
 			if len(plan.Diff) == 0 || len(plan.Diff) > 262144 || hex.EncodeToString(planDiffHash[:]) != plan.DiffDigest {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "preview_diff", Reason: "invalid_preview"})
 				return
 			}
 			record.Preview = &testgendomain.PreviewIdentity{
@@ -852,7 +856,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		}
 		cancel()
 		if err := reservation.Commit(); err != nil {
-			s.fail(run)
+			s.fail(run, generationFailureDiagnostic(string(next), "commit_budget", err))
 			return
 		}
 		committed, err := s.coord.CheckpointWithRecord(ctx, run.ID, run.Revision, result.Next, result.Candidates, result.Artifacts, record)
@@ -864,7 +868,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		if committed.State == testgendomain.StateAwaitingConfirmation && committed.Request.ManagedSelectionID() != "" {
 			if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
 				if err := finalizer.FinalizeManagedReview(ctx, committed); err != nil {
-					s.fail(committed)
+					s.fail(committed, generationFailureDiagnostic("awaiting_confirmation", "finalize_review", err))
 					return
 				}
 			}
@@ -889,7 +893,7 @@ func generationLedger(run testgendomain.Run) (*testgencoord.BudgetLedger, error)
 	return testgencoord.NewBudgetLedgerFromUsage(limits, run.CreatedAt, time.Now, used)
 }
 
-func (s *generationService) fail(run testgendomain.Run) {
+func (s *generationService) fail(run testgendomain.Run, d testgendomain.FailureDiagnostic) {
 	s.mu.Lock()
 	cancelling := s.cancelPending[run.ID]
 	s.mu.Unlock()
@@ -899,7 +903,7 @@ func (s *generationService) fail(run testgendomain.Run) {
 	if run.State == testgendomain.StateCancelled || testgendomain.IsTerminal(run.State) {
 		return
 	}
-	failed, err := s.coord.Fail(context.Background(), run.TaskID)
+	failed, err := s.coord.FailWithDiagnostic(context.Background(), run.ID, run.TaskID, run.Revision, d)
 	if err == nil {
 		s.publishNewEvents(context.Background(), run, failed)
 	}
@@ -943,14 +947,14 @@ func (s *generationService) ResumeAll(ctx context.Context) error {
 				if run.Request.ManagedSelectionID() != "" {
 					if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
 						if err := finalizer.FinalizeManagedReview(ctx, run); err != nil {
-							s.fail(run)
+							s.fail(run, generationFailureDiagnostic("awaiting_confirmation", "finalize_review", err))
 						}
 					}
 				}
 				continue
 			}
 			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic("unknown", "resume", resumeErr))
 				continue
 			}
 			s.launch(run.ID)

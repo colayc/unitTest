@@ -161,14 +161,14 @@ func (driver *productionGenerationDriver) generate(ctx context.Context, run test
 		return cached.result, nil
 	}
 	if driver.pipeline == nil || authorize == nil {
-		return productionPipelineResult{}, task.ErrStorageUnavailable
+		return productionPipelineResult{}, withGenerationOperation("pipeline_generate", task.ErrStorageUnavailable)
 	}
 	if err := authorize(ctx); err != nil {
-		return productionPipelineResult{}, err
+		return productionPipelineResult{}, withGenerationOperation("authorize_process", err)
 	}
 	result, err := driver.pipeline.Generate(ctx, target)
 	if err != nil {
-		return productionPipelineResult{}, err
+		return productionPipelineResult{}, withGenerationOperation("pipeline_generate", err)
 	}
 	driver.mu.Lock()
 	driver.cache[run.ID] = cachedProductionPipeline{request: run.Request, result: result}
@@ -189,7 +189,7 @@ func (driver *productionGenerationDriver) RunStage(ctx context.Context, run test
 	}
 	target, err := driver.resolved(ctx, run)
 	if err != nil {
-		return GenerationStageResult{}, err
+		return GenerationStageResult{}, withGenerationOperation("resolve_target", err)
 	}
 	if next == testgendomain.StateBaseline {
 		return GenerationStageResult{Next: next}, nil
@@ -203,17 +203,19 @@ func (driver *productionGenerationDriver) RunStage(ctx context.Context, run test
 		return GenerationStageResult{Next: next}, nil
 	case testgendomain.StateValidating:
 		if driver.validator == nil || !driver.validator.Ready() || authorize == nil {
-			return GenerationStageResult{}, task.ErrStorageUnavailable
+			return GenerationStageResult{}, withGenerationOperation("validate_candidates", task.ErrStorageUnavailable)
 		}
 		if err := authorize(ctx); err != nil {
-			return GenerationStageResult{}, err
+			return GenerationStageResult{}, withGenerationOperation("authorize_process", err)
 		}
-		return driver.validator.Validate(ctx, run, target, result)
+		validated, validationErr := driver.validator.Validate(ctx, run, target, result)
+		return validated, withGenerationOperation("validate_candidates", validationErr)
 	case testgendomain.StateMinimizing:
 		if driver.validator == nil || !driver.validator.Ready() {
-			return GenerationStageResult{}, task.ErrStorageUnavailable
+			return GenerationStageResult{}, withGenerationOperation("minimize_candidates", task.ErrStorageUnavailable)
 		}
-		return driver.validator.Minimize(ctx, run, target, result)
+		minimized, minimizeErr := driver.validator.Minimize(ctx, run, target, result)
+		return minimized, withGenerationOperation("minimize_candidates", minimizeErr)
 	default:
 		return GenerationStageResult{}, task.ErrInvalidArgument
 	}
