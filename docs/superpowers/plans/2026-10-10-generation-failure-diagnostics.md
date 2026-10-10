@@ -8,6 +8,8 @@
 
 **Tech Stack:** Go 1.26.0、现有 SQLite taskstore、Go testing／channel、Windows PowerShell；不新增依赖。
 
+**Approved amendment (2026-10-10):** 用户确认仅在 Task 2 抽取共用私有终结算法，解除“私有 `terminalize` 函数体不得修改”的限制；公开旧接口、取消行为、两条入口各自的 revision／身份／参数校验和存储安全约束保持不变。这是计划约束协调，不是新生成功能或原生根因修复。已完成 Task 1 不重做，修正仅重测直接受影响的 coordinator 选择，再复审并继续 Task 3。
+
 ## Global Constraints
 
 - 用户已于 2026-10-10 确认[书面设计](../specs/2026-10-10-generation-failure-diagnostics-design.md)。本计划尚未执行。
@@ -306,7 +308,7 @@ Commit-FailureTask @('apps/test-service/internal/testgendomain/failure.go','apps
 **Files:**
 
 - Modify: `apps/test-service/internal/taskstore/test_generation.go`，`CheckpointGeneration`（基线行 252–400）的入口和 task UPDATE；复用单一事务。
-- Modify: `apps/test-service/internal/testgencoord/coordinator.go`，`Fail`／`terminalize` 邻近（基线行 152–178），新增独立诊断入口，不改原方法。
+- Modify: `apps/test-service/internal/testgencoord/coordinator.go`，`Fail`／`terminalize` 邻近（基线行 152–178），新增诊断入口；仅将私有 `terminalize` 委托共用算法，不改旧公开方法及语义。
 - Create/Test: `apps/test-service/internal/taskstore/test_generation_failure_test.go`
 - Create/Test: `apps/test-service/internal/testgencoord/failure_test.go`
 
@@ -552,23 +554,43 @@ result,e=tx.ExecContext(ctx,`UPDATE tasks SET status=?,outcome=?,started_at=COAL
 
 原入口任何 null/invalid 状态检查、minimized record／候选／产物约束都不删除。诊断失败用 nil candidates/artifacts，所以没有新的部分产物路径；旧调用布尔 false 保留原错误字段。
 
-- [ ] **Step 4: Add the observed-identity coordinator entry without rewriting legacy terminalization**
+- [ ] **Step 4: Share the private terminalization algorithm without changing legacy behavior**
 
-在 `Fail` 旁增加以下完整方法，原 `Fail`／`Cancel`／`terminalize` 不修改：
+用户已批准此小幅调整。公开 `Fail`／`Cancel` 原方法和签名不修改；私有 `terminalize` 只委托下列共用函数。新诊断入口保留自己的 nil context／invalid diagnostic／expected 校验；共用函数保留旧入口的 nil receiver/store 校验，不顺带改变旧 nil-context 行为。只有带诊断策略才做 run/task 身份检查，且在终态幂等返回之前进行；非终态 revision 校验仍只使用调用者观察到的值。
 
 ```go
+type generationFailurePolicy struct {
+ runID string
+ revision int64
+ diagnostic testgendomain.FailureDiagnostic
+}
+
 func (c *Coordinator) FailWithDiagnostic(ctx context.Context,runID,taskID string,expected int64,d testgendomain.FailureDiagnostic)(testgendomain.Run,error){
  if c==nil||c.store==nil||ctx==nil { return testgendomain.Run{},ErrUnavailable }
  if expected<1||!d.Valid() { return testgendomain.Run{},task.ErrInvalidArgument }
+ return c.terminalizeWithFailure(ctx,taskID,testgendomain.StateFailed,&generationFailurePolicy{runID:runID,revision:expected,diagnostic:d})
+}
+
+func (c *Coordinator) terminalize(ctx context.Context,taskID string,state testgendomain.State)(testgendomain.Run,error){
+ return c.terminalizeWithFailure(ctx,taskID,state,nil)
+}
+
+func (c *Coordinator) terminalizeWithFailure(ctx context.Context,taskID string,state testgendomain.State,failure *generationFailurePolicy)(testgendomain.Run,error){
+ if c==nil||c.store==nil { return testgendomain.Run{},ErrUnavailable }
  for attempts:=0;attempts<3;attempts++ {
   r,err:=c.store.GetGenerationByTask(ctx,taskID)
   if err!=nil { return testgendomain.Run{},err }
-  if r.ID!=runID||r.TaskID!=taskID { return testgendomain.Run{},task.ErrConflict }
+  if failure!=nil&&(r.ID!=failure.runID||r.TaskID!=taskID) { return testgendomain.Run{},task.ErrConflict }
   if testgendomain.IsTerminal(r.State) { return r,nil }
-  if r.Revision!=expected { return testgendomain.Run{},task.ErrConflict }
-  next:=testgendomain.CloneRun(r);next.State=testgendomain.StateFailed;next.Revision++
+  if failure!=nil&&r.Revision!=failure.revision { return testgendomain.Run{},task.ErrConflict }
+  next:=testgendomain.CloneRun(r);next.State=state;next.Revision++
   now:=time.Now().UTC();next.FinishedAt=&now
-  saved,err:=c.store.CheckpointGenerationWithFailure(ctx,expected,next,d)
+  var saved testgendomain.Run
+  if failure==nil {
+   saved,err=c.store.CheckpointGeneration(ctx,r.Revision,next,nil,nil)
+  } else {
+   saved,err=c.store.CheckpointGenerationWithFailure(ctx,failure.revision,next,failure.diagnostic)
+  }
   if errors.Is(err,task.ErrConflict) { continue }
   return saved,err
  }
@@ -576,7 +598,9 @@ func (c *Coordinator) FailWithDiagnostic(ctx context.Context,runID,taskID string
 }
 ```
 
-`errors`／`time` 已在 coordinator imports。此失败入口不新做 snapshot/tool hash/进程启动，不比原 `Fail` 多做昂贵索引发现；stale workspace 仍能按原存储允许的安全失败终结。三次 CAS retry 只是继承原有有界终结模式，非终态 revision 一旦推进立即拒绝旧诊断。
+`errors`／`time` 已在 coordinator imports。共用算法不增加 snapshot/tool hash/进程启动；旧路径每次重读后使用该次 `r.Revision` 进行原检查点 CAS，新诊断路径始终使用 `failure.revision`，非终态 revision 推进立即拒绝旧诊断。仍然三次有界 CAS retry，已有终态不补写、不增加事件，不降低 minimized-record／preview 检查。两条入口只在既有 storage wrappers 间选择，不新建诊断补写事务。
+
+Task 2 修正轮只需格式化／同步改动的 coordinator 及原六文件依赖，然后运行 Step 5 的 coordinator 选择，读取完整 receipt 和实际 exit；store／codec 源码未变时不重复它们的测试。仅提交实际变更的 `apps/test-service/internal/testgencoord/coordinator.go`（若修正发现需要新增覆盖，只允许本任务已有 `failure_test.go` 并先报告具体覆盖理由）。修正基线取上一轮审阅的 HEAD；追加同一 report，再做 scoped re-review。初始 Task 2 的四路径提交步骤留作原实施记录，不重新创建已完成的测试／missing-API RED。
 
 - [ ] **Step 5: Verify focused GREEN/legacy gates and commit exact Task 2 paths**
 
