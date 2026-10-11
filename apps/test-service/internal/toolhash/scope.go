@@ -81,6 +81,22 @@ func contextError(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// ValidateContext checks a particular scope without granting extraction authority.
+func (s *Scope) ValidateContext(ctx context.Context) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if s == nil {
+		return errors.New("missing tool hash scope")
+	}
+	if bound, _ := ctx.Value(scopeKey{}).(*Scope); bound != s {
+		return errors.New("tool hash context binding changed")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveLocked(ctx)
+}
+
 func (s *Scope) Stats() Stats {
 	if s == nil {
 		return Stats{}
