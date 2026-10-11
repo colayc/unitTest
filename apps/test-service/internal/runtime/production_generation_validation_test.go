@@ -218,7 +218,7 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Next != testgendomain.StateMinimizing || len(result.Candidates) != 1 || len(result.Artifacts) != 2 {
+	if result.Next != testgendomain.StateValidating || len(result.Candidates) != 1 || len(result.Artifacts) != 2 {
 		t.Fatalf("validation result=%+v", result)
 	}
 	candidate := result.Candidates[0]
@@ -461,7 +461,7 @@ func TestProductionGenerationValidationFailureRetainsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Next != testgendomain.StateRejected || len(result.Candidates) != 0 || len(result.Artifacts) != 0 || len(artifacts.bodies) != 0 {
+	if result.Next != testgendomain.StateValidating || len(result.Candidates) != 0 || len(result.Artifacts) != 0 || len(artifacts.bodies) != 0 {
 		t.Fatalf("failed validation retained data: %+v", result)
 	}
 }

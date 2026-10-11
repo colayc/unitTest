@@ -364,7 +364,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 		adapter.mu.Lock()
 		delete(adapter.records, run.ID)
 		adapter.mu.Unlock()
-		return GenerationStageResult{Next: testgendomain.StateRejected}, nil
+		return GenerationStageResult{Next: testgendomain.StateValidating}, nil
 	}
 	caseDigest := productionBytesDigest([]byte("case:" + binding.ValidationID))
 	caseID := caseDigest[:32]
@@ -410,7 +410,7 @@ func (adapter *productionGenerationValidation) Validate(ctx context.Context, run
 	adapter.mu.Lock()
 	adapter.records[run.ID] = record
 	adapter.mu.Unlock()
-	return GenerationStageResult{Next: testgendomain.StateMinimizing, Candidates: []testgendomain.Candidate{candidate}, Artifacts: []task.Artifact{artifact, evidenceArtifact}}, nil
+	return GenerationStageResult{Next: testgendomain.StateValidating, Candidates: []testgendomain.Candidate{candidate}, Artifacts: []task.Artifact{artifact, evidenceArtifact}}, nil
 }
 
 func (adapter *productionGenerationValidation) cachedRecord(runID string) (productionValidatedRecord, bool) {
