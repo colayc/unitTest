@@ -220,6 +220,9 @@ func (r *Runtime) readCurrentCoverageIndex(ctx context.Context, q coveragedetail
 	if run.Request.ProjectID != q.ProjectID || run.Request.WorkspaceGeneration != q.WorkspaceGeneration {
 		return coveragedetail.Index{}, task.ErrInvalidArgument
 	}
+	if err := validateProductionToolScopeQuery(ctx, q); err != nil {
+		return coveragedetail.Index{}, err
+	}
 	if factory == nil {
 		return coveragedetail.Index{}, task.ErrStorageUnavailable
 	}

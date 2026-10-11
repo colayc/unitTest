@@ -25,8 +25,68 @@ type runtimeProductionResolverAuthority struct {
 }
 
 func (authority runtimeProductionResolverAuthority) ResolveProductionContext(ctx context.Context, projectID, generation, reportID string) (productionResolverContext, error) {
+	return authority.resolveProductionContext(ctx, projectID, generation, reportID, beginProductionToolScope)
+}
+
+func (authority runtimeProductionResolverAuthority) resolveProductionContext(ctx context.Context, projectID, generation, reportID string, factory productionToolScopeFactory) (resolved productionResolverContext, err error) {
 	if authority.reader == nil || ctx == nil || projectID == "" || !validProductionDigest(generation) || !validProductionObjectID(reportID) {
 		return productionResolverContext{}, task.ErrInvalidArgument
+	}
+	if factory == nil {
+		return productionResolverContext{}, task.ErrStorageUnavailable
+	}
+	scoped, scope, owner, beginErr := factory(ctx)
+	defer func() {
+		// Register immediately: even a malformed factory result must release its owner.
+		var finishErr error
+		if scoped != nil {
+			finishErr = scoped.Err()
+		}
+		if finishErr == nil && scope != nil {
+			finishErr = scope.ValidateContext(scoped)
+		}
+		if finishErr == nil && owner != nil {
+			finishErr = owner.Err()
+		}
+		var closeErr error
+		if owner != nil {
+			closeErr = owner.Close()
+		} else if scope != nil {
+			closeErr = scope.Close()
+		}
+		if err == nil && finishErr != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			} else {
+				err = task.ErrStorageUnavailable
+			}
+		}
+		if err == nil && closeErr != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			} else {
+				err = task.ErrStorageUnavailable
+			}
+		}
+		if err != nil {
+			resolved = productionResolverContext{}
+		}
+	}()
+	if beginErr != nil || scoped == nil || (scope == nil) != (owner == nil) {
+		if ctx.Err() != nil {
+			return productionResolverContext{}, ctx.Err()
+		}
+		return productionResolverContext{}, task.ErrStorageUnavailable
+	}
+	ctx = scoped
+	if scope != nil {
+		if scope.ValidateContext(ctx) != nil {
+			return productionResolverContext{}, task.ErrStorageUnavailable
+		}
+		ctx = context.WithValue(ctx, productionToolScopeKey{}, &productionToolScopeBinding{
+			scope: scope,
+			query: coveragedetail.CurrentIndexQuery{ProjectID: projectID, WorkspaceGeneration: generation, ReportID: reportID},
+		})
 	}
 	snapshot, err := authority.reader.InspectWorkspace(ctx)
 	if err != nil {
