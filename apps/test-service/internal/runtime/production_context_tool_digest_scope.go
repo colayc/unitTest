@@ -44,6 +44,9 @@ func validateProductionToolScopeQuery(ctx context.Context, q coveragedetail.Curr
 		return task.ErrInvalidArgument
 	}
 	if binding.scope.ValidateContext(ctx) != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return task.ErrStorageUnavailable
 	}
 	return nil
@@ -64,6 +67,9 @@ func borrowProductionToolScope(ctx context.Context) (coverageToolScope, bool, er
 		return nil, true, task.ErrStorageUnavailable
 	}
 	if binding.scope.ValidateContext(ctx) != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, true, err
+		}
 		return nil, true, task.ErrStorageUnavailable
 	}
 	return &borrowedProductionToolScope{ctx: ctx, scope: binding.scope}, true, nil

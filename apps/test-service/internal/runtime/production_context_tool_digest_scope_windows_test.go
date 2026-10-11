@@ -133,7 +133,88 @@ func TestProductionContextToolScopeBorrowView(t *testing.T) {
 	}
 }
 
+// Capture a real live Err result, then transition the underlying real context
+// before ValidateContext's next Err call. No context error is fabricated.
+type productionScopeErrTransitionContext struct {
+	context.Context
+	once       sync.Once
+	transition func()
+}
+
+func (c *productionScopeErrTransitionContext) Err() error {
+	err := c.Context.Err()
+	c.once.Do(c.transition)
+	return err
+}
+
+func productionScopeContextFailure(t *testing.T, ctx context.Context, kind string) (context.Context, func(), context.CancelFunc, error) {
+	t.Helper()
+	if kind == "cancel" {
+		failed, cancel := context.WithCancel(ctx)
+		return failed, cancel, cancel, context.Canceled
+	}
+	failed, cancel := context.WithDeadline(ctx, time.Now().Add(25*time.Millisecond))
+	return failed, func() {
+		select {
+		case <-failed.Done():
+		case <-time.After(time.Second):
+			t.Fatal("real deadline did not expire within bound")
+		}
+	}, cancel, context.DeadlineExceeded
+}
+
 func TestProductionContextToolScopeBorrowValidation(t *testing.T) {
+	for _, mode := range []string{"query", "borrow"} {
+		for _, kind := range []string{"cancel", "deadline"} {
+			t.Run("during-validation-"+mode+"-"+kind, func(t *testing.T) {
+				p, _, c, q := newProductionDigestFixture(t)
+				ctx, scope, err := toolhash.Begin(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer scope.Close()
+				if _, err := p.r.InspectWorkspace(ctx); err != nil {
+					t.Fatal(err)
+				}
+				ctx = context.WithValue(ctx, productionToolScopeKey{}, &productionToolScopeBinding{scope: scope, query: q})
+				failed, transition, cancel, want := productionScopeContextFailure(t, ctx, kind)
+				defer cancel()
+				if failed.Err() != nil {
+					t.Fatal("context failed before initial validation check")
+				}
+				wrapped := &productionScopeErrTransitionContext{Context: failed, transition: transition}
+				var got error
+				if mode == "query" {
+					got = validateProductionToolScopeQuery(wrapped, q)
+				} else {
+					view, present, err := borrowProductionToolScope(wrapped)
+					got = err
+					if view != nil || !present {
+						t.Error("invalid borrow produced view or allowed fallback")
+					}
+				}
+				if !errors.Is(failed.Err(), want) || !errors.Is(got, want) {
+					t.Errorf("during-validation context priority: got=%v real=%v want=%v", got, failed.Err(), want)
+				}
+				if len(c.results) != 1 || scope.Stats().Retained != 1 {
+					t.Fatal("helper released parent or performed fallback discovery")
+				}
+				if os.WriteFile(c.path, []byte("must remain protected"), 0600) == nil || os.Remove(c.path) == nil {
+					t.Fatal("helper closed caller-owned guard")
+				}
+				_ = scope.Close()
+				if scope.Stats().Retained != 0 {
+					t.Fatal("caller close retained guard")
+				}
+				if err := os.WriteFile(c.path, []byte("released"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(c.path); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
 	for _, name := range []string{"project", "generation", "report", "foreign", "closed", "failed", "cancelled", "nil-marker", "wrong-marker-type"} {
 		t.Run(name, func(t *testing.T) {
 			p, _, c, q := newProductionDigestFixture(t)
@@ -284,6 +365,50 @@ func TestProductionContextToolScopeFreshnessAndCleanup(t *testing.T) {
 }
 
 func TestProductionContextToolScopeEntryAndFactory(t *testing.T) {
+	for _, kind := range []string{"cancel", "deadline"} {
+		t.Run("after-begin-"+kind, func(t *testing.T) {
+			p, _, c, q := newProductionDigestFixture(t)
+			var observed *observedDigestScope
+			var want error
+			factory := func(ctx context.Context) (context.Context, *toolhash.Scope, coverageToolScope, error) {
+				scoped, scope, err := toolhash.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				observed = &observedDigestScope{Scope: scope}
+				if _, err := p.r.InspectWorkspace(scoped); err != nil {
+					t.Fatal(err)
+				}
+				failed, transition, cancel, expected := productionScopeContextFailure(t, scoped, kind)
+				t.Cleanup(cancel)
+				want = expected
+				if failed.Err() != nil {
+					t.Fatal("factory context already failed")
+				}
+				transition()
+				if !errors.Is(failed.Err(), want) {
+					t.Fatal("factory did not trigger real context failure")
+				}
+				return failed, scope, observed, nil
+			}
+			resolved, err := (runtimeProductionResolverAuthority{reader: p}).resolveProductionContext(context.Background(), q.ProjectID, q.WorkspaceGeneration, q.ReportID, factory)
+			if !errors.Is(err, want) || !reflect.DeepEqual(resolved, productionResolverContext{}) {
+				t.Errorf("after-begin context priority: result=%+v got=%v want=%v", resolved, err, want)
+			}
+			if observed == nil || observed.closed != 1 || observed.stats.FullHashCalls != 1 || observed.Scope.Stats().Retained != 0 {
+				t.Fatal("failed owner did not release real hashed guard exactly once")
+			}
+			if len(c.results) != 1 {
+				t.Fatal("invalid owner reached authority discovery")
+			}
+			if err := os.WriteFile(c.path, []byte("released"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(c.path); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 	for _, name := range []string{"reader", "context", "project", "generation", "report"} {
 		t.Run("entry-"+name, func(t *testing.T) {
 			p, _, _, q := newProductionDigestFixture(t)

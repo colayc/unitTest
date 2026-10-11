@@ -81,6 +81,9 @@ func (authority runtimeProductionResolverAuthority) resolveProductionContext(ctx
 	ctx = scoped
 	if scope != nil {
 		if scope.ValidateContext(ctx) != nil {
+			if err := ctx.Err(); err != nil {
+				return productionResolverContext{}, err
+			}
 			return productionResolverContext{}, task.ErrStorageUnavailable
 		}
 		ctx = context.WithValue(ctx, productionToolScopeKey{}, &productionToolScopeBinding{
