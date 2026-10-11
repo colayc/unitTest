@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,16 +27,27 @@ func (b fixtureBundle) ManifestSHA256() string { return b.manifest }
 func (b fixtureBundle) Verify() error          { *b.verified++; return nil }
 
 type fixtureRunner struct {
-	calls  int
-	spec   probe.Spec
-	result probe.Result
-	err    error
+	calls     int
+	spec      probe.Spec
+	specs     []probe.Spec
+	abiResult probe.Result
+	result    probe.Result
+	err       error
 }
 
 func (r *fixtureRunner) Run(_ context.Context, s probe.Spec) (probe.Result, error) {
 	r.calls++
 	r.spec = s
-	return r.result, r.err
+	r.specs = append(r.specs, s)
+	if r.err != nil {
+		return probe.Result{}, r.err
+	}
+	for _, arg := range s.Args {
+		if arg == "-dM" {
+			return r.abiResult, nil
+		}
+	}
+	return r.result, nil
 }
 func fixtureAnalysis(t *testing.T) (Analyzer, AnalysisRequest, *fixtureRunner, *int) {
 	t.Helper()
@@ -47,7 +59,7 @@ func fixtureAnalysis(t *testing.T) (Analyzer, AnalysisRequest, *fixtureRunner, *
 	}
 	sum := sha256.Sum256(content)
 	verified := 0
-	runner := &fixtureRunner{result: probe.Result{ExitCode: 0, Stdout: []byte(scalarAST)}}
+	runner := &fixtureRunner{abiResult: probe.Result{ExitCode: 0, Stdout: integerABITestMacros(runtime.GOOS+"-x64", false)}, result: probe.Result{ExitCode: 0, Stdout: []byte(scalarAST)}}
 	return Analyzer{bundle: fixtureBundle{path: filepath.Join(root, "fixed", "clang"), resource: filepath.Join(root, "fixed", "lib", "clang", "22"), manifest: strings.Repeat("b", 64), verified: &verified}, runner: runner}, AnalysisRequest{WorkspaceRoot: root, SourceRelative: "scalar.c", SourceDigest: hex.EncodeToString(sum[:]), CompileSnapshotDigest: strings.Repeat("c", 64), Arguments: []string{"-std=c11"}, Timeout: 5 * time.Second}, runner, &verified
 }
 
@@ -66,18 +78,31 @@ func TestAnalyzeUsesOnlyVerifiedFixedCompilerWithCleanEnvironment(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *verified != 2 || runner.calls != 1 {
+	if *verified != 3 || runner.calls != 2 {
 		t.Fatalf("bundle verifications=%d, launches=%d", *verified, runner.calls)
 	}
-	want := []string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include"), "-std=c11", "-resource-dir", a.bundle.ResourceDir(), filepath.Join(request.WorkspaceRoot, request.SourceRelative)}
+	wantABI := []string{"--no-default-config", "-dM", "-E", "-x", "c", "-std=c11", "-nostdinc", "-nostdinc++", "-resource-dir", a.bundle.ResourceDir(), "-"}
+	if len(runner.specs) != 2 || !reflect.DeepEqual(runner.specs[0].Args, wantABI) || runner.specs[0].MaxOutput != maxIntegerABIBytes {
+		t.Fatal("incorrect ABI process boundary")
+	}
+	want := []string{"--no-default-config", "-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include"), "-std=c11", "-resource-dir", a.bundle.ResourceDir(), filepath.Join(request.WorkspaceRoot, request.SourceRelative)}
 	if !reflect.DeepEqual(runner.spec.Args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.spec.Args, want)
 	}
-	if runner.spec.Executable != a.bundle.ClangPath() || runner.spec.Dir != request.WorkspaceRoot || len(runner.spec.Env) != 0 || runner.spec.MaxOutput <= 0 || runner.spec.Timeout != request.Timeout {
-		t.Fatalf("unsafe process spec %#v", runner.spec)
+	if runner.spec.MaxOutput != maxASTBytes {
+		t.Fatal("incorrect AST process boundary")
+	}
+	for _, spec := range runner.specs {
+		if spec.Executable != a.bundle.ClangPath() || spec.Dir != request.WorkspaceRoot || len(spec.Env) != 0 || spec.Timeout <= 0 || spec.Timeout > request.Timeout {
+			t.Fatal("unsafe process boundary")
+		}
 	}
 	if len(program.Functions) != 1 || program.Functions[0].Decision.Kind != DecisionSupported {
 		t.Fatalf("unexpected program %#v", program)
+	}
+	f := program.Functions[0]
+	if f.ReturnType.Kind != TypeInteger || f.ReturnType.BitWidth != 32 || !f.ReturnType.Signed || !f.ReturnType.Proven || len(f.Parameters) != 1 || f.Parameters[0].Type.Kind != TypeInteger || f.Parameters[0].Type.BitWidth != 32 || !f.Parameters[0].Type.Signed || !f.Parameters[0].Type.Proven {
+		t.Fatal("missing trusted integer facts")
 	}
 	wantExcerpt := sha256.Sum256([]byte("int choose(int x){return x>0 ? 1 : 0;}"))
 	if program.Functions[0].Effect != EffectLocalMemory || program.Functions[0].Excerpt.Digest != hex.EncodeToString(wantExcerpt[:]) || program.Functions[0].Excerpt.LocationDigest != program.Functions[0].LocationDigest || program.Functions[0].Excerpt.StartByte != 0 || program.Functions[0].Excerpt.EndByte != 38 {

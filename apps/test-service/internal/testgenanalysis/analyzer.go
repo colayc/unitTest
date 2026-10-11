@@ -61,13 +61,17 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if err := ctx.Err(); err != nil {
 		return Program{}, err
 	}
-	if a.bundle == nil || a.runner == nil || !validSHA(a.bundle.ManifestSHA256()) || !validSHA(request.SourceDigest) || !validSHA(request.CompileSnapshotDigest) || request.Timeout <= 0 || request.Timeout > 30*time.Second {
+	if a.bundle == nil || a.runner == nil || !validSHA(a.bundle.ManifestSHA256()) ||
+		!validSHA(request.SourceDigest) || !validSHA(request.CompileSnapshotDigest) ||
+		request.Timeout <= 0 || request.Timeout > 30*time.Second {
 		return Program{}, errors.New("invalid analysis identity or budget")
 	}
+	analysisContext, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
 	if !filepath.IsAbs(request.WorkspaceRoot) || filepath.Clean(request.WorkspaceRoot) != request.WorkspaceRoot || !safeRelativeSource(request.SourceRelative) {
 		return Program{}, errors.New("invalid trusted source root or URI")
 	}
-	if err := a.bundle.Verify(); err != nil {
+	if a.bundle.Verify() != nil {
 		return Program{}, errors.New("fixed Clang bundle verification failed")
 	}
 	args, err := normalizedArguments(request.Arguments, request.WorkspaceRoot)
@@ -82,19 +86,42 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if hasSourceDirective(sourceBytes) {
 		return Program{}, errors.New("source-directed includes or macros are not supported by fixed analysis")
 	}
-	args = append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include")}, args...)
-	args = append(args, "-resource-dir", a.bundle.ResourceDir(), sourcePath)
-	result, err := a.runner.Run(ctx, probe.Spec{Executable: a.bundle.ClangPath(), Args: args, Dir: request.WorkspaceRoot, Env: []string{}, Timeout: request.Timeout, MaxOutput: maxASTBytes})
+	binding, err := integerABIBindingFor(request, a.bundle.ManifestSHA256(), args)
 	if err != nil {
-		if ctx.Err() != nil {
-			return Program{}, ctx.Err()
-		}
+		return Program{}, errIntegerABI
+	}
+	facts, err := a.probeIntegerABI(analysisContext, request, binding)
+	if err != nil {
+		return Program{}, err
+	}
+	if err := analysisContext.Err(); err != nil {
+		return Program{}, err
+	}
+	if a.bundle.Verify() != nil {
+		return Program{}, errors.New("fixed Clang bundle changed during analysis")
+	}
+	if err := analysisContext.Err(); err != nil {
+		return Program{}, err
+	}
+	deadline, _ := analysisContext.Deadline()
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return Program{}, context.DeadlineExceeded
+	}
+	astArgs := append([]string{"--no-default-config", "-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include")}, args...)
+	astArgs = append(astArgs, "-resource-dir", a.bundle.ResourceDir(), sourcePath)
+	result, err := a.runner.Run(analysisContext, probe.Spec{Executable: a.bundle.ClangPath(), Args: astArgs,
+		Dir: request.WorkspaceRoot, Env: []string{}, Timeout: remaining, MaxOutput: maxASTBytes})
+	if err := analysisContext.Err(); err != nil {
+		return Program{}, err
+	}
+	if err != nil {
 		return Program{}, errors.New("fixed Clang analysis process failed")
 	}
 	if result.ExitCode != 0 {
 		return Program{}, errors.New("fixed Clang rejected source")
 	}
-	if err := a.bundle.Verify(); err != nil {
+	if a.bundle.Verify() != nil {
 		return Program{}, errors.New("fixed Clang bundle changed during analysis")
 	}
 	afterBytes, err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest)
@@ -108,8 +135,14 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if err != nil {
 		return Program{}, errors.New("fixed Clang emitted unsupported AST")
 	}
+	if err := applyIntegerABIFacts(&program, facts, binding); err != nil {
+		return Program{}, errIntegerABI
+	}
 	if err := bindSourceExcerpts(&program, sourceBytes); err != nil {
 		return Program{}, errors.New("fixed Clang source range is incomplete")
+	}
+	if err := analysisContext.Err(); err != nil {
+		return Program{}, err
 	}
 	return program, nil
 }

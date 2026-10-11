@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -94,8 +95,16 @@ func TestNativeGenerationSeedMatchesFixedAnalyzer(t *testing.T) {
 			}
 			if runner.spec.Executable != analyzer.bundle.ClangPath() ||
 				runner.spec.Dir != request.WorkspaceRoot || len(runner.spec.Env) != 0 ||
-				runner.spec.Timeout != request.Timeout || runner.spec.MaxOutput != maxASTBytes {
+				runner.spec.Timeout <= 0 || runner.spec.Timeout > request.Timeout || runner.spec.MaxOutput != maxIntegerABIBytes {
 				t.Fatal("native seed observer received an unexpected process boundary")
+			}
+			language := "c"
+			if spec.standard == "-std=c++17" {
+				language = "c++"
+			}
+			want := []string{"--no-default-config", "-dM", "-E", "-x", language, spec.standard, "-nostdinc", "-nostdinc++", "-resource-dir", analyzer.bundle.ResourceDir(), "-"}
+			if !reflect.DeepEqual(runner.spec.Args, want) {
+				t.Fatal("native seed observer received an unexpected ABI specification")
 			}
 		})
 	}
