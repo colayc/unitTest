@@ -256,15 +256,28 @@ func TestProductionGenerationValidationRetainsOnlyExecutedCoverageGain(t *testin
 	if err != nil || !reflect.DeepEqual(stable.Files, pipeline.editSet.Files) || !reflect.DeepEqual(stable.CaseIDs, []string{candidate.CaseID}) {
 		t.Fatalf("caller mutated authoritative set: %+v %v", stable, err)
 	}
-	minimized, err := adapter.Minimize(context.Background(), run, target, pipeline)
-	if err != nil || minimized.Next != testgendomain.StateAwaitingConfirmation || !reflect.DeepEqual(minimized.MinimizedCaseIDs, []string{candidate.CaseID}) || minimized.PreviewSet == nil {
-		t.Fatalf("minimize result=%+v err=%v", minimized, err)
-	}
-	if err := adapter.ValidateCandidate(context.Background(), run, candidate); err != nil || authority.verify != 4 {
-		t.Fatalf("candidate receipt not reverified: %v count=%d", err, authority.verify)
-	}
+	run.State, run.Revision, run.CandidateCount = testgendomain.StateValidating, 6, 1
+	run.Record = testgendomain.NewGenerationRecord(run.Request)
+	run.Record.BudgetUsed.Candidates = run.Request.Budgets.CandidateCount
 	for _, artifact := range result.Artifacts {
 		run.ArtifactDigests = append(run.ArtifactDigests, testgendomain.ArtifactRef{ID: artifact.ID, Digest: artifact.SHA256})
+	}
+	adapter.artifacts = stageFixtureCandidateStore{productionGenerationArtifactFixture: artifacts, runID: run.ID, values: result.Candidates, run: run}
+	minimized, err := adapter.Minimize(context.Background(), run, target)
+	if err != nil || minimized.Next != testgendomain.StateMinimizing ||
+		minimized.MinimizedCaseIDs != nil || minimized.PreviewSet != nil {
+		t.Fatalf("minimize result=%+v err=%v", minimized, err)
+	}
+	run.State, run.Revision = testgendomain.StateMinimizing, 7
+	adapter.artifacts = stageFixtureCandidateStore{productionGenerationArtifactFixture: artifacts, runID: run.ID, values: result.Candidates, run: run}
+	preview, err := adapter.Preview(context.Background(), run, target)
+	if err != nil || preview.Next != testgendomain.StateAwaitingConfirmation ||
+		!reflect.DeepEqual(preview.MinimizedCaseIDs, []string{candidate.CaseID}) ||
+		preview.PreviewSet == nil {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	if err := adapter.ValidateCandidate(context.Background(), run, candidate); err != nil || authority.verify != 5 {
+		t.Fatalf("candidate receipt not reverified: %v count=%d", err, authority.verify)
 	}
 	adapter.mu.Lock()
 	delete(adapter.records, run.ID)

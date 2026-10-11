@@ -28,7 +28,8 @@ type productionManagedTargetResolver interface {
 type productionGenerationValidator interface {
 	Ready() bool
 	Validate(context.Context, testgendomain.Run, generationTarget, productionPipelineResult) (GenerationStageResult, error)
-	Minimize(context.Context, testgendomain.Run, generationTarget, productionPipelineResult) (GenerationStageResult, error)
+	Minimize(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error)
+	Preview(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error)
 	ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error
 	CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error)
 }
@@ -191,8 +192,29 @@ func (driver *productionGenerationDriver) RunStage(ctx context.Context, run test
 	if err != nil {
 		return GenerationStageResult{}, withGenerationOperation("resolve_target", err)
 	}
-	if next == testgendomain.StateBaseline {
+	if err := ctx.Err(); err != nil {
+		return GenerationStageResult{}, err
+	}
+	switch next {
+	case testgendomain.StateBaseline:
 		return GenerationStageResult{Next: next}, nil
+	case testgendomain.StateMinimizing:
+		if driver.validator == nil || !driver.validator.Ready() {
+			return GenerationStageResult{}, withGenerationOperation("minimize_candidates", task.ErrStorageUnavailable)
+		}
+		value, err := driver.validator.Minimize(ctx, run, target)
+		return value, withGenerationOperation("minimize_candidates", err)
+	case testgendomain.StateAwaitingConfirmation:
+		if driver.validator == nil || !driver.validator.Ready() {
+			return GenerationStageResult{}, withGenerationOperation("preview_set", task.ErrStorageUnavailable)
+		}
+		value, err := driver.validator.Preview(ctx, run, target)
+		return value, withGenerationOperation("preview_set", err)
+	case testgendomain.StateAnalyzing, testgendomain.StateSolving,
+		testgendomain.StateRendering, testgendomain.StateValidating:
+		// 这些阶段继续进入已有 generate 和 validating 授权逻辑。
+	default:
+		return GenerationStageResult{}, task.ErrInvalidArgument
 	}
 	result, err := driver.generate(ctx, run, target, authorize)
 	if err != nil {
@@ -210,12 +232,6 @@ func (driver *productionGenerationDriver) RunStage(ctx context.Context, run test
 		}
 		validated, validationErr := driver.validator.Validate(ctx, run, target, result)
 		return validated, withGenerationOperation("validate_candidates", validationErr)
-	case testgendomain.StateMinimizing:
-		if driver.validator == nil || !driver.validator.Ready() {
-			return GenerationStageResult{}, withGenerationOperation("minimize_candidates", task.ErrStorageUnavailable)
-		}
-		minimized, minimizeErr := driver.validator.Minimize(ctx, run, target, result)
-		return minimized, withGenerationOperation("minimize_candidates", minimizeErr)
 	default:
 		return GenerationStageResult{}, task.ErrInvalidArgument
 	}

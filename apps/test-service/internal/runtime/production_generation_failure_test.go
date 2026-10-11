@@ -36,7 +36,10 @@ type diagnosticProductionValidator struct {
 func (v *diagnosticProductionValidator) Validate(context.Context, testgendomain.Run, generationTarget, productionPipelineResult) (GenerationStageResult, error) {
 	return GenerationStageResult{}, v.cause
 }
-func (v *diagnosticProductionValidator) Minimize(context.Context, testgendomain.Run, generationTarget, productionPipelineResult) (GenerationStageResult, error) {
+func (v *diagnosticProductionValidator) Minimize(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error) {
+	return GenerationStageResult{}, v.cause
+}
+func (v *diagnosticProductionValidator) Preview(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error) {
 	return GenerationStageResult{}, v.cause
 }
 
@@ -51,6 +54,7 @@ func TestProductionGenerationFailureBoundariesPreserveIdentity(t *testing.T) {
 		{"pipeline", "pipeline_generate", testgendomain.StateAnalyzing, task.ErrInvalidArgument},
 		{"validate", "validate_candidates", testgendomain.StateValidating, task.ErrConflict},
 		{"minimize", "minimize_candidates", testgendomain.StateMinimizing, testgendomain.ErrStaleSnapshot},
+		{"preview", "preview_set", testgendomain.StateAwaitingConfirmation, task.ErrConflict},
 		{"validator-unavailable", "validate_candidates", testgendomain.StateValidating, task.ErrStorageUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

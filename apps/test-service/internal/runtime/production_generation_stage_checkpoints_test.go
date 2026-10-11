@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/managedtest"
 	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testgendomain"
+	"unit-test-ide.local/test-service/internal/testgenpublish"
 	"unit-test-ide.local/test-service/internal/testgenvalidate"
 )
 
@@ -265,4 +267,200 @@ func TestProductionGenerationValidatingCheckpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProductionGenerationCompletedStageFlow(t *testing.T) {
+	for _, retain := range []bool{true, false} {
+		t.Run(map[bool]string{true: "retained", false: "not-retained"}[retain], func(t *testing.T) {
+			h := newStageCheckpointHarness(t)
+			if !retain {
+				h.authority.planner.fail = testgenvalidate.StageCompile
+			}
+			r := h.rendering(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			h.service.run(ctx, r.ID)
+			after, err := h.meta.GetGeneration(ctx, r.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := testgendomain.StateRejected
+			events := int64(7)
+			if retain {
+				want, events = testgendomain.StateAwaitingConfirmation, 8
+			}
+			if after.State != want || after.Record.BudgetUsed.Events != events {
+				row, _ := h.meta.Get(ctx, r.TaskID)
+				t.Fatalf("flow state=%s diagnostic=%s", after.State, row.ErrorCode)
+			}
+			if after.Record.BudgetUsed.Candidates != r.Request.Budgets.CandidateCount {
+				t.Fatal("candidate budget was repeated")
+			}
+			if retain {
+				if after.Record.Preview == nil || len(after.Record.MinimizedCaseIDs) != 1 ||
+					h.publisher.plans != 1 || h.publisher.accepts != 0 ||
+					len(h.authority.planner.stages) != 6 {
+					t.Fatal("preview or validation repeated")
+				}
+			} else if after.CandidateCount != 0 || len(after.ArtifactDigests) != 0 ||
+				h.publisher.plans != 0 || h.publisher.accepts != 0 {
+				t.Fatal("rejection retained or published data")
+			}
+			path := statePath(t, h.meta, r.ID)
+			tail := []testgendomain.State{testgendomain.StateValidating, testgendomain.StateRejected}
+			if retain {
+				tail = []testgendomain.State{testgendomain.StateValidating,
+					testgendomain.StateMinimizing, testgendomain.StateAwaitingConfirmation}
+			}
+			if len(path) < len(tail) || !reflect.DeepEqual(path[len(path)-len(tail):], tail) {
+				t.Fatal("completed stage path skipped")
+			}
+		})
+	}
+}
+func TestProductionGenerationCheckpointColdResume(t *testing.T) {
+	for _, completed := range []testgendomain.State{testgendomain.StateValidating, testgendomain.StateMinimizing} {
+		t.Run(string(completed), func(t *testing.T) {
+			h := newStageCheckpointHarness(t)
+			r := h.validate(t, h.rendering(t))
+			if completed == testgendomain.StateMinimizing {
+				result, err := h.driver.RunStage(context.Background(), r, testgendomain.StateMinimizing, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r = h.checkpoint(t, r, result, testgendomain.StateMinimizing)
+			}
+			beforeStages := len(h.authority.planner.stages)
+			h.reopen(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := h.service.coord.Resume(ctx, r.TaskID); err != nil {
+				t.Fatal(err)
+			}
+			h.service.run(ctx, r.ID)
+			after, err := h.meta.GetGeneration(ctx, r.ID)
+			if err != nil || after.State != testgendomain.StateAwaitingConfirmation ||
+				len(after.Record.MinimizedCaseIDs) != 1 || after.Record.Preview == nil ||
+				len(h.authority.planner.stages) != beforeStages || h.publisher.plans != 1 ||
+				len(h.driver.cache) != 0 {
+				t.Fatal("cold checkpoint depended on generation cache")
+			}
+		})
+	}
+}
+
+type stageFixtureCandidateStore struct {
+	run testgendomain.Run
+	*productionGenerationArtifactFixture
+	runID  string
+	values []testgendomain.Candidate
+}
+
+func (s stageFixtureCandidateStore) ListGenerationCandidates(ctx context.Context, id string) ([]testgendomain.Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if id != s.runID {
+		return nil, task.ErrNotFound
+	}
+	result := make([]testgendomain.Candidate, len(s.values))
+	for i, c := range s.values {
+		result[i] = testgendomain.CloneCandidate(c)
+	}
+	return result, nil
+}
+
+func TestProductionGenerationZeroCandidateColdResume(t *testing.T) {
+	h := newStageCheckpointHarness(t)
+	h.authority.planner.fail = testgenvalidate.StageCompile
+	r := h.validate(t, h.rendering(t))
+	h.reopen(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := h.service.coord.Resume(ctx, r.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	h.service.run(ctx, r.ID)
+	after, err := h.meta.GetGeneration(ctx, r.ID)
+	if err != nil || after.State != testgendomain.StateRejected ||
+		after.CandidateCount != 0 || len(after.ArtifactDigests) != 0 ||
+		h.publisher.plans != 0 {
+		t.Fatal("zero candidate cold resume differs")
+	}
+}
+func TestProductionGenerationCheckpointManagedReview(t *testing.T) {
+	h := newStageCheckpointHarness(t)
+	h.service.Close()
+	_, index, _, _, target, pipeline := productionManagedFileFixture(t)
+	target.request.Budgets = h.target.request.Budgets
+	target.wallTime = time.Minute
+	h.target, h.pipeline = target, pipeline
+	h.connect(t)
+	path, _, ok := productionManagedSource(testgenpublish.CandidateSet{Files: pipeline.editSet.Files})
+	if !ok {
+		t.Fatal("managed source missing")
+	}
+	reviews := &productionManagedReviewFixture{}
+	materializer := &productionManagedMaterializer{
+		candidates: h.meta, evidence: h.adapter,
+		current:   productionManagedIndexFixture{index: index},
+		preimages: &managedPublisherFixture{ready: true, preimages: map[string][]byte{path: []byte{}}},
+		registry:  productionManagedRegistryFixture{}, reviews: reviews,
+	}
+	h.driver.setManagedReviewFinalizer(materializer)
+	r := h.rendering(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h.service.run(ctx, r.ID)
+	after, err := h.meta.GetGeneration(ctx, r.ID)
+	if err != nil || after.State != testgendomain.StateAwaitingConfirmation ||
+		reviews.write != 1 || !managedtest.ValidReviewDraft(reviews.draft) {
+		row, rowErr := h.meta.Get(context.Background(), r.TaskID)
+		t.Fatalf("managed review not finalized after durable preview: state=%s count=%d diagnostic=%s get=%v row=%v writes=%d valid=%v kind=%s stages=%v",
+			after.State, after.CandidateCount, row.ErrorCode, err, rowErr, reviews.write,
+			managedtest.ValidReviewDraft(reviews.draft), h.authority.binding.Kind, h.authority.planner.stages)
+	}
+	set, err := materializer.ManagedCandidateSet(ctx, after, reviews.draft)
+	if err != nil || set.Managed == nil || len(set.Managed.Records) == 0 {
+		t.Fatal("maintainable managed cases absent")
+	}
+	for _, record := range set.Managed.Records {
+		if !managedtest.ValidRecord(record) {
+			t.Fatal("invalid maintainable record")
+		}
+	}
+}
+
+func TestProductionGenerationMinimizedIDCheckpointPolicy(t *testing.T) {
+	h := newStageCheckpointHarness(t)
+	validated := h.validate(t, h.rendering(t))
+	candidates, err := h.meta.ListGenerationCandidates(context.Background(), validated.ID)
+	if err != nil || len(candidates) != 1 {
+		t.Fatal("missing positive candidate")
+	}
+	record := validated.Record
+	record.MinimizedCaseIDs = []string{candidates[0].CaseID}
+	_, err = h.service.coord.CheckpointWithRecord(context.Background(), validated.ID, validated.Revision,
+		testgendomain.StateMinimizing, nil, nil, record)
+	if err == nil {
+		t.Fatal("database allowed early minimized IDs")
+	}
+	after, getErr := h.meta.GetGeneration(context.Background(), validated.ID)
+	if getErr != nil || after.State != validated.State || after.Revision != validated.Revision ||
+		len(after.Record.MinimizedCaseIDs) != 0 {
+		t.Fatal("rejected early ID checkpoint changed state")
+	}
+}
+func (s stageFixtureCandidateStore) GetGeneration(ctx context.Context, id string) (testgendomain.Run, error) {
+	if err := ctx.Err(); err != nil {
+		return testgendomain.Run{}, err
+	}
+	if id != s.runID {
+		return testgendomain.Run{}, task.ErrNotFound
+	}
+	run := testgendomain.CloneRun(s.run)
+	if s.run.Record.MinimizedCaseIDs != nil && run.Record.MinimizedCaseIDs == nil {
+		run.Record.MinimizedCaseIDs = []string{}
+	}
+	return run, nil
 }

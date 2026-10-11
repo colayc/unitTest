@@ -37,8 +37,12 @@ func (validator *productionValidatorFixture) Validate(_ context.Context, _ testg
 	validator.validations++
 	return GenerationStageResult{Next: testgendomain.StateValidating}, nil
 }
-func (*productionValidatorFixture) Minimize(_ context.Context, _ testgendomain.Run, _ generationTarget, _ productionPipelineResult) (GenerationStageResult, error) {
-	return GenerationStageResult{Next: testgendomain.StateAwaitingConfirmation, MinimizedCaseIDs: []string{}, PreviewSet: &testgenpublish.CandidateSet{}}, nil
+func (*productionValidatorFixture) Minimize(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error) {
+	return GenerationStageResult{Next: testgendomain.StateMinimizing}, nil
+}
+func (*productionValidatorFixture) Preview(context.Context, testgendomain.Run, generationTarget) (GenerationStageResult, error) {
+	return GenerationStageResult{Next: testgendomain.StateAwaitingConfirmation,
+		MinimizedCaseIDs: []string{}, PreviewSet: &testgenpublish.CandidateSet{}}, nil
 }
 func (*productionValidatorFixture) ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error {
 	return nil

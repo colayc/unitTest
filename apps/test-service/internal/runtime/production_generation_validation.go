@@ -207,11 +207,19 @@ func validProductionManagedCases(cases []productionManagedCaseEvidence, set test
 	if !ok {
 		return false
 	}
+	blocks := make(map[string]managedtest.Block, len(document.Blocks))
+	for _, block := range document.Blocks {
+		if _, duplicate := blocks[block.CaseID]; duplicate {
+			return false
+		}
+		blocks[block.CaseID] = block
+	}
 	seen := map[string]bool{}
 	for index, item := range cases {
+		block, exists := blocks[item.CaseID]
 		if index > 0 && cases[index-1].CaseID >= item.CaseID || !managedtest.ValidTestPath(item.TestRelativePath) ||
 			item.TestRelativePath != path || item.GeneratorVersion != "unit-test-service-v1" ||
-			item.CaseID != document.Blocks[index].CaseID || item.FunctionID != document.Blocks[index].FunctionID ||
+			!exists || item.FunctionID != block.FunctionID ||
 			item.ProjectID == "" || item.SourceFileID == "" || item.SourceRelativePath == "" || item.ScenarioID == "" ||
 			item.Framework != "cpputest" && item.Framework != "unity" || !validProductionToolchainID(item.ToolchainID) || !validProductionDigest(item.SourceDigest) || seen[item.CaseID] {
 			return false
@@ -547,38 +555,6 @@ func (adapter *productionGenerationValidation) ManagedEvidence(ctx context.Conte
 		return testgenpublish.CandidateSet{}, nil, nil, "", errProductionValidationUnavailable
 	}
 	return set, append([]productionManagedCaseEvidence(nil), record.managed...), encoded, productionBytesDigest(encoded), nil
-}
-
-func (adapter *productionGenerationValidation) Minimize(ctx context.Context, run testgendomain.Run, target generationTarget, pipeline productionPipelineResult) (GenerationStageResult, error) {
-	record, ok := adapter.cachedRecord(run.ID)
-	if !ok {
-		binding, err := productionValidationBindingFor(run, target, pipeline)
-		if err != nil {
-			return GenerationStageResult{}, err
-		}
-		caseID := productionBytesDigest([]byte("case:" + binding.ValidationID))[:32]
-		evidenceArtifact, err := adapter.artifacts.GetArtifact(ctx, caseID)
-		if err != nil {
-			return GenerationStageResult{}, errProductionValidationUnavailable
-		}
-		encoded, err := adapter.artifacts.ReadGenerationEvidence(ctx, evidenceArtifact)
-		if err != nil {
-			return GenerationStageResult{}, err
-		}
-		var persisted productionValidationEvidence
-		if json.Unmarshal(encoded, &persisted) != nil || !reflect.DeepEqual(persisted.Binding, binding) {
-			return GenerationStageResult{}, errProductionValidationUnavailable
-		}
-		record, err = adapter.loadRecord(ctx, run, persisted.Candidate)
-		if err != nil {
-			return GenerationStageResult{}, err
-		}
-	}
-	if adapter.ValidateCandidate(ctx, run, record.candidate) != nil {
-		return GenerationStageResult{}, errProductionValidationUnavailable
-	}
-	set := cloneProductionCandidateSet(record.set)
-	return GenerationStageResult{Next: testgendomain.StateAwaitingConfirmation, MinimizedCaseIDs: []string{record.candidate.CaseID}, PreviewSet: &set}, nil
 }
 
 var _ productionGenerationValidator = (*productionGenerationValidation)(nil)
