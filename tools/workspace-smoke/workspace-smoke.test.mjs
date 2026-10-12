@@ -188,9 +188,18 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   const setupGoPin = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16";
   for (const [name, commands] of [
     ["phase9-offline", ["node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"]],
-    ["phase9-matrix-e2e", ["pnpm test:e2e"]],
+    ["phase9-matrix-e2e", [
+      "pnpm prepare:cmake-bundle",
+      "pnpm prepare:coverage-bundle",
+      "pnpm prepare:testgen-bundle",
+      "node tools/service-probe/stage-production-bundles.mjs --platform linux-x64",
+      "pnpm test:e2e",
+    ]],
     ["phase9-fault-injection", [
       "pnpm prepare:cmake-bundle",
+      "pnpm prepare:coverage-bundle",
+      "pnpm prepare:testgen-bundle",
+      "node tools/service-probe/stage-production-bundles.mjs --platform linux-x64",
       "go mod download",
       "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native",
     ]],

@@ -460,14 +460,7 @@ func leftPadDiscoveryIndex(value int) string {
 
 func cloneDiscoveryInput(value DiscoveryInput) DiscoveryInput {
 	result := value
-	result.Targets = make([]cmake.Target, len(value.Targets))
-	for index := range value.Targets {
-		result.Targets[index] = value.Targets[index]
-		result.Targets[index].Artifacts = append(
-			[]string(nil),
-			value.Targets[index].Artifacts...,
-		)
-	}
+	result.Targets = cmake.CloneTargets(value.Targets)
 	result.Helpers = make(
 		map[string]testframework.Declaration,
 		len(value.Helpers),

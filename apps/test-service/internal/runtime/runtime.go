@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	goruntime "runtime"
 	"sync"
 	"sync/atomic"
@@ -46,17 +45,19 @@ type Config struct {
 	WorkspaceRoot     string
 	TrustedWorkspace  bool
 	CoverageBackend   session.CoverageBackend
-	// GenerationFactory is supplied only by a deployment that has verified
-	// product-owned bundles, coverage evidence and process ownership.
-	// Nil (the production default today) never advertises Protocol v1.5.
-	GenerationFactory  func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
-	CMakeBundleRoot    string
-	DevCMakeExecutable string
-	Platform           string
-	Clock              task.Clock
-	NewID              task.IDGenerator
-	TerminationGrace   time.Duration
-	dependencies       *dependencies
+	// GenerationFactory remains a base-only test seam and is never exposed as
+	// a production capability without the complete managed provider.
+	GenerationFactory func(*taskstore.Store, *Runtime) (GenerationServiceConfig, error)
+	// ProductionGenerationFactory must construct the atomic v1.5/v1.6 unit.
+	ProductionGenerationFactory func(*taskstore.Store, *Runtime) (ProductionGenerationConfig, error)
+	ProductBundleRoots          ProductBundleRoots
+	CMakeBundleRoot             string
+	DevCMakeExecutable          string
+	Platform                    string
+	Clock                       task.Clock
+	NewID                       task.IDGenerator
+	TerminationGrace            time.Duration
+	dependencies                *dependencies
 }
 
 type Runtime struct {
@@ -66,6 +67,12 @@ type Runtime struct {
 	manager             runtimeManager
 	runner              processcontrol.Runner
 	coordinator         runtimeCoordinator
+	probeRunner         probe.Runner
+	installation        cmake.Installation
+	serviceInstanceID   string
+	buildDataRoot       string
+	coverageDataRoot    string
+	controlDataRoot     string
 	tests               runtimeTestCoordinator
 	testResources       io.Closer
 	lock                io.Closer
@@ -77,8 +84,11 @@ type Runtime struct {
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
 	coverageBackend     session.CoverageBackend
-	generationBackend   *generationService
+	generationBackend   runtimeGenerationBackend
 	coverageExecutor    coverageExecutor
+	productionBuilds    productionBuildPreparer
+	productBundleRoots  ProductBundleRoots
+	productBundles      *ProductBundles
 	detailFailed        atomic.Bool
 
 	shutdownMu          sync.Mutex
@@ -99,6 +109,12 @@ type runtimeStore interface {
 	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	FailQueuedTask(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	GetRunForTask(context.Context, string) (testdomain.TestRun, error)
+}
+
+type runtimeGenerationBackend interface {
+	session.GenerationBackend
+	ResumeAll(context.Context) error
+	Close()
 }
 
 type runtimeArtifacts interface {
@@ -155,6 +171,7 @@ type dependencies struct {
 		testCoordinatorConfig,
 	) (runtimeTestCoordinator, io.Closer, error)
 	newCoverageExecutor func(coverageExecutionConfig) (coverageExecutor, error)
+	openProductBundles  func(ProductBundleRoots, string) (*ProductBundles, error)
 	newRunner           func(string) processcontrol.Runner
 	newBroker           func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
 	newManager          func(task.ManagerConfig) (runtimeManager, error)
@@ -189,6 +206,7 @@ func defaultDependencies() dependencies {
 		},
 		newTestCoordinator:  newRuntimeTestCoordinator,
 		newCoverageExecutor: newRuntimeCoverageExecutor,
+		openProductBundles:  openProductBundles,
 		newRunner:           processcontrol.NewRunner,
 		newBroker:           eventbroker.New,
 		newManager: func(config task.ManagerConfig) (runtimeManager, error) {
@@ -238,6 +256,9 @@ func (d dependencies) complete() dependencies {
 	if d.newCoverageExecutor == nil {
 		d.newCoverageExecutor = defaults.newCoverageExecutor
 	}
+	if d.openProductBundles == nil {
+		d.openProductBundles = defaults.openProductBundles
+	}
 	if d.newRunner == nil {
 		d.newRunner = defaults.newRunner
 	}
@@ -254,6 +275,11 @@ func Open(config Config) (*Runtime, error) {
 	if config.DataDir == "" || config.ServiceExecutable == "" || config.WorkspaceRoot == "" ||
 		config.Platform != goruntime.GOOS {
 		return nil, task.ErrInvalidArgument
+	}
+	if config.ProductBundleRoots.any() {
+		if err := config.ProductBundleRoots.Validate(); err != nil {
+			return nil, task.ErrInvalidArgument
+		}
 	}
 	deps := defaultDependencies()
 	if config.dependencies != nil {
@@ -325,10 +351,11 @@ func Open(config Config) (*Runtime, error) {
 		return failArtifacts(task.ErrInvalidArgument)
 	}
 	var (
-		inspector    *discovery.Inspector
-		installation cmake.Installation
-		observer     *stepObserverProxy
-		probeRunner  probe.Runner
+		inspector      *discovery.Inspector
+		installation   cmake.Installation
+		observer       *stepObserverProxy
+		probeRunner    probe.Runner
+		productBundles *ProductBundles
 	)
 	if config.TrustedWorkspace {
 		loaded, err := deps.loadWorkspace(workspaceRoot)
@@ -346,11 +373,26 @@ func Open(config Config) (*Runtime, error) {
 		if probeRunner == nil {
 			return failArtifacts(task.ErrInvalidArgument)
 		}
+		if config.ProductBundleRoots.any() {
+			productBundles, err = deps.openProductBundles(config.ProductBundleRoots, config.Platform)
+			if err != nil || productBundles == nil {
+				return failArtifacts(ErrProductBundlesUnavailable)
+			}
+		}
+		cmakeBundleRoot := config.CMakeBundleRoot
+		// An explicit development executable is used by deterministic fixture
+		// tests. It takes precedence over both direct and product-bundle CMake
+		// roots; coverage and test-generation roots remain verified separately.
+		if config.DevCMakeExecutable != "" {
+			cmakeBundleRoot = ""
+		} else if config.ProductBundleRoots.CMake != "" {
+			cmakeBundleRoot = config.ProductBundleRoots.CMake
+		}
 		resolverConfig := cmake.ResolverConfig{
-			BundleRoot: config.CMakeBundleRoot, DevExecutable: config.DevCMakeExecutable,
+			BundleRoot: cmakeBundleRoot, DevExecutable: config.DevCMakeExecutable,
 			Platform: cmakePlatform(config.Platform), Architecture: cmakeArchitecture(),
 		}
-		if loaded.Config.CMake.Executable != "" {
+		if productBundles == nil && loaded.Config.CMake.Executable != "" {
 			resolverConfig.Override = loaded.Config.CMake.Executable
 		}
 		installation, err = deps.resolveCMake(ctx, probeRunner, resolverConfig)
@@ -373,11 +415,12 @@ func Open(config Config) (*Runtime, error) {
 	if err != nil {
 		return failArtifacts(err)
 	}
+	serviceInstanceID := newID()
 	manager, err := deps.newManager(task.ManagerConfig{
 		Store: store, Publisher: broker, Processes: processFactory{runner: runner}, Artifacts: artifacts,
 		StepObserver: observer,
 		Clock:        config.Clock, NewID: newID, ServiceExecutable: config.ServiceExecutable,
-		ServiceInstanceID: newID(), TerminationGrace: grace,
+		ServiceInstanceID: serviceInstanceID, TerminationGrace: grace,
 	})
 	if err != nil {
 		return failArtifacts(errors.Join(err, broker.Close()))
@@ -410,7 +453,7 @@ func Open(config Config) (*Runtime, error) {
 				WorkspaceRoot: workspaceRoot,
 				BuildDataRoot: layout.Build,
 				CoverageRoot:  layout.Coverage,
-				ControlRoot:   layout.Controls,
+				ControlRoot:   layout.TestControls,
 				Clock:         config.Clock,
 				NewID:         newID,
 			},
@@ -431,7 +474,9 @@ func Open(config Config) (*Runtime, error) {
 	}
 	runtimeValue := &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
-		coordinator: coordinator, tests: tests,
+		coordinator: coordinator, probeRunner: probeRunner, installation: installation,
+		serviceInstanceID: serviceInstanceID, buildDataRoot: layout.Build, coverageDataRoot: layout.Coverage, controlDataRoot: layout.Controls,
+		tests: tests,
 		coverageBackend: func() session.CoverageBackend {
 			if config.TrustedWorkspace {
 				return config.CoverageBackend
@@ -442,6 +487,9 @@ func Open(config Config) (*Runtime, error) {
 		lock:          locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root, platform: config.Platform,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
+		productionBuilds:   newCoordinatorProductionBuildPreparer(coordinator),
+		productBundleRoots: config.ProductBundleRoots,
+		productBundles:     productBundles,
 	}
 	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend == nil {
 		coverageCoordinator, err := coveragecoord.NewCoordinator(store, config.Clock, newID)
@@ -460,16 +508,11 @@ func Open(config Config) (*Runtime, error) {
 		if !ok {
 			return runtimeValue.failOpen(task.ErrStorageUnavailable)
 		}
-		servicePath, servicePathErr := filepath.Abs(config.ServiceExecutable)
-		if servicePathErr != nil || filepath.Clean(servicePath) != servicePath {
-			return runtimeValue.failOpen(task.ErrInvalidArgument)
-		}
-		coverageBundleRoot := filepath.Join(filepath.Dir(servicePath), "bundles", "coverage")
 		coverageExecutor, err := deps.newCoverageExecutor(coverageExecutionConfig{
 			Platform: config.Platform, Tasks: manager, Store: store,
 			Build: coverageBuildPreparer{delegate: buildPreparer}, Tests: embeddedTests,
 			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
-			CoverageBundleRoot: coverageBundleRoot,
+			CoverageBundleRoot: config.ProductBundleRoots.Coverage,
 			Clock:              config.Clock, NewID: newID,
 			DetailFailure: runtimeValue.disableCoverageDetails,
 		})
@@ -483,22 +526,39 @@ func Open(config Config) (*Runtime, error) {
 		}
 		runtimeValue.coverageBackend = coverageBackend
 	}
-	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend != nil && config.GenerationFactory != nil {
+	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend != nil &&
+		(config.ProductionGenerationFactory != nil || config.GenerationFactory != nil) {
 		concrete, ok := store.(*taskstore.Store)
 		if !ok {
 			return runtimeValue.failOpen(task.ErrStorageUnavailable)
 		}
-		generationConfig, generationErr := config.GenerationFactory(concrete, runtimeValue)
-		if generationErr != nil {
-			return runtimeValue.failOpen(generationErr)
+		var generationErr error
+		if config.ProductionGenerationFactory != nil {
+			if runtimeValue.productBundles == nil || runtimeValue.productBundles.Verify() != nil {
+				return runtimeValue.failOpen(ErrProductBundlesUnavailable)
+			}
+			productionConfig, err := config.ProductionGenerationFactory(concrete, runtimeValue)
+			if err != nil {
+				return runtimeValue.failOpen(err)
+			}
+			productionConfig.Base.Store = concrete
+			productionConfig.Base.Trusted = true
+			productionConfig.Base.CoverageReady = true
+			productionConfig.Base.PublishEvent = nil
+			runtimeValue.generationBackend, generationErr = newProductionGenerationBackend(productionConfig)
+		} else {
+			generationConfig, err := config.GenerationFactory(concrete, runtimeValue)
+			if err != nil {
+				return runtimeValue.failOpen(err)
+			}
+			generationConfig.Store = concrete
+			generationConfig.Trusted = true
+			generationConfig.CoverageReady = true
+			// The legacy broker has no owner filter. Generation events remain in
+			// the dedicated durable replay until a scoped stream exists.
+			generationConfig.PublishEvent = nil
+			runtimeValue.generationBackend, generationErr = newGenerationService(generationConfig)
 		}
-		generationConfig.Store = concrete
-		generationConfig.Trusted = true
-		generationConfig.CoverageReady = true
-		// The legacy broker has no owner filter. Generation events remain in
-		// the dedicated durable replay until a scoped stream exists.
-		generationConfig.PublishEvent = nil
-		runtimeValue.generationBackend, generationErr = newGenerationService(generationConfig)
 		if generationErr != nil {
 			return runtimeValue.failOpen(generationErr)
 		}
@@ -551,6 +611,10 @@ func (r *Runtime) CoverageBackend() session.CoverageBackend {
 
 func (r *Runtime) GenerationBackend() session.GenerationBackend {
 	if r == nil || !r.trustedWorkspace || r.coverageBackend == nil || r.generationBackend == nil || !r.generationBackend.TestGenerationReady() {
+		return nil
+	}
+	managed, ok := r.generationBackend.(session.ManagedTestsProvider)
+	if !ok || !managed.ManagedTestsReady() {
 		return nil
 	}
 	return r.generationBackend

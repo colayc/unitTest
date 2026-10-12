@@ -11,6 +11,7 @@ import {
   type ServiceManagerOptions,
   type ServiceOperations
 } from "../src/service-manager.js";
+import type { ProductLayout } from "../src/service-layout.js";
 
 type ExitCode = number | null;
 type ExitSignal = NodeJS.Signals | null;
@@ -133,6 +134,7 @@ interface HarnessOptions {
   handshakeGate?: Promise<void>;
   shutdownGate?: Promise<void>;
   trustProvider?: () => boolean;
+  productLayout?: ProductLayout;
 }
 
 function createHarness(options: HarnessOptions = {}): {
@@ -144,7 +146,8 @@ function createHarness(options: HarnessOptions = {}): {
   removedDirectories: string[];
   children: FakeChild[];
   clients: FakeClient[];
-  calls: { prepare: number; spawn: number; connect: number };
+  spawnArgs: string[][];
+  calls: { validate: number; prepare: number; spawn: number; connect: number };
 } {
   const order: string[] = [];
   const tokens: string[] = [];
@@ -153,9 +156,14 @@ function createHarness(options: HarnessOptions = {}): {
   const removedDirectories: string[] = [];
   const children: FakeChild[] = [];
   const clients: FakeClient[] = [];
-  const calls = { prepare: 0, spawn: 0, connect: 0 };
+  const spawnArgs: string[][] = [];
+  const calls = { validate: 0, prepare: 0, spawn: 0, connect: 0 };
 
   const operations: ServiceOperations & { removeDirectory(directory: string): Promise<void> } = {
+    async validateProductLayout() {
+      calls.validate++;
+      order.push("validate");
+    },
     async prepareTokenFile(_binary, tokenFile, token) {
       calls.prepare++;
       tokens.push(token);
@@ -166,6 +174,7 @@ function createHarness(options: HarnessOptions = {}): {
     spawnService(_binary, args) {
       calls.spawn++;
       order.push("spawn");
+      spawnArgs.push([...args]);
       const endpoint = args[args.indexOf("--endpoint") + 1];
       assert.ok(endpoint);
       endpoints.push(endpoint);
@@ -202,8 +211,16 @@ function createHarness(options: HarnessOptions = {}): {
       await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   };
+  const productLayout = options.productLayout ?? {
+    productRoot: "C:\\private",
+    serviceExecutable: "C:\\private\\service\\unit-test-service.exe",
+    cmakeBundleRoot: "C:\\private\\bundles\\cmake",
+    coverageBundleRoot: "C:\\private\\bundles\\coverage",
+    testgenBundleRoot: "C:\\private\\bundles\\testgen"
+  };
   const managerOptions: ServiceManagerOptions = {
-    serviceExecutable: "C:\\private\\bin\\unit-test-service.exe",
+    serviceExecutable: productLayout.serviceExecutable,
+    productLayout,
     workspaceRoot: "C:\\private\\workspace",
     dataDirectory: "C:\\private\\data",
     timeoutMs: options.timeoutMs ?? 100,
@@ -220,9 +237,31 @@ function createHarness(options: HarnessOptions = {}): {
     removedDirectories,
     children,
     clients,
+    spawnArgs,
     calls
   };
 }
+
+test("validates the product layout and passes each bundle root exactly once", async () => {
+  const harness = createHarness();
+
+  await harness.manager.start();
+
+  assert.equal(harness.calls.validate, 1);
+  assert.equal(harness.order[0], "validate");
+  const args = harness.spawnArgs[0] ?? [];
+  const expected = [
+    ["--cmake-bundle-root", "C:\\private\\bundles\\cmake"],
+    ["--coverage-bundle-root", "C:\\private\\bundles\\coverage"],
+    ["--testgen-bundle-root", "C:\\private\\bundles\\testgen"]
+  ] as const;
+  for (const [flag, value] of expected) {
+    assert.equal(args.filter((entry) => entry === flag).length, 1);
+    assert.equal(args[args.indexOf(flag) + 1], value);
+  }
+
+  await harness.manager.stop();
+});
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 1_000;
@@ -239,11 +278,11 @@ async function assertPathMissing(path: string): Promise<void> {
   );
 }
 
-test("service lifecycle starts in prepare, spawn, READY, connect, handshake, capabilities order", async () => {
+test("service lifecycle starts in validate, prepare, spawn, READY, connect, handshake, capabilities order", async () => {
   const harness = createHarness();
   const session = await harness.manager.start();
 
-  assert.deepEqual(harness.order, ["prepare", "spawn", "READY", "connect", "handshake", "capabilities"]);
+  assert.deepEqual(harness.order, ["validate", "prepare", "spawn", "READY", "connect", "handshake", "capabilities"]);
   assert.equal(harness.manager.status.state, "running");
   assert.equal(harness.manager.session, session);
   await harness.manager.stop();
@@ -253,7 +292,7 @@ test("service lifecycle trust gate performs no external operation when untrusted
   const harness = createHarness({ trusted: false });
 
   await assert.rejects(() => harness.manager.start(), /workspace is not trusted/);
-  assert.deepEqual(harness.calls, { prepare: 0, spawn: 0, connect: 0 });
+  assert.deepEqual(harness.calls, { validate: 0, prepare: 0, spawn: 0, connect: 0 });
   assert.equal(harness.manager.status.state, "stopped");
 });
 
@@ -264,7 +303,7 @@ test("queued start rechecks trust before allocating startup resources", async ()
   trusted = false;
 
   await assert.rejects(start, /workspace is not trusted/);
-  assert.deepEqual(harness.calls, { prepare: 0, spawn: 0, connect: 0 });
+  assert.deepEqual(harness.calls, { validate: 0, prepare: 0, spawn: 0, connect: 0 });
   assert.equal(harness.manager.status.state, "stopped");
 });
 

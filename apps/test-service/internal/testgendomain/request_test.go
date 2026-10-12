@@ -34,6 +34,27 @@ func TestManagedGapIdentityPersistsWithoutChangingLegacyGapRequests(t *testing.T
 	}
 }
 
+func TestManagedFileAndSymbolIdentitiesRequireReportBinding(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	selector := strings.Repeat("3", 32)
+	report := strings.Repeat("2", 32)
+	base := Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: hash, ProjectID: "core", Framework: FrameworkAuto,
+		Goals: Goals{}, Budgets: Budgets{WallTimeMS: 1000, CandidateCount: 1, MemoryMiB: 64, Concurrency: 1},
+		CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: hash, CMakeTargetDigest: hash,
+		FrameworkBundleDigest: hash, AnalyzerBundleDigest: hash, BaselineReportDigest: hash, ProcessOwnerDigest: hash}
+	for _, scope := range []Scope{ScopeSymbol, ScopeFile} {
+		req := base
+		req.Scope, req.CoverageReportID, req.ManagedTargetID = scope, report, selector
+		if err := ValidateRequest(req); err != nil {
+			t.Fatalf("managed %s rejected: %v", scope, err)
+		}
+		req.CoverageReportID = ""
+		if err := ValidateRequest(req); err == nil {
+			t.Fatalf("unbound managed %s accepted", scope)
+		}
+	}
+}
+
 func TestManagedTargetResolvesOnlyExactCurrentIndexIDs(t *testing.T) {
 	report := strings.Repeat("a", 32)
 	generation := strings.Repeat("b", 64)

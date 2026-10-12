@@ -27,6 +27,7 @@ import {
   ProtocolError,
   type EventSubscription,
   type ProtocolClient,
+  type ProtocolVersion,
   type ProtocolTaskEvent,
   type ProtocolTaskSnapshot,
 } from "@unit-test-ide/test-client";
@@ -53,6 +54,7 @@ import type {
   FrameworkId,
   FrameworkToolchainEvidence,
 } from "./native-framework-report.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -72,6 +74,16 @@ const nativeLivenessReconnectBackoffMs = 250;
 const nativeTaskCompletionGraceMs = 45_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
+const LATEST_PROTOCOL_VERSIONS = ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] as const satisfies ReadonlyArray<ProtocolVersion>;
+
+async function requireProductionGenerationCapabilities(client: ProtocolClient): Promise<void> {
+  const capabilities = await client.getCapabilities();
+  if (!("coverageDetails" in capabilities) || capabilities.coverageDetails !== true ||
+      !("testGeneration" in capabilities) || capabilities.testGeneration !== true ||
+      !("managedTests" in capabilities) || capabilities.managedTests !== true) {
+    throw new Error("production test generation capability is unavailable");
+  }
+}
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
   linux: ["gcc", "clang"],
@@ -244,8 +256,24 @@ async function runNativeMatrixWithDependencies(
         timeoutMs: nativeTimeoutMs,
         workspaceRoot: workspace.workspaceRoot,
         trustedWorkspace: true,
-        cmakeBundleRoot: bundle.bundleRoot,
+        ...productionBundleRoots(dependencies.repositoryRoot, options.platform),
       });
+      // Keep the main fixture on the legacy task projection used by the
+      // native build/test scenarios. Probe the Phase 10 capability on a
+      // separate v1.6 session because v1.5/v1.6 intentionally do not expose
+      // the owner-less task routes used by these scenarios.
+      const generationClient = typeof fixture.connectClient === "function"
+        ? await fixture.connectClient(LATEST_PROTOCOL_VERSIONS)
+        : fixture.client;
+      try {
+        await withNamedTimeout(
+          `${family} production generation capability`,
+          requireProductionGenerationCapabilities(generationClient),
+          nativeTimeoutMs,
+        );
+      } finally {
+        if (generationClient !== fixture.client) generationClient.close();
+      }
       const snapshot = await withNamedTimeout(
         `${family} workspace inspection`,
         fixture.client.inspectWorkspace(),
@@ -827,7 +855,7 @@ async function runPresetBuildScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectPresetProfile(
       fixture.client,
@@ -1031,7 +1059,7 @@ async function runWorkspaceRejectionScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const snapshot = await withNamedTimeout(
       `${context.family} ${name} inspection`,
@@ -1075,7 +1103,7 @@ async function runFailureScenario(
       timeoutMs: nativeTimeoutMs,
       workspaceRoot,
       trustedWorkspace: true,
-      cmakeBundleRoot: context.bundle.bundleRoot,
+      ...productionBundleRoots(repositoryRoot, context.family === "gcc" || context.family === "clang" ? "linux" : "win32"),
     });
     const selected = await inspectEstablishedFamily(
       fixture.client,
@@ -1927,4 +1955,5 @@ export const __testing = Object.freeze({
   waitForTask,
   startFailureBuildWithStaleRetry,
   frameworkExecutableDigest,
+  requireProductionGenerationCapabilities,
 });

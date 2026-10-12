@@ -352,7 +352,9 @@ func (p *parser) branch() (branch, error) {
 		}
 		*destination = value
 	}
-	if !validSourceRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
+	// Like code regions, LLVM branch regions can be zero-width (for example
+	// macro-based switch cases). Keep their counters and source location.
+	if !validRegionRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
 		return branch{}, errors.New("invalid branch range")
 	}
 	if result.kind != 4 && result.kind != 6 {

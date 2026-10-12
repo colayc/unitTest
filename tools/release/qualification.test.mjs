@@ -24,6 +24,7 @@ const generatedAt = "2026-08-25T00:00:00.000Z";
 const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
 const foundationTrustPathActionPins = new Map([
   ["actions/cache", "0057852bfaa89a56745cba8c7296529d2fc39830"],
+  ["actions/cache/save", "0057852bfaa89a56745cba8c7296529d2fc39830"],
   ["actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803"],
   ["actions/download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
   ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
@@ -42,8 +43,8 @@ const foundationTrustPathJobs = [
   "release-qualification",
 ];
 const foundationTrustPathActionCounts = new Map([
-  ["verify-windows", 9],
-  ["verify-linux", 11],
+  ["verify-windows", 11],
+  ["verify-linux", 13],
   ["verify-release-input-run", 3],
   ["package-windows", 6],
   ["package-linux", 7],
@@ -73,7 +74,7 @@ function assertFoundationP8TrustPathPinned(workflow) {
       assert.equal(match[2], foundationTrustPathActionPins.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
     }
   }
-  assert.equal(invocationCount, 61, "foundation P8 trust path action invocation count");
+  assert.equal(invocationCount, 65, "foundation P8 trust path action invocation count");
 }
 
 const lifecyclePass = Object.freeze({

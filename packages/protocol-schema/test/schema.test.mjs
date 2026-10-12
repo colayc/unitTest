@@ -54,11 +54,17 @@ test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", a
   ];
   for (const [key, scope, value] of selectors) {
     const payload = { ...start.payload, scope, [key]: value };
-    if (scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
+    if (scope === "symbol" || scope === "file" || scope === "coverage-gap") payload.coverageReportId = "d".repeat(32);
     delete payload.symbolId;
     assert.equal(message({ ...start, payload }), true, `${key}: ${JSON.stringify(message.errors)}`);
     assert.equal(message({ ...start, payload: { ...payload, file: "src/source.cpp" } }), false, `${key} with legacy file`);
     assert.equal(message({ ...start, payload: { ...payload, symbolId: "target:symbol" } }), false, `${key} with legacy symbol`);
+  }
+  for (const [key, scope, value] of selectors.filter(([, scope]) => scope === "symbol" || scope === "file")) {
+    const payload = { ...start.payload, scope, [key]: value };
+    delete payload.symbolId;
+    delete payload.coverageReportId;
+    assert.equal(message({ ...start, payload }), false, `${key} without report binding`);
   }
   assert.equal(message({ ...start, payload: { ...start.payload, scope: "symbol" } }), false, "legacy symbol selector");
   assert.equal(message({ ...start, payload: { ...start.payload, scope: "file", file: "../escape.cpp" } }), false, "path traversal");
@@ -77,6 +83,19 @@ test("protocol 1.6 bounds selectors, pages, identities, and coverage metrics", a
   for (const value of [{ ...valid, covered: -1 }, { ...valid, total: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }, { ...valid, raw: "secret" }]) {
     assert.equal(metric(value), false, JSON.stringify(value));
   }
+});
+
+test("protocol 1.6 detail metrics require nullable comparison without relaxing counts", async () => {
+  const { ajv } = await compileV16();
+  const coverage = await load("../schema/v1.6/coverage.schema.json");
+  const validate = ajv.compile({ ...coverage.$defs.detailMetric, $defs: coverage.$defs });
+  const metric = { covered: 2, total: 4, coveredDelta: null };
+  assert.equal(validate(metric), true, JSON.stringify(validate.errors));
+  for (const invalid of [
+    { covered: 2, total: 4 }, { ...metric, coveredDelta: "0" },
+    { ...metric, coveredDelta: 0.5 }, { ...metric, coveredDelta: Number.MAX_SAFE_INTEGER + 1 },
+    { ...metric, coveredDelta: -Number.MAX_SAFE_INTEGER - 1 }, { ...metric, unknown: true }
+  ]) assert.equal(validate(invalid), false, JSON.stringify(invalid));
 });
 
 test("protocol 1.6 closes detail status, reasons, managed states, and digest-bound review choices", async () => {
@@ -159,6 +178,27 @@ test("protocol 1.6 validates paginated detail and managed-review responses", asy
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], absentSides: ["accepted"] }] } }), false, "incorrect sentinel");
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: [{ ...review.cases[0], acceptedDigest: emptyDigest, absentSides: ["accepted", "accepted"] }] } }), false, "duplicate absent side");
   assert.equal(message({ ...base, method: responses[5][0], payload: { ...review, cases: Array(33).fill(review.cases[0]) } }), false, "oversized review page");
+});
+
+test("protocol 1.6 line history is required but nullable and count-bounded", async () => {
+  const { message } = await compileV16();
+  const line = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+    baselineCount: null, baselineBranchesCovered: null, baselineBranchesTotal: null };
+  const page = (items) => ({ protocolVersion: "1.6", kind: "response", messageId: "a".repeat(32),
+    requestId: "b".repeat(32), sentAt: "2026-10-08T00:00:00Z", method: "coverage/details/lines/list",
+    payload: { coverageReportId: "c".repeat(32), workspaceGeneration: "d".repeat(64), items } });
+  assert.equal(message(page([line])), true, "required null line history rejected");
+  assert.equal(message(page([{ ...line, baselineCount: 0, baselineBranchesCovered: 0, baselineBranchesTotal: 0 }])), true);
+  for (const key of ["baselineCount", "baselineBranchesCovered", "baselineBranchesTotal"]) {
+    const missing = { ...line };
+    delete missing[key];
+    assert.equal(message(page([missing])), false, `missing ${key}`);
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0"]) {
+      assert.equal(message(page([{ ...line, [key]: value }])), false, `${key}=${value}`);
+    }
+  }
+  assert.equal(message(page([{ ...line, line: 0 }])), false);
+  assert.equal(message(page([{ ...line, extra: true }])), false);
 });
 
 test("protocol 1.5 generation boundaries reject caller classification, leaked text, and filesystem artifacts", async () => {

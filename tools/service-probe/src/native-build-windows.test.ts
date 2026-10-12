@@ -12,8 +12,11 @@ import {
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
 } from "./native-build.js";
+import { productionBundleRoots } from "./native-production-bundles.js";
 import type { F1FrameworkIdentity, FrameworkPlatformOptions } from "./native-framework-matrix.js";
 import { buildCoverageBackendReport, verifyRequiredFrameworkReport } from "./native-report.js";
+
+const productionCapabilities = () => ({ coverageDetails: true, testGeneration: true, managedTests: true });
 
 test("Windows clang-cl coverage remains required even when Linux backend rows pass", () => {
   assert.throws(() => buildCoverageBackendReport("a".repeat(40), [
@@ -95,10 +98,14 @@ test("required Windows native run binds both real framework executables and publ
       await mkdir(serviceDirectory, { recursive: true });
       return { root: familyRoot, workspaceRoot, serviceDirectory };
     },
-    launchService: async () => {
+    launchService: async (_binary, _directory, options) => {
+      const roots = productionBundleRoots(root, "win32");
+      assert.equal(options.cmakeBundleRoot, roots.cmakeBundleRoot);
+      assert.equal(options.coverageBundleRoot, roots.coverageBundleRoot);
+      assert.equal(options.testgenBundleRoot, roots.testgenBundleRoot);
       const family = (["msvc", "clang-cl"] as const)[launchIndex++]!;
       return {
-        client: { inspectWorkspace: async () => workspaceSnapshot(family) },
+        client: { getCapabilities: async () => productionCapabilities(), inspectWorkspace: async () => workspaceSnapshot(family) },
         dispose: async () => { events.push(`dispose:${family}`); },
       } as unknown as TaskServiceFixture;
     },

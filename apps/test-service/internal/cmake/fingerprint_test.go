@@ -9,6 +9,29 @@ import (
 	"testing"
 )
 
+func TestConfigureFingerprintWindowsSDK(t *testing.T) {
+	input := validFingerprintInputForTest()
+	base := ConfigureFingerprint(input)
+	library := FingerprintFile{Path: "C:/SDK/Lib/10.0.26100.0/um/x64/winmm.lib", Identity: "sdk-library", SHA256: strings.Repeat("a", 64)}
+	input.WindowsLinkLibrary = &library
+	bound := ConfigureFingerprint(input)
+	if bound == base || !NeedsConfigure(BuildConfiguration{Fingerprint: base, Succeeded: true}, input) {
+		t.Fatal("SDK binding missing from configure identity")
+	}
+	library.SHA256 = strings.Repeat("b", 64)
+	if !NeedsConfigure(BuildConfiguration{Fingerprint: bound, Succeeded: true}, input) {
+		t.Fatal("changed SDK bytes reused configure")
+	}
+	library.Identity = ""
+	if !NeedsConfigure(BuildConfiguration{Fingerprint: ConfigureFingerprint(input), Succeeded: true}, input) {
+		t.Fatal("invalid SDK authority reused configure")
+	}
+	input.WindowsLinkLibrary = nil
+	if ConfigureFingerprint(input) != base {
+		t.Fatal("non-applicable fingerprint changed")
+	}
+}
+
 func TestFileAPIReplyCapturesCacheInputsAndEveryConsumedReplyFileState(t *testing.T) {
 	fixture := newFileAPIReplyFixture(t)
 	reply := readWithFixture(t, fixture)

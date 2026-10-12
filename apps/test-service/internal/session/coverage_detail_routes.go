@@ -99,7 +99,7 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 		if err != nil {
 			return detailFailure(version, request, err)
 		}
-		return handled(protocol.Success(version, request, coveragev16.CoverageProjectV16{CoverageReportID: reportID, WorkspaceGeneration: generation, ProjectID: projectID, FileCount: count, Status: coveragev16.CoverageDetailStatusV16(value.Status), Reasons: detailReasons(value.Reasons), Summary: detailSummary(value.Summary, value.Delta)}))
+		return handled(protocol.Success(version, request, coveragev16.CoverageProjectV16{CoverageReportID: reportID, WorkspaceGeneration: generation, ProjectID: projectID, FileCount: count, Status: coveragev16.CoverageDetailStatusV16(value.Status), Reasons: detailReasons(value.Reasons), Summary: detailSummary(value.Summary)}))
 	case "coverage/details/files/list":
 		if _, err := detailSummaryProject(ctx, backend, reportID); err != nil {
 			return detailFailure(version, request, err)
@@ -118,7 +118,7 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 			if e != nil {
 				return detailFailure(version, request, e)
 			}
-			out.Items = append(out.Items, coveragev16.CoverageFileV16{FileID: f.ID, RelativePath: f.RelativePath, SourceSha256: f.SourceSHA256, FunctionCount: count, Status: coveragev16.CoverageDetailStatusV16(f.Status), Reasons: detailReasons(f.Reasons), Summary: detailSummary(f.Summary, f.Delta)})
+			out.Items = append(out.Items, coveragev16.CoverageFileV16{FileID: f.ID, RelativePath: f.RelativePath, SourceSha256: f.SourceSHA256, FunctionCount: count, Status: coveragev16.CoverageDetailStatusV16(f.Status), Reasons: detailReasons(f.Reasons), Summary: detailSummary(f.Summary)})
 		}
 		return handled(protocol.Success(version, request, out))
 	case "coverage/details/functions/list":
@@ -134,29 +134,34 @@ func (s *Session) handleCoverageDetail(ctx context.Context, version string, requ
 			if !validID(f.ID) || f.Start.Line < 1 || f.Start.Line > coveragedomain.MaxSafeInteger || f.End.Line < f.Start.Line || f.End.Line > coveragedomain.MaxSafeInteger || f.Name == "" || len(f.Name) > 512 || strings.ContainsAny(f.Name, "\x00\r\n") || !validDetailProjection(f.Status, f.Summary, f.Delta) || !validDetailReasons(f.Reasons) {
 				return detailFailure(version, request, coveragedetail.ErrInvalidDetail)
 			}
-			out.Items = append(out.Items, coveragev16.CoverageFunctionV16{FileID: fileID, FunctionID: f.ID, QualifiedName: f.Name, StartLine: f.Start.Line, EndLine: f.End.Line, Status: coveragev16.CoverageDetailStatusV16(f.Status), Reasons: detailReasons(f.Reasons), Summary: detailSummary(f.Summary, f.Delta)})
+			out.Items = append(out.Items, coveragev16.CoverageFunctionV16{FileID: fileID, FunctionID: f.ID, QualifiedName: f.Name, StartLine: f.Start.Line, EndLine: f.End.Line, Status: coveragev16.CoverageDetailStatusV16(f.Status), Reasons: detailReasons(f.Reasons), Summary: detailSummary(f.Summary)})
 		}
 		return handled(protocol.Success(version, request, out))
 	case "coverage/details/lines/list":
+		if _, err := detailSummaryProject(ctx, backend, reportID); err != nil {
+			return detailFailure(version, request, err)
+		}
 		page, err := backend.ListCoverageLines(ctx, coveragedetail.LineQuery{ReportID: reportID, WorkspaceGeneration: generation, FileID: fileID, FunctionID: functionID, Cursor: cursor, Limit: limit})
 		if err != nil {
 			return detailFailure(version, request, err)
 		}
-		// The durable v1.6 index currently retains line counts but not a
-		// per-line baseline/branch projection. Those fields are required by
-		// the wire schema; never fabricate zeroes for nonempty pages.
-		if len(page.Items) != 0 {
-			return handled(protocol.Failure(version, request, "SERVICE_UNHEALTHY", "line and branch evidence is incomplete", false))
-		}
 		out := coveragev16.CoverageLinePageV16{CoverageReportID: reportID, WorkspaceGeneration: generation, Items: make([]coveragev16.CoverageLineDetailV16, 0, len(page.Items)), NextCursor: detailNext(page.NextCursor)}
+		for _, line := range page.Items {
+			if line.Line < 1 || line.Line > coveragedomain.MaxSafeInteger || line.Count < 0 || line.Count > coveragedomain.MaxSafeInteger || line.BranchesCovered < 0 || line.BranchesTotal < line.BranchesCovered || line.BranchesTotal > coveragedomain.MaxSafeInteger {
+				return detailFailure(version, request, coveragedetail.ErrInvalidDetail)
+			}
+			out.Items = append(out.Items, coveragev16.CoverageLineDetailV16{
+				Line: line.Line, Count: line.Count, BranchesCovered: line.BranchesCovered, BranchesTotal: line.BranchesTotal,
+				BaselineCount: nil, BaselineBranchesCovered: nil, BaselineBranchesTotal: nil,
+			})
+		}
 		return handled(protocol.Success(version, request, out))
 	}
 	return invalidPayload(version, request)
 }
 
-// Summary deltas are mandatory wire fields. A zero value is not evidence of
-// equality with a baseline; require a durable provider to return provenance
-// for compatible baseline deltas before serializing any summary-bearing page.
+// Current coverage does not require historical comparison. A baseline ID alone
+// is not provenance, so the mapper emits required null comparison fields.
 func detailSummaryProject(ctx context.Context, backend CoverageDetailBackend, reportID string) (coveragedetail.Project, error) {
 	value, err := backend.GetCoverageProject(ctx, reportID)
 	if err != nil {
@@ -165,7 +170,7 @@ func detailSummaryProject(ctx context.Context, backend CoverageDetailBackend, re
 	if value.Status == coveragedetail.StatusStale {
 		return coveragedetail.Project{}, coveragedetail.ErrStale
 	}
-	if value.Status != coveragedetail.StatusCurrent || !validDetailProjection(value.Status, value.Summary, value.Delta) || !validDetailReasons(value.Reasons) || !validID(value.BaselineReportID) || value.BaselineReportID == reportID {
+	if value.Status != coveragedetail.StatusCurrent || !validDetailProjection(value.Status, value.Summary, value.Delta) || !validDetailReasons(value.Reasons) {
 		return coveragedetail.Project{}, coveragedetail.ErrInvalidDetail
 	}
 	return value, nil
@@ -195,8 +200,12 @@ func detailNext(s string) *string {
 	}
 	return &s
 }
-func detailSummary(s coveragedomain.Summary, d coveragedetail.DeltaSummary) coveragev16.CoverageSummaryV16 {
-	return coveragev16.CoverageSummaryV16{Functions: coveragev16.CoverageMetricV16{Covered: s.Functions.Covered, Total: s.Functions.Total, CoveredDelta: d.Functions.Covered}, Lines: coveragev16.CoverageMetricV16{Covered: s.Lines.Covered, Total: s.Lines.Total, CoveredDelta: d.Lines.Covered}, Branches: coveragev16.CoverageMetricV16{Covered: s.Branches.Covered, Total: s.Branches.Total, CoveredDelta: d.Branches.Covered}}
+func detailSummary(s coveragedomain.Summary) coveragev16.CoverageSummaryV16 {
+	return coveragev16.CoverageSummaryV16{
+		Functions: coveragev16.CoverageMetricV16{Covered: s.Functions.Covered, Total: s.Functions.Total},
+		Lines:     coveragev16.CoverageMetricV16{Covered: s.Lines.Covered, Total: s.Lines.Total},
+		Branches:  coveragev16.CoverageMetricV16{Covered: s.Branches.Covered, Total: s.Branches.Total},
+	}
 }
 func detailReasons(values []string) []coveragev16.CoverageDetailReasonV16 {
 	out := make([]coveragev16.CoverageDetailReasonV16, 0, len(values))
@@ -239,7 +248,13 @@ func validDetailProjection(status coveragedetail.Status, s coveragedomain.Summar
 	if status != coveragedetail.StatusCurrent && status != coveragedetail.StatusStale && status != coveragedetail.StatusIncomplete {
 		return false
 	}
-	return protocol.ValidCoverageSummaryV16(detailSummary(s, d))
+	// Preserve numeric validation of the stored projection, without treating
+	// its legacy delta values as proof of a historical comparison.
+	stored := detailSummary(s)
+	stored.Functions.CoveredDelta = &d.Functions.Covered
+	stored.Lines.CoveredDelta = &d.Lines.Covered
+	stored.Branches.CoveredDelta = &d.Branches.Covered
+	return protocol.ValidCoverageSummaryV16(stored)
 }
 func detailFailure(version string, request protocol.Request, err error) HandleResult {
 	code, message, retry := "SERVICE_UNHEALTHY", "coverage detail service is unavailable", true

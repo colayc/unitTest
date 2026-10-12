@@ -89,3 +89,63 @@ test("foundation verification prepares and checks the offline Clang bundle befor
       `${platform} verification must prepare and check Clang before pnpm verify`);
   }
 });
+
+test("coverage smoke jobs prepare and check both product bundles before starting Service", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  for (const job of ["coverage-linux-gcc", "coverage-windows-clang-cl"]) {
+    const section = workflow.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    const testgenPrepare = section.indexOf("pnpm prepare:testgen-bundle");
+    const testgenCheck = section.indexOf("pnpm check:testgen-bundle");
+    const smoke = section.indexOf("test:coverage-service-smoke");
+    assert.ok(testgenPrepare >= 0 && testgenCheck > testgenPrepare && smoke > testgenCheck,
+      `${job} must prepare and check test-generation roots before coverage smoke`);
+  }
+});
+
+test("real Service workflows stage all three sibling product roots before probes", async () => {
+  const foundation = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  for (const job of ["verify-linux", "verify-windows", "verify-framework-windows", "coverage-linux-gcc", "coverage-windows-clang-cl"]) {
+    const section = foundation.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    assert.ok(section.includes("stage-production-bundles.mjs"), `${job} must stage sibling production roots`);
+  }
+  const phase9 = await readFile(new URL("../../.github/workflows/phase9-gates.yml", source), "utf8");
+  for (const job of ["phase9-matrix-e2e", "phase9-fault-injection"]) {
+    const section = phase9.split(`  ${job}:\n`)[1]?.split(/\n  [a-z0-9-]+:\n/u)[0];
+    assert.ok(section, `${job} is missing`);
+    assert.ok(section.includes("stage-production-bundles.mjs"), `${job} must stage sibling production roots`);
+  }
+});
+
+test("Windows native generation matrix prepares both production bundles before the short workspace copy", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  const section = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];
+  assert.ok(section, "Windows framework verification job is missing");
+  const coveragePrepare = section.indexOf("pnpm prepare:coverage-bundle");
+  const coverageCheck = section.indexOf("pnpm check:coverage-bundle");
+  const testgenPrepare = section.indexOf("pnpm prepare:testgen-bundle");
+  const testgenCheck = section.indexOf("pnpm check:testgen-bundle");
+  const shortCopy = section.indexOf("Prepare short Windows framework workspace");
+  const nativeRun = section.indexOf("native-run.js --platform win32");
+  assert.ok(coveragePrepare >= 0 && coverageCheck > coveragePrepare && shortCopy > coverageCheck);
+  assert.ok(testgenPrepare >= 0 && testgenCheck > testgenPrepare && shortCopy > testgenCheck);
+  assert.ok(nativeRun > shortCopy, "native generation must consume the verified short-workspace bundle copies");
+});
+
+test("foundation runs and publishes real managed generation coverage closure on Windows and Linux", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/foundation.yml", source), "utf8");
+  const windows = workflow.split("  verify-framework-windows:\n")[1]?.split("  verify-linux:\n")[0];
+  const linux = workflow.split("  verify-linux:\n")[1]?.split("  verify-framework-matrix:\n")[0];
+  assert.ok(windows && linux, "native framework jobs are missing");
+  const windowsMatrix = windows.indexOf("native-run.js --platform win32");
+  const windowsGeneration = windows.indexOf("native-test-generation.js --platform win32");
+  assert.ok(windowsGeneration > windowsMatrix, "Windows managed generation must run after the required native matrix");
+  assert.match(windows, /name: native-test-generation-windows/u);
+  assert.match(windows, /test-generation-report\.json/u);
+  const linuxMatrix = linux.indexOf("pnpm test:e2e:native");
+  const linuxGeneration = linux.indexOf("test:e2e:native:test-generation -- --platform linux");
+  assert.ok(linuxGeneration > linuxMatrix, "Linux managed generation must run after the required native matrix");
+  assert.match(linux, /name: native-test-generation-linux/u);
+  assert.match(linux, /test-generation-report\.json/u);
+});

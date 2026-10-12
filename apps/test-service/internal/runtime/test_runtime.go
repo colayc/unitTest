@@ -368,15 +368,7 @@ func newTaskDiscoveryInputFactory(
 func cloneRuntimeTestTargets(
 	values []cmake.Target,
 ) []cmake.Target {
-	result := make([]cmake.Target, len(values))
-	for index, value := range values {
-		result[index] = value
-		result[index].Artifacts = append(
-			[]string{},
-			value.Artifacts...,
-		)
-	}
-	return result
+	return cmake.CloneTargets(values)
 }
 
 func runtimeBuildDirectoryIdentity(

@@ -51,6 +51,40 @@ func TestParseLLVMRetainsTemplateInstancesAndPartialBranches(t *testing.T) {
 	}
 }
 
+func TestParseLLVMRetainsPointBranchRanges(t *testing.T) {
+	// LLVM 22.1.8's production CppUTest export contains point ranges such
+	// as [85,9,85,9,0,0,0,0,4]. They remain branch evidence, not malformed
+	// ranges or executable spans that should be discarded.
+	raw := string(readFixture(t, "branches.json"))
+	raw = strings.ReplaceAll(raw, "[4,3,4,8,", "[4,3,4,3,")
+	got, err := Parse(strings.NewReader(raw), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 1 || len(got.Files[0].Lines) != 1 ||
+		got.Files[0].Lines[0].Branches != (Metric{Covered: 2, Total: 4}) {
+		t.Fatalf("point branch aggregate = %#v", got.Files)
+	}
+	want := []coveragedomain.BranchObservation{
+		{Line: 4, Column: 3, Ordinal: 0, HasOrdinal: true, Count: 1},
+		{Line: 4, Column: 3, Ordinal: 1, HasOrdinal: true, Count: 2},
+	}
+	if !reflect.DeepEqual(got.Files[0].Observations[1].Branches, want) {
+		t.Fatalf("point branch detail = %#v, want %#v", got.Files[0].Observations[1].Branches, want)
+	}
+}
+
+func TestParseLLVMRejectsInvalidBranchRanges(t *testing.T) {
+	for _, location := range []string{"4,0,4,3", "0,3,4,3", "4,3,4,2", "4,3,3,8"} {
+		t.Run(location, func(t *testing.T) {
+			raw := strings.ReplaceAll(string(readFixture(t, "branches.json")), "[4,3,4,8,", "["+location+",")
+			if _, err := Parse(strings.NewReader(raw), DefaultLimits()); !errors.Is(err, ErrInvalidExport) {
+				t.Fatalf("invalid branch location accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseLLVMDetailFixtureKeepsLinkageAndDoesNotAssignMacroExpansion(t *testing.T) {
 	got, err := Parse(bytes.NewReader(readFixture(t, "detail-observations.json")), DefaultLimits())
 	if err != nil {

@@ -5,12 +5,12 @@ import type { CoverageMetricV16, CoverageSummaryV16 } from "./generated/coverage
 export function validateCoverageMetricV16(metric: CoverageMetricV16): boolean {
   return Number.isSafeInteger(metric.covered) && metric.covered >= 0 &&
     Number.isSafeInteger(metric.total) && metric.total >= 0 &&
-    Number.isSafeInteger(metric.coveredDelta) &&
+    (metric.coveredDelta === null || Number.isSafeInteger(metric.coveredDelta)) &&
     metric.covered <= metric.total;
 }
 
 export function validateCoverageSummaryV16(summary: CoverageSummaryV16): boolean {
-  return validateCoverageMetricV16(summary.functions) &&
-    validateCoverageMetricV16(summary.lines) &&
-    validateCoverageMetricV16(summary.branches);
+  const values = [summary.functions, summary.lines, summary.branches];
+  return values.every(validateCoverageMetricV16) &&
+    values.every((value) => (value.coveredDelta === null) === (values[0]!.coveredDelta === null));
 }

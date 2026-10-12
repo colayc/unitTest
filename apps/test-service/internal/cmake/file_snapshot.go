@@ -1,6 +1,7 @@
 package cmake
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"unit-test-ide.local/test-service/internal/toolhash"
 )
 
 // fileSnapshot pins one filesystem object while the resolver trusts its bytes.
@@ -23,11 +26,17 @@ import (
 // path, OS identity, and content immediately before and after probing and fails
 // closed if that publication contract is violated.
 type fileSnapshot struct {
-	path       string
-	file       *os.File
-	info       os.FileInfo
-	digest     string
-	osIdentity string
+	path                string
+	file                *os.File
+	info                os.FileInfo
+	digest              string
+	osIdentity          string
+	toolEvidence        *toolhash.Evidence
+	toolContext         context.Context
+	toolInputPath       string // validated caller spelling; canonical path remains the snapshot identity
+	maximum             int64
+	onFullHash          func()
+	beforePostPathCheck func() // observes the real late path check; cannot provide identity or digest
 }
 
 // LaunchInputLease retains stable no-write/no-delete handles for every parsed
@@ -114,6 +123,26 @@ func VerifyLaunchInput(state FingerprintFile, maximum int64) error {
 }
 
 func captureFileSnapshot(path string, maximum int64) (*fileSnapshot, error) {
+	return captureSnapshot(context.Background(), path, maximum, false, nil)
+}
+
+func captureToolFileSnapshotWithInput(ctx context.Context, canonicalPath, inputPath string, maximum int64) (*fileSnapshot, error) {
+	return captureSnapshotWithToolInput(ctx, canonicalPath, inputPath, maximum, true, nil)
+}
+
+func captureSnapshot(ctx context.Context, path string, maximum int64, eligible bool, onFullHash func()) (*fileSnapshot, error) {
+	return captureSnapshotWithToolInput(ctx, path, path, maximum, eligible, onFullHash)
+}
+
+func captureSnapshotWithToolInput(ctx context.Context, path, toolInput string, maximum int64, eligible bool, onFullHash func()) (_ *fileSnapshot, resultErr error) {
+	defer func() {
+		if eligible {
+			toolhash.RejectRetained(ctx, path, resultErr)
+			if toolInput != path {
+				toolhash.RejectRetained(ctx, toolInput, resultErr)
+			}
+		}
+	}()
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -147,12 +176,27 @@ func captureFileSnapshot(path string, maximum int64) (*fileSnapshot, error) {
 	if err != nil {
 		return fail(fmt.Errorf("read OS file identity: %w", err))
 	}
-	digest, err := sha256OpenFile(file)
+	snapshot := &fileSnapshot{
+		path: path, file: file, info: info, osIdentity: osIdentity,
+		maximum: maximum, onFullHash: onFullHash, toolInputPath: toolInput,
+	}
+	var result toolhash.Result
+	protected := false
+	if eligible {
+		result, protected, err = toolhash.Digest(ctx, toolInput, file, maximum)
+	}
 	if err != nil {
 		return fail(err)
 	}
-	snapshot := &fileSnapshot{
-		path: path, file: file, info: info, digest: digest, osIdentity: osIdentity,
+	if protected {
+		snapshot.digest = result.SHA256
+		snapshot.toolEvidence = result.Evidence
+		snapshot.toolContext = ctx
+	} else {
+		snapshot.digest, err = snapshot.fullDigest()
+		if err != nil {
+			return fail(err)
+		}
 	}
 	if err := snapshot.Verify(); err != nil {
 		return fail(err)
@@ -187,7 +231,8 @@ func (snapshot *fileSnapshot) ReadAll(maximum int64) ([]byte, error) {
 	return data, nil
 }
 
-func (snapshot *fileSnapshot) Verify() error {
+func (snapshot *fileSnapshot) Verify() (resultErr error) {
+	defer func() { snapshot.rejectToolFailure(resultErr) }()
 	if snapshot == nil || snapshot.file == nil {
 		return fmt.Errorf("file snapshot is closed")
 	}
@@ -212,12 +257,20 @@ func (snapshot *fileSnapshot) Verify() error {
 	if osIdentity != snapshot.osIdentity {
 		return fmt.Errorf("OS file identity changed")
 	}
-	digest, err := sha256OpenFile(snapshot.file)
+	var digest string
+	if snapshot.toolEvidence != nil {
+		digest, err = snapshot.toolEvidence.Verify(snapshot.toolContext, snapshot.toolInputPath, snapshot.file, snapshot.maximum)
+	} else {
+		digest, err = snapshot.fullDigest()
+	}
 	if err != nil {
 		return err
 	}
 	if digest != snapshot.digest {
 		return fmt.Errorf("file content changed")
+	}
+	if snapshot.beforePostPathCheck != nil {
+		snapshot.beforePostPathCheck()
 	}
 	after, err := directRegularPathInfo(snapshot.path)
 	if err != nil {
@@ -227,6 +280,12 @@ func (snapshot *fileSnapshot) Verify() error {
 		return fmt.Errorf("path changed while verifying")
 	}
 	return nil
+}
+
+func (snapshot *fileSnapshot) rejectToolFailure(err error) {
+	if snapshot != nil {
+		snapshot.toolEvidence.Reject(err)
+	}
 }
 
 func directRegularPathInfo(path string) (os.FileInfo, error) {

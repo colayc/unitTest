@@ -18,6 +18,22 @@ type readyGenerationHandshake struct{ session.GenerationBackend }
 
 func (readyGenerationHandshake) TestGenerationReady() bool { return true }
 
+type readyManagedGenerationHandshake struct {
+	session.ManagedGenerationBackend
+	session.ManagedStartResolverBackend
+	session.ManagedStartBackend
+	session.ManagedRunReadBackend
+}
+
+func (readyManagedGenerationHandshake) TestGenerationReady() bool { return true }
+func (readyManagedGenerationHandshake) ManagedTestsReady() bool   { return true }
+
+type readyDetailsHandshake struct {
+	session.CoverageDetailsProvider
+}
+
+func (readyDetailsHandshake) CoverageDetailsReady() bool { return true }
+
 func TestServiceNegotiatesV15OnlyWithGenerationProvider(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
@@ -45,6 +61,34 @@ func TestServiceNegotiatesV15OnlyWithGenerationProvider(t *testing.T) {
 				t.Fatalf("negotiated = %+v, want %s", response.Payload, tc.want)
 			}
 		})
+	}
+}
+
+func TestServiceNegotiatesV16OnlyThroughManagedDetailsConstructor(t *testing.T) {
+	listener := newQueuedListener()
+	generation := readyManagedGenerationHandshake{}
+	service := server.NewServiceWithManagedDetails(
+		listener, "0123456789abcdef", "linux", "unix-socket", nil,
+		projectionCoverageBackend{}, generation, readyDetailsHandshake{}, generation,
+		server.ServiceConfig{},
+	)
+	done := make(chan error, 1)
+	go func() { done <- service.Serve() }()
+	defer func() { service.Shutdown(); <-done }()
+	client, accepted := net.Pipe()
+	defer client.Close()
+	listener.connections <- accepted
+	payload, _ := json.Marshal(map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
+		"supportedProtocolVersions": []string{protocol.Version16, protocol.Version15, protocol.Version14},
+	})
+	response := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version16, Kind: "request", MessageID: strings.Repeat("b", 32), Method: "handshake", SentAt: sentAt, Payload: payload})
+	if response.Error != nil {
+		t.Fatalf("handshake = %+v", response.Error)
+	}
+	value, ok := response.Payload.(map[string]any)
+	if !ok || value["negotiatedProtocolVersion"] != protocol.Version16 {
+		t.Fatalf("negotiated = %+v, want %s", response.Payload, protocol.Version16)
 	}
 }
 

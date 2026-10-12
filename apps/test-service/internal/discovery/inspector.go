@@ -167,7 +167,6 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-
 	projects := cloneProjects(loaded.Config.Projects)
 	diagnostics := make([]diagnostic.Diagnostic, 0)
 	for _, issue := range loaded.Issues {

@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ type detailRouteBackend struct {
 	ready      bool
 	err        error
 	calls      int
-	lines      []coveragedetail.Line
+	lines      []coveragedetail.LineDetail
 	files      []coveragedetail.File
 	functions  []coveragedetail.Function
 	reasons    []string
@@ -111,7 +112,47 @@ func TestCoverageDetailRouteClosesAfterProviderLossAndOldVersionDowngrade(t *tes
 }
 
 func TestCoverageDetailRoutesDoNotInventBaselineDeltas(t *testing.T) {
-	b := &detailRouteBackend{ready: true, noBaseline: true, summary: coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 1, Total: 1}}}
+	testCoverageDetailRoutesUnavailableComparison(t, true)
+}
+
+func TestCoverageDetailRoutesBaselineStringIsNotComparisonProvenance(t *testing.T) {
+	testCoverageDetailRoutesUnavailableComparison(t, false)
+}
+
+func TestCoverageDetailNullComparisonDoesNotBypassStoredCountValidation(t *testing.T) {
+	fileID, err := coveragedetail.StableFileID("core", "src/source.c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, metric := range []coveragedomain.Metric{
+		{Covered: 2, Total: 1}, {Covered: -1, Total: 1}, {Covered: 1, Total: 9007199254740992},
+	} {
+		bad := coveragedomain.Summary{Lines: metric}
+		for _, method := range []string{"coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list"} {
+			b := &detailRouteBackend{ready: true, noBaseline: true}
+			payload := map[string]any{"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64)}
+			switch method {
+			case "coverage/details/project/get":
+				payload["projectId"] = "core"
+				b.summary = bad
+			case "coverage/details/files/list":
+				payload["projectId"] = "core"
+				b.files = []coveragedetail.File{{ID: fileID, RelativePath: "src/source.c", SourceSHA256: strings.Repeat("d", 64), Status: coveragedetail.StatusCurrent, Summary: bad}}
+			case "coverage/details/functions/list":
+				payload["fileId"] = fileID
+				b.functions = []coveragedetail.Function{{ID: strings.Repeat("f", 32), Name: "source", Start: coveragedomain.SourceLocation{Line: 1}, End: coveragedomain.SourceLocation{Line: 1}, Status: coveragedetail.StatusCurrent, Summary: bad}}
+			}
+			got := readyDetailSession(t, b).Handle(context.Background(), requestVersion(t, protocol.Version16, method, payload))
+			if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" || got.Response.Payload != nil {
+				t.Fatalf("%s accepted %+v: %#v", method, metric, got.Response)
+			}
+		}
+	}
+}
+
+func testCoverageDetailRoutesUnavailableComparison(t *testing.T, noBaseline bool) {
+	t.Helper()
+	b := &detailRouteBackend{ready: true, noBaseline: noBaseline, summary: coveragedomain.Summary{Functions: coveragedomain.Metric{Covered: 1, Total: 1}}}
 	fileID, err := coveragedetail.StableFileID("core", "src/source.c")
 	if err != nil {
 		t.Fatal(err)
@@ -130,8 +171,43 @@ func TestCoverageDetailRoutesDoNotInventBaselineDeltas(t *testing.T) {
 		{"coverage/details/functions/list", map[string]any{"coverageReportId": report, "fileId": fileID, "workspaceGeneration": generation}},
 	} {
 		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, tc.method, tc.payload))
-		if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" || got.Response.Payload != nil {
-			t.Fatalf("%s invented baseline delta: %#v", tc.method, got.Response)
+		if got.Response.Error != nil || got.Response.Payload == nil {
+			t.Fatalf("%s current report rejected: %#v", tc.method, got.Response)
+		}
+		data, err := json.Marshal(got.Response.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(data, &wire); err != nil {
+			t.Fatal(err)
+		}
+		summaries := []json.RawMessage{wire["summary"]}
+		if tc.method != "coverage/details/project/get" {
+			var items []struct {
+				Summary json.RawMessage `json:"summary"`
+			}
+			if err := json.Unmarshal(wire["items"], &items); err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("items=%s", data)
+			}
+			summaries = []json.RawMessage{items[0].Summary}
+		}
+		for _, summary := range summaries {
+			var metrics map[string]map[string]json.RawMessage
+			if err := json.Unmarshal(summary, &metrics); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"functions", "lines", "branches"} {
+				if string(metrics[key]["coveredDelta"]) != "null" {
+					t.Fatalf("%s invented baseline: %s", tc.method, data)
+				}
+			}
+			if string(metrics["functions"]["covered"]) != "1" || string(metrics["functions"]["total"]) != "1" {
+				t.Fatalf("current counts lost: %s", data)
+			}
 		}
 	}
 }
@@ -240,9 +316,83 @@ func TestCoverageDetailV16RoutesDispatchAndRejectClosedPayloads(t *testing.T) {
 		t.Fatalf("cursor error: %#v", got.Response)
 	}
 	b.err = nil
-	b.lines = []coveragedetail.Line{{Line: 5, Count: 1}}
+	b.lines = []coveragedetail.LineDetail{{Line: 5, Count: 1, BranchesCovered: 2, BranchesTotal: 1}}
 	got = s.Handle(context.Background(), requestVersion(t, protocol.Version16, cases[3].method, cases[3].payload))
 	if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" {
 		t.Fatalf("line evidence silently zero-filled: %#v", got.Response)
+	}
+}
+
+func TestCoverageDetailLinesExposeCurrentEvidenceAndRequiredNullHistory(t *testing.T) {
+	b := &detailRouteBackend{ready: true, noBaseline: true, lines: []coveragedetail.LineDetail{
+		{Line: 1, Count: 1, BranchesCovered: 3, BranchesTotal: 4}, {Line: 9, Count: 0},
+	}}
+	s := readyDetailSession(t, b)
+	for _, parent := range []string{"fileId", "functionId"} {
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), parent: strings.Repeat("c", 32),
+		}))
+		if got.Response.Error != nil {
+			t.Fatalf("valid current line page rejected: %#v", got.Response)
+		}
+		raw, err := json.Marshal(got.Response.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Items []map[string]json.RawMessage `json:"items"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil || len(page.Items) != 2 {
+			t.Fatalf("page=%s err=%v", raw, err)
+		}
+		for key, want := range map[string]string{"line": "1", "count": "1", "branchesCovered": "3", "branchesTotal": "4"} {
+			if string(page.Items[0][key]) != want {
+				t.Fatalf("%s=%s want=%s", key, page.Items[0][key], want)
+			}
+		}
+		for _, item := range page.Items {
+			for _, key := range []string{"baselineCount", "baselineBranchesCovered", "baselineBranchesTotal"} {
+				if string(item[key]) != "null" {
+					t.Fatalf("required %s not null: %s", key, raw)
+				}
+			}
+		}
+	}
+}
+
+func TestCoverageDetailLinesRetainCurrentProjectGate(t *testing.T) {
+	b := &detailRouteBackend{ready: true}
+	s := readyDetailSession(t, b)
+	for _, tc := range []struct {
+		status coveragedetail.Status
+		code   string
+	}{
+		{coveragedetail.StatusStale, "WORKSPACE_CHANGED"}, {coveragedetail.StatusIncomplete, "SERVICE_UNHEALTHY"},
+	} {
+		b.status = tc.status
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), "fileId": strings.Repeat("c", 32),
+		}))
+		if got.Response.Error == nil || got.Response.Error.Code != tc.code || got.Response.Payload != nil {
+			t.Fatalf("%s empty line page bypassed current project gate: %#v", tc.status, got.Response)
+		}
+	}
+}
+
+func TestCoverageDetailLinesRejectInvalidCurrentCounts(t *testing.T) {
+	b := &detailRouteBackend{ready: true}
+	s := readyDetailSession(t, b)
+	for _, line := range []coveragedetail.LineDetail{
+		{Line: 0}, {Line: coveragedomain.MaxSafeInteger + 1}, {Line: 1, Count: -1},
+		{Line: 1, Count: coveragedomain.MaxSafeInteger + 1}, {Line: 1, BranchesCovered: -1},
+		{Line: 1, BranchesTotal: coveragedomain.MaxSafeInteger + 1}, {Line: 1, BranchesCovered: 2, BranchesTotal: 1},
+	} {
+		b.lines = []coveragedetail.LineDetail{line}
+		got := s.Handle(context.Background(), requestVersion(t, protocol.Version16, "coverage/details/lines/list", map[string]any{
+			"coverageReportId": strings.Repeat("a", 32), "workspaceGeneration": strings.Repeat("b", 64), "fileId": strings.Repeat("c", 32),
+		}))
+		if got.Response.Error == nil || got.Response.Error.Code != "SERVICE_UNHEALTHY" || got.Response.Payload != nil {
+			t.Fatalf("invalid current line exposed: %#v response=%#v", line, got.Response)
+		}
 	}
 }

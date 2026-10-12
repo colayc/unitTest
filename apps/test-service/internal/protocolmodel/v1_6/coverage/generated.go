@@ -59,9 +59,9 @@ type CoverageSummaryV16 struct {
 }
 
 type CoverageMetricV16 struct {
-	Covered      int64 `json:"covered"`
-	CoveredDelta int64 `json:"coveredDelta"`
-	Total        int64 `json:"total"`
+	Covered      int64  `json:"covered"`
+	CoveredDelta *int64 `json:"coveredDelta"`
+	Total        int64  `json:"total"`
 }
 
 type CoverageDetailProjectRequestV16 struct {
@@ -114,9 +114,9 @@ type CoverageLinePageV16 struct {
 }
 
 type CoverageLineDetailV16 struct {
-	BaselineBranchesCovered int64   `json:"baselineBranchesCovered"`
-	BaselineBranchesTotal   int64   `json:"baselineBranchesTotal"`
-	BaselineCount           int64   `json:"baselineCount"`
+	BaselineBranchesCovered *int64  `json:"baselineBranchesCovered"`
+	BaselineBranchesTotal   *int64  `json:"baselineBranchesTotal"`
+	BaselineCount           *int64  `json:"baselineCount"`
 	BranchesCovered         int64   `json:"branchesCovered"`
 	BranchesTotal           int64   `json:"branchesTotal"`
 	Count                   int64   `json:"count"`

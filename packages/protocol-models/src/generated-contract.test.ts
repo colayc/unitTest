@@ -101,7 +101,7 @@ import {
   TestGenerationDiagnosticSeverityV15
 } from "./index.js";
 import type { CoverageFileV16, CoverageFunctionV16, CoverageLineDetailV16, ManagedReviewApplyRequestV16 } from "./index.js";
-import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16 } from "./index.js";
+import { CoverageDetailStatusV16, ManagedConflictChoiceV16, validateCoverageMetricV16, validateCoverageSummaryV16 } from "./index.js";
 import { validateManagedReviewApplyV16, validateManagedReviewPageV16, validateManagedReviewCaseDigestsV16, decodeManagedBlockDigestV16, ABSENT_BLOCK_DIGEST_V16, MAX_MANAGED_REVIEW_PAGE_BYTES_V16 } from "./index.js";
 import type { ManagedReviewV16, ManagedReviewIDRequestV16 } from "./index.js";
 import { ManagedTestStatusV16 } from "./index.js";
@@ -130,6 +130,30 @@ test("protocol 1.6 decoded coverage metrics reject covered greater than total", 
     { covered: 1, total: Number.MAX_SAFE_INTEGER + 1, coveredDelta: 0 },
     { covered: 1, total: 5, coveredDelta: Number.MAX_SAFE_INTEGER + 1 }
   ]) assert.equal(validateCoverageMetricV16(metric), false);
+});
+
+test("protocol 1.6 generated line history fields are required nullable counts", () => {
+  const line: CoverageLineDetailV16 = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+    baselineCount: null, baselineBranchesCovered: null, baselineBranchesTotal: null };
+  assert.equal(line.baselineCount, null);
+  assert.equal(line.baselineBranchesCovered, null);
+  assert.equal(line.baselineBranchesTotal, null);
+  assert.equal(line.branchesCovered, 3);
+  assert.equal(line.branchesTotal, 4);
+});
+
+test("protocol 1.6 nullable summaries retain current count bounds and consistent comparison", () => {
+  const metric = { covered: 2, total: 4, coveredDelta: null };
+  assert.equal(validateCoverageMetricV16(metric), true);
+  assert.equal(validateCoverageSummaryV16({ functions: metric, lines: metric, branches: metric }), true);
+  const numeric = { ...metric, coveredDelta: -1 };
+  assert.equal(validateCoverageSummaryV16({ functions: numeric, lines: numeric, branches: numeric }), true);
+  for (const key of ["functions", "lines", "branches"] as const) {
+    assert.equal(validateCoverageSummaryV16({ functions: metric, lines: metric, branches: metric, [key]: numeric }), false);
+    assert.equal(validateCoverageSummaryV16({ functions: numeric, lines: numeric, branches: numeric, [key]: metric }), false);
+  }
+  assert.equal(validateCoverageMetricV16({ ...metric, covered: 5 }), false);
+  assert.equal(validateCoverageMetricV16({ ...metric, coveredDelta: undefined as unknown as number }), false);
 });
 
 test("protocol 1.6 review requests paginate and reject stale or duplicate resolutions", () => {

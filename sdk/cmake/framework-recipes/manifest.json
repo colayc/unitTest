@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "recipes": [
+    {
+      "id": "windows-cpputest-4.0",
+      "framework": "cpputest",
+      "version": "4.0",
+      "target": "CppUTest",
+      "frameworkRoot": "../cpputest",
+      "sources": [
+        "src/CppUTest/CommandLineArguments.cpp",
+        "src/CppUTest/MemoryLeakWarningPlugin.cpp",
+        "src/CppUTest/TestHarness_c.cpp",
+        "src/CppUTest/TestRegistry.cpp",
+        "src/CppUTest/CommandLineTestRunner.cpp",
+        "src/CppUTest/SimpleString.cpp",
+        "src/CppUTest/SimpleStringInternalCache.cpp",
+        "src/CppUTest/TestMemoryAllocator.cpp",
+        "src/CppUTest/TestResult.cpp",
+        "src/CppUTest/JUnitTestOutput.cpp",
+        "src/CppUTest/TeamCityTestOutput.cpp",
+        "src/CppUTest/TestFailure.cpp",
+        "src/CppUTest/TestOutput.cpp",
+        "src/CppUTest/MemoryLeakDetector.cpp",
+        "src/CppUTest/TestFilter.cpp",
+        "src/CppUTest/TestPlugin.cpp",
+        "src/CppUTest/TestTestingFixture.cpp",
+        "src/CppUTest/SimpleMutex.cpp",
+        "src/CppUTest/Utest.cpp",
+        "src/Platforms/VisualCpp/UtestPlatform.cpp"
+      ],
+      "defines": [
+        "CPPUTEST_USE_OWN_CONFIGURATION=1",
+        "CPPUTEST_MEM_LEAK_DETECTION_DISABLED=1"
+      ],
+      "systemLibraryVariable": "UNIT_TEST_IDE_WINMM_LIBRARY",
+      "path": "sdk/cmake/framework-recipes/windows-cpputest-4.0.cmake",
+      "sha256": "1d0ca48a63a9d16bd645c5572d29cad99466b8462e8635851f3c9291a1138406"
+    },
+    {
+      "id": "windows-unity-2.6.1",
+      "framework": "unity",
+      "version": "2.6.1",
+      "target": "unity",
+      "frameworkRoot": "../unity",
+      "sources": [
+        "src/unity.c"
+      ],
+      "defines": [],
+      "systemLibraryVariable": null,
+      "path": "sdk/cmake/framework-recipes/windows-unity-2.6.1.cmake",
+      "sha256": "c8da137cfd278d68217d0ced92b4a70c07332965c5451331693b082abb98abba"
+    }
+  ]
+}

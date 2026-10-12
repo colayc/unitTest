@@ -76,7 +76,7 @@ import {
 } from "@unit-test-ide/protocol-models";
 import { CoverageDetailReasonV16 as DetailReasonV16, CoverageDetailStatusV16 as DetailStatusV16,
   FrameworkAdapterIDV16,
-  ManagedTestStatusV16 } from "@unit-test-ide/protocol-models";
+  ManagedTestStatusV16, validateCoverageSummaryV16 } from "@unit-test-ide/protocol-models";
 import type { ProtocolTaskEvent } from "./envelopes.js";
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -202,18 +202,20 @@ function detailMetric(value: unknown, name: string): CoverageSummaryV16["lines"]
   const wire = record(value, name);
   const covered = safeInteger(wire.covered, `${name} covered`);
   const total = safeInteger(wire.total, `${name} total`);
-  const coveredDelta = safeInteger(wire.coveredDelta, `${name} coveredDelta`);
+  const coveredDelta = wire.coveredDelta === null ? null : safeInteger(wire.coveredDelta, `${name} coveredDelta`);
   if (covered < 0 || total < 0 || covered > total) throw new Error(`${name} covered exceeds total`);
   return { covered, total, coveredDelta };
 }
 
 function detailSummary(value: unknown): CoverageSummaryV16 {
   const wire = record(value, "detail summary");
-  return {
+  const summary = {
     lines: detailMetric(wire.lines, "detail lines"),
     branches: detailMetric(wire.branches, "detail branches"),
     functions: detailMetric(wire.functions, "detail functions")
   };
+  if (!validateCoverageSummaryV16(summary)) throw new Error("detail comparison state is inconsistent");
+  return summary;
 }
 
 function uniqueItems<T>(items: T[], key: (item: T) => string, name: string): T[] {
@@ -271,18 +273,34 @@ export function decodeCoverageFunctionPageV16(value: unknown): CoverageFunctionP
 
 export function decodeCoverageLinePageV16(value: unknown): CoverageLinePageV16 {
   const wire = record(value, "coverage detail line page");
+  if (Object.keys(wire).some((key) => !["workspaceGeneration", "coverageReportId", "items", "nextCursor"].includes(key))) {
+    throw new Error("invalid coverage detail line page field");
+  }
   const items = uniqueItems(wireArray(wire.items, "coverage detail lines").map((entry) => {
     const line = record(entry, "coverage detail line");
+    if (Object.keys(line).some((key) => !["line", "count", "branchesCovered", "branchesTotal", "baselineCount", "baselineBranchesCovered", "baselineBranchesTotal", "coverageGapId"].includes(key))) {
+      throw new Error("invalid coverage detail line field");
+    }
+    const number = safeInteger(line.line, "line number");
+    if (number < 1) throw new Error("invalid line number");
+    const count = safeInteger(line.count, "line count");
     const branchesCovered = safeInteger(line.branchesCovered, "line branches covered");
     const branchesTotal = safeInteger(line.branchesTotal, "line branches total");
-    const baselineBranchesCovered = safeInteger(line.baselineBranchesCovered, "baseline branches covered");
-    const baselineBranchesTotal = safeInteger(line.baselineBranchesTotal, "baseline branches total");
-    if (branchesCovered > branchesTotal || baselineBranchesCovered > baselineBranchesTotal) {
+    const baselineCount = line.baselineCount === null ? null : safeInteger(line.baselineCount, "baseline line count");
+    const baselineBranchesCovered = line.baselineBranchesCovered === null ? null : safeInteger(line.baselineBranchesCovered, "baseline branches covered");
+    const baselineBranchesTotal = line.baselineBranchesTotal === null ? null : safeInteger(line.baselineBranchesTotal, "baseline branches total");
+    if ([count, branchesCovered, branchesTotal, baselineCount, baselineBranchesCovered, baselineBranchesTotal].some((value) => value !== null && value < 0)) {
+      throw new Error("invalid negative line count");
+    }
+    if ((baselineCount === null) !== (baselineBranchesCovered === null) ||
+        (baselineCount === null) !== (baselineBranchesTotal === null)) {
+      throw new Error("line comparison state is inconsistent");
+    }
+    if (branchesCovered > branchesTotal || baselineBranchesCovered !== null && baselineBranchesTotal !== null && baselineBranchesCovered > baselineBranchesTotal) {
       throw new Error("line branches covered exceeds total");
     }
     return {
-      line: safeInteger(line.line, "line number"), count: safeInteger(line.count, "line count"),
-      baselineCount: safeInteger(line.baselineCount, "baseline line count"),
+      line: number, count, baselineCount,
       branchesCovered, branchesTotal, baselineBranchesCovered, baselineBranchesTotal,
       ...(line.coverageGapId === undefined ? {} : { coverageGapId: wireString(line.coverageGapId, "coverage gap id") })
     };
@@ -315,19 +333,47 @@ export function decodeManagedReviewV16(value: unknown): ManagedReviewV16 {
   const wire = record(value, "managed review");
   const cases = uniqueItems(wireArray(wire.cases, "managed review cases").map((entry) => {
     const item = record(entry, "managed review case");
+    const absentSides = item.absentSides === undefined ? undefined : uniqueItems(
+      wireArray(item.absentSides, "managed review absent sides")
+        .map((side) => wireEnum(side, ["accepted", "current", "generated"] as const, "managed review absent side")),
+      (side) => side,
+      "managed review absent side",
+    );
     return {
       caseId: wireString(item.caseId, "case id"),
       status: wireEnum(item.status, Object.values(ManagedTestStatusV16), "managed test status"),
       acceptedDigest: wireString(item.acceptedDigest, "accepted digest"),
       currentDigest: wireString(item.currentDigest, "current digest"),
       generatedDigest: wireString(item.generatedDigest, "generated digest"),
+      ...(absentSides === undefined ? {} : { absentSides }),
       ...(item.diff === undefined ? {} : { diff: wireString(item.diff, "review diff") })
     };
   }), (item) => item.caseId, "managed review case id");
+  const conflictKeys = wire.conflictKeys === undefined ? undefined : uniqueItems(
+    wireArray(wire.conflictKeys, "managed review conflict keys")
+      .map((key) => wireString(key, "managed review conflict key")),
+    (key) => key,
+    "managed review conflict key",
+  );
+  const scaffoldPreviews = wire.scaffoldPreviews === undefined ? undefined : uniqueItems(
+    wireArray(wire.scaffoldPreviews, "managed scaffold previews").map((entry) => {
+      const preview = record(entry, "managed scaffold preview");
+      const diff = wireString(preview.diff, "managed scaffold diff");
+      const diffDigest = wireString(preview.diffDigest, "managed scaffold diff digest");
+      if (createHash("sha256").update(diff, "utf8").digest("hex") !== diffDigest) {
+        throw new Error("invalid managed scaffold diff digest");
+      }
+      return { key: wireString(preview.key, "managed scaffold key"), diff, diffDigest };
+    }),
+    (preview) => preview.key,
+    "managed scaffold preview key",
+  );
   return {
     reviewId: wireString(wire.reviewId, "review id"), reviewDigest: wireString(wire.reviewDigest, "review digest"),
     workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
     coverageReportId: wireString(wire.coverageReportId, "coverage report id"), cases,
+    ...(conflictKeys === undefined ? {} : { conflictKeys }),
+    ...(scaffoldPreviews === undefined ? {} : { scaffoldPreviews }),
     ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "review cursor") })
   };
 }

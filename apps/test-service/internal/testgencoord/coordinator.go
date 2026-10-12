@@ -153,7 +153,27 @@ func (c *Coordinator) Fail(ctx context.Context, taskID string) (testgendomain.Ru
 	return c.terminalize(ctx, taskID, testgendomain.StateFailed)
 }
 
+type generationFailurePolicy struct {
+	runID      string
+	revision   int64
+	diagnostic testgendomain.FailureDiagnostic
+}
+
+func (c *Coordinator) FailWithDiagnostic(ctx context.Context, runID, taskID string, expected int64, d testgendomain.FailureDiagnostic) (testgendomain.Run, error) {
+	if c == nil || c.store == nil || ctx == nil {
+		return testgendomain.Run{}, ErrUnavailable
+	}
+	if expected < 1 || !d.Valid() {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	return c.terminalizeWithFailure(ctx, taskID, testgendomain.StateFailed, &generationFailurePolicy{runID: runID, revision: expected, diagnostic: d})
+}
+
 func (c *Coordinator) terminalize(ctx context.Context, taskID string, state testgendomain.State) (testgendomain.Run, error) {
+	return c.terminalizeWithFailure(ctx, taskID, state, nil)
+}
+
+func (c *Coordinator) terminalizeWithFailure(ctx context.Context, taskID string, state testgendomain.State, failure *generationFailurePolicy) (testgendomain.Run, error) {
 	if c == nil || c.store == nil {
 		return testgendomain.Run{}, ErrUnavailable
 	}
@@ -162,15 +182,26 @@ func (c *Coordinator) terminalize(ctx context.Context, taskID string, state test
 		if err != nil {
 			return testgendomain.Run{}, err
 		}
+		if failure != nil && (r.ID != failure.runID || r.TaskID != taskID) {
+			return testgendomain.Run{}, task.ErrConflict
+		}
 		if testgendomain.IsTerminal(r.State) {
 			return r, nil
+		}
+		if failure != nil && r.Revision != failure.revision {
+			return testgendomain.Run{}, task.ErrConflict
 		}
 		next := testgendomain.CloneRun(r)
 		next.State = state
 		next.Revision++
 		now := time.Now().UTC()
 		next.FinishedAt = &now
-		saved, err := c.store.CheckpointGeneration(ctx, r.Revision, next, nil, nil)
+		var saved testgendomain.Run
+		if failure == nil {
+			saved, err = c.store.CheckpointGeneration(ctx, r.Revision, next, nil, nil)
+		} else {
+			saved, err = c.store.CheckpointGenerationWithFailure(ctx, failure.revision, next, failure.diagnostic)
+		}
 		if errors.Is(err, task.ErrConflict) {
 			continue
 		}

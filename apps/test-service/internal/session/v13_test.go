@@ -398,6 +398,31 @@ func TestV13RoutesTestStartsAndReadModels(t *testing.T) {
 	}
 }
 
+func TestV15LegacyTaskStartRetainsStandardTestDiscovery(t *testing.T) {
+	fixture := newV13BackendFixture(t)
+	coverage := &coverageBackend{fakeBackend: &fakeBackend{}}
+	active := session.NewWithGeneration(
+		"0123456789abcdef", "linux", "unix-socket", fixture, coverage, &generationBackend{ready: true},
+	)
+	handshake := active.Handle(context.Background(), requestVersion(t, protocol.Version15, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
+		"supportedProtocolVersions": []string{protocol.Version15},
+	}))
+	if handshake.Response.Error != nil || active.NegotiatedVersion() != protocol.Version15 {
+		t.Fatalf("handshake = %#v, negotiated=%q", handshake.Response, active.NegotiatedVersion())
+	}
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version15, "tasks/start", map[string]any{
+		"idempotencyKey": id('2'), "kind": "testDiscovery", "projectId": "core", "profileId": strings.Repeat("3", 64),
+	}))
+	if result.Response.Error != nil {
+		t.Fatalf("v1.5 test discovery was rejected: %#v", result.Response)
+	}
+	raw, err := json.Marshal(result.Response.Payload)
+	if err != nil || !strings.Contains(string(raw), `"kind":"testDiscovery"`) || !strings.Contains(string(raw), `"taskId":"`+fixture.discoveryTask.ID+`"`) {
+		t.Fatalf("v1.5 discovery payload = %s (err=%v)", raw, err)
+	}
+}
+
 func TestV13QueuedTestRunOmitsTerminalOutcome(t *testing.T) {
 	fixture := newV13BackendFixture(t)
 	fixture.run.Status = testdomain.RunQueued

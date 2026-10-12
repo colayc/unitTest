@@ -20,7 +20,7 @@ func (p *ManagedRuntimeProvider) managedRun(ctx context.Context, owner, runID st
 	if err != nil {
 		return testgendomain.Run{}, err
 	}
-	if run.Request.ManagedGapID == "" || run.Request.Scope != testgendomain.ScopeCoverageGap || !validGenerationRunID(run.Request.CoverageReportID) {
+	if run.Request.ManagedSelectionID() == "" || !validGenerationRunID(run.Request.CoverageReportID) {
 		return testgendomain.Run{}, task.ErrNotFound
 	}
 	index, err := p.config.CurrentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: run.Request.ProjectID, ReportID: run.Request.CoverageReportID, WorkspaceGeneration: run.Request.WorkspaceGeneration})
@@ -28,7 +28,7 @@ func (p *ManagedRuntimeProvider) managedRun(ctx context.Context, owner, runID st
 		return testgendomain.Run{}, err
 	}
 	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: run.Request.ProjectID, WorkspaceGeneration: run.Request.WorkspaceGeneration,
-		CoverageReportID: run.Request.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: run.Request.ManagedGapID}, index)
+		CoverageReportID: run.Request.CoverageReportID, Scope: run.Request.Scope, ID: run.Request.ManagedSelectionID()}, index)
 	if err != nil {
 		return testgendomain.Run{}, err
 	}

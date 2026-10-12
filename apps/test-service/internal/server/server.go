@@ -170,17 +170,17 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			subscriptionState.Unlock()
 			activeSubscription = &runningSubscription{subscription: result.Subscription, cancel: cancelForwarder, done: forwarderDone}
 			forwarders.Add(1)
-			go func(subscription *eventbroker.Subscription, subscribeRequest protocol.Request) {
+			go func(subscription *eventbroker.Subscription, subscribeRequest protocol.Request, transform func(context.Context, task.Event) task.Event) {
 				defer forwarders.Done()
 				defer close(forwarderDone)
-				forwardSubscription(forwarderContext, subscription, subscribeRequest, outbound, writerDone, func() {
+				forwardSubscription(forwarderContext, subscription, subscribeRequest, transform, outbound, writerDone, func() {
 					subscriptionState.Lock()
 					defer subscriptionState.Unlock()
 					if subscriptionGeneration == generation {
 						closeConnection()
 					}
 				})
-			}(result.Subscription, request)
+			}(result.Subscription, request, result.EventTransform)
 			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
@@ -363,7 +363,7 @@ func sendOutbound(ctx context.Context, outbound chan<- outboundMessage, writerDo
 	}
 }
 
-func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscription, subscribeRequest protocol.Request, outbound chan<- outboundMessage, writerDone <-chan struct{}, closeConnection func()) {
+func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscription, subscribeRequest protocol.Request, transform func(context.Context, task.Event) task.Event, outbound chan<- outboundMessage, writerDone <-chan struct{}, closeConnection func()) {
 	defer subscription.Close()
 	events, subscriptionErrors := subscription.Events, subscription.Errors
 	for events != nil || subscriptionErrors != nil {
@@ -374,6 +374,9 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 			if !ok {
 				events = nil
 				continue
+			}
+			if transform != nil {
+				event = transform(ctx, event)
 			}
 			projected, err := toProtocolEvent(event, subscribeRequest.ProtocolVersion)
 			if err != nil {
@@ -410,13 +413,14 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	}
 	eventType := event.Type
 	payload := event.Payload
-	if version != protocol.Version14 && coverageDomainEvent(event.Type) {
+	if legacyCoverageEventVersion(version) && coverageDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
-	} else if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
+	} else if legacyTestEventVersion(version) && testDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
-	} else if (version == protocol.Version13 || version == protocol.Version14) &&
+	} else if (version == protocol.Version13 || version == protocol.Version14 ||
+		version == protocol.Version15 || version == protocol.Version16) &&
 		event.Type == task.EventTaskDiagnostic {
 		var err error
 		payload, err = projectV13Diagnostic(event.Payload)
@@ -461,6 +465,14 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	return projected, nil
 }
 
+func legacyTestEventVersion(version string) bool {
+	return version == protocol.Version10 || version == protocol.Version11 || version == protocol.Version12
+}
+
+func legacyCoverageEventVersion(version string) bool {
+	return version == protocol.Version10 || version == protocol.Version11 || version == protocol.Version12 || version == protocol.Version13
+}
+
 func projectV13Diagnostic(
 	payload json.RawMessage,
 ) (json.RawMessage, error) {
@@ -493,7 +505,8 @@ func projectV13Diagnostic(
 }
 
 func compatibilityOutput(version string) json.RawMessage {
-	if version == protocol.Version12 || version == protocol.Version13 {
+	if version == protocol.Version12 || version == protocol.Version13 ||
+		version == protocol.Version15 || version == protocol.Version16 {
 		return json.RawMessage(
 			`{"stepId":"test-compatibility","stream":"combined","text":"","truncated":false}`,
 		)

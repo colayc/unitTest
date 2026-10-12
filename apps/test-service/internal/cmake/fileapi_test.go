@@ -14,6 +14,69 @@ import (
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
+func TestFileAPILinkFragments(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	before := readWithFixture(t, fixture)
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["link"] = map[string]any{"commandFragments": []any{map[string]any{"fragment": "/debug", "role": "flags"}, map[string]any{"fragment": `"C:/SDK root/winmm.lib"`, "role": "libraries"}}}
+	})
+	reply := readWithFixture(t, fixture)
+	var app Target
+	for _, target := range reply.Targets {
+		if target.Name == "app" {
+			app = target
+		}
+	}
+	want := []LinkCommandFragment{{Fragment: "/debug", Role: "flags"}, {Fragment: `"C:/SDK root/winmm.lib"`, Role: "libraries"}}
+	if !reflect.DeepEqual(app.LinkFragments, want) {
+		t.Fatalf("fragments=%#v want %#v", app.LinkFragments, want)
+	}
+	if stateByBaseName(t, before.StateFiles, "target-app-Debug.json").SHA256 == stateByBaseName(t, reply.StateFiles, "target-app-Debug.json").SHA256 {
+		t.Fatal("link reply bytes not fingerprinted")
+	}
+	cloned := CloneTargets([]Target{app})
+	cloned[0].LinkFragments[0].Fragment = "changed"
+	if app.LinkFragments[0].Fragment != "/debug" {
+		t.Fatal("clone aliases link fragments without compile units")
+	}
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{"wrong type", 42}, {"null", nil},
+		{"too long", []any{map[string]any{"fragment": strings.Repeat("x", 16*1024+1), "role": "libraries"}}},
+		{"nul", []any{map[string]any{"fragment": "a\x00b", "role": "libraries"}}},
+		{"bad role", []any{map[string]any{"fragment": "x", "role": "commands"}}},
+		{"too many", make([]any, 4097)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFileAPIReplyFixture(t)
+			mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) { value["link"] = map[string]any{"commandFragments": tc.value} })
+			expectFileAPIReadError(t, fixture)
+		})
+	}
+}
+
+func TestFileAPILinkFragmentsDoNotAuthorizeSDKSourceRoots(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	sdk := t.TempDir()
+	outside := filepath.Join(sdk, "sdk-source.cpp")
+	if err := os.WriteFile(outside, []byte("int sdk_source;\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["link"] = map[string]any{"commandFragments": []any{map[string]any{"fragment": `"` + filepath.ToSlash(filepath.Join(sdk, "Lib", "10.0.26100.0", "um", "x64", "winmm.lib")) + `"`, "role": "libraries", "backtrace": 1}}}
+	})
+	readWithFixture(t, fixture)
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-app-Debug.json"), func(value map[string]any) {
+		value["sources"] = []any{map[string]any{"path": filepath.ToSlash(outside)}}
+	})
+	_, err := ReadReply(fixture.buildDir, []string{fixture.sourceDir, fixture.buildDir}, fixture.profile)
+	if err == nil {
+		t.Fatal("SDK link metadata authorized an external source path")
+	}
+}
+
 func TestWriteQueryPublishesFixedStatefulRequest(t *testing.T) {
 	buildDir := t.TempDir()
 
@@ -242,6 +305,112 @@ func TestFileAPIReplyFollowsObjectGraphAndReturnsCanonicalTargets(t *testing.T) 
 	}
 	if !reflect.DeepEqual(again, reply) {
 		t.Fatalf("equivalent allowed-root order changed reply:\nfirst  = %#v\nsecond = %#v", reply, again)
+	}
+}
+
+func TestFileAPIReplyBindsCanonicalCompileUnitsToTargets(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	for path, content := range map[string]string{
+		filepath.Join(fixture.sourceDir, "src", "choose.c"):     "int choose(int value) { return value; }\n",
+		filepath.Join(fixture.sourceDir, "include", "choose.h"): "int choose(int value);\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+		value["sources"] = []any{
+			map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(0)},
+			map[string]any{"path": "include/choose.h"},
+		}
+		value["compileGroups"] = []any{map[string]any{
+			"language":      "C",
+			"sourceIndexes": []any{float64(0)},
+			"languageStandard": map[string]any{
+				"standard": "17",
+			},
+			"includes": []any{
+				map[string]any{"path": filepath.ToSlash(filepath.Join(fixture.sourceDir, "include"))},
+				map[string]any{"path": filepath.ToSlash(filepath.Join(fixture.sourceDir, "include"))},
+			},
+			"defines": []any{
+				map[string]any{"define": "FEATURE=1"},
+				map[string]any{"define": "FEATURE=1"},
+			},
+		}}
+	})
+
+	reply := readWithFixture(t, fixture)
+	support := reply.Targets[1]
+	want := []CompileUnit{{
+		Source:   filepath.Join(fixture.sourceDir, "src", "choose.c"),
+		Language: "C", Standard: "17",
+		Includes: []string{filepath.Join(fixture.sourceDir, "include")},
+		Defines:  []string{"FEATURE=1"},
+	}}
+	if !reflect.DeepEqual(support.CompileUnits, want) {
+		t.Fatalf("support compile units = %#v, want %#v", support.CompileUnits, want)
+	}
+	wantSources := []TargetSource{
+		{Path: filepath.Join(fixture.sourceDir, "include", "choose.h")},
+		{Path: filepath.Join(fixture.sourceDir, "src", "choose.c"), Compiled: true},
+	}
+	if !reflect.DeepEqual(support.Sources, wantSources) {
+		t.Fatalf("support sources = %#v, want %#v", support.Sources, wantSources)
+	}
+	if len(reply.Targets[0].CompileUnits) != 0 {
+		t.Fatalf("app compile units = %#v, want none", reply.Targets[0].CompileUnits)
+	}
+}
+
+func TestFileAPIReplyRejectsInvalidCompileUnitBinding(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, fileAPIReplyFixture)
+	}{
+		{
+			name: "compile group index out of range",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				writeCompileUnitSource(t, fixture, "src/choose.c")
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(1)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C"}}
+				})
+			},
+		},
+		{
+			name: "source escapes allowed roots",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				outside := filepath.Join(t.TempDir(), "outside.c")
+				if err := os.WriteFile(outside, []byte("int outside(void);\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": filepath.ToSlash(outside), "compileGroupIndex": float64(0)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C"}}
+				})
+			},
+		},
+		{
+			name: "compile group source indexes disagree",
+			mutate: func(t *testing.T, fixture fileAPIReplyFixture) {
+				writeCompileUnitSource(t, fixture, "src/choose.c")
+				mutateJSONFile(t, filepath.Join(fixture.replyDir, "target-support-Debug.json"), func(value map[string]any) {
+					value["sources"] = []any{map[string]any{"path": "src/choose.c", "compileGroupIndex": float64(0)}}
+					value["compileGroups"] = []any{map[string]any{"language": "C", "sourceIndexes": []any{}}}
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newFileAPIReplyFixture(t)
+			test.mutate(t, fixture)
+			expectFileAPIReadError(t, fixture)
+		})
 	}
 }
 
@@ -1236,6 +1405,17 @@ func newFileAPIReplyFixture(t *testing.T) fileAPIReplyFixture {
 		}
 	}
 	return fixture
+}
+
+func writeCompileUnitSource(t *testing.T, fixture fileAPIReplyFixture, relative string) {
+	t.Helper()
+	path := filepath.Join(fixture.sourceDir, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("int choose(int value) { return value; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readWithFixture(t *testing.T, fixture fileAPIReplyFixture) FileAPIReply {

@@ -46,6 +46,13 @@ type ManagedValidationDriver interface {
 	ValidateManagedSelection(context.Context, testgenpublish.ManagedSelection) ([]byte, error)
 }
 
+// managedReviewFinalizer is an internal post-checkpoint hook. A durable review
+// must bind the final awaiting-confirmation revision, so it cannot be safely
+// committed by an earlier generation stage.
+type managedReviewFinalizer interface {
+	FinalizeManagedReview(context.Context, testgendomain.Run) error
+}
+
 type managedValidationProvider interface {
 	ManagedValidationDriver
 	ManagedValidationReady() bool
@@ -108,6 +115,7 @@ type generationService struct {
 	running            map[string]*generationExecution
 	cancelPending      map[string]bool
 	wg                 sync.WaitGroup
+	closeOnce          sync.Once
 }
 
 type generationExecution struct {
@@ -145,9 +153,9 @@ func (s *generationService) ManagedReadsReady() bool {
 		s.managedValidator != nil && s.managedValidator.ManagedValidationReady()
 }
 
-// ResolveManagedStart performs no generation work. Only a report-bound gap has
-// enough information in v1.6 to select one exact coverage snapshot; unbound
-// file/symbol/target/workspace requests remain unavailable.
+// ResolveManagedStart performs no generation work. Report-bound function,
+// file, and gap IDs are resolved only against the exact current coverage
+// snapshot; unbound target/workspace requests remain unavailable.
 func (s *generationService) ResolveManagedStart(ctx context.Context, owner string, input generationv16.TestGenerationStartRequestV16) (testgendomain.ManagedTarget, error) {
 	if !s.ManagedReadsReady() {
 		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
@@ -158,14 +166,35 @@ func (s *generationService) ResolveManagedStart(ctx context.Context, owner strin
 	if err := ctx.Err(); err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
-	if input.Scope != generationv16.TestGenerationScopeV16CoverageGap || input.CoverageReportID == nil || input.CoverageGapID == nil {
+	if input.CoverageReportID == nil {
+		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+	}
+	var scope testgendomain.Scope
+	var id string
+	switch input.Scope {
+	case generationv16.Symbol:
+		if input.FunctionID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeSymbol, *input.FunctionID
+	case generationv16.File:
+		if input.FileID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeFile, *input.FileID
+	case generationv16.TestGenerationScopeV16CoverageGap:
+		if input.CoverageGapID == nil {
+			return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
+		}
+		scope, id = testgendomain.ScopeCoverageGap, *input.CoverageGapID
+	default:
 		return testgendomain.ManagedTarget{}, task.ErrStorageUnavailable
 	}
 	index, err := s.currentIndex.ReadCurrentCoverageIndex(ctx, coveragedetail.CurrentIndexQuery{ProjectID: input.ProjectID, ReportID: *input.CoverageReportID, WorkspaceGeneration: input.WorkspaceGeneration})
 	if err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
-	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: testgendomain.ScopeCoverageGap, ID: *input.CoverageGapID}, index)
+	target, err := testgendomain.ResolveManagedTarget(testgendomain.ManagedSelector{ProjectID: input.ProjectID, WorkspaceGeneration: input.WorkspaceGeneration, CoverageReportID: *input.CoverageReportID, Scope: scope, ID: id}, index)
 	if err != nil {
 		return testgendomain.ManagedTarget{}, err
 	}
@@ -360,7 +389,7 @@ func (s *generationService) CancelTestGeneration(ctx context.Context, owner, run
 }
 
 func (s *generationService) reconcileManagedBeforeCancel(ctx context.Context, owner string, run testgendomain.Run) (testgendomain.Run, error) {
-	if run.Request.ManagedGapID == "" || testgendomain.IsTerminal(run.State) {
+	if run.Request.ManagedSelectionID() == "" || testgendomain.IsTerminal(run.State) {
 		return run, nil
 	}
 	// A managed receipt can outlive the run's accepted checkpoint. Without a
@@ -739,7 +768,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		}
 		ledger, err := generationLedger(run)
 		if err != nil {
-			s.fail(run)
+			s.fail(run, generationFailureDiagnostic(string(next), "ledger", err))
 			return
 		}
 		amount := s.driver.StageBudget(run, next)
@@ -750,7 +779,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		reservation, err := ledger.Reserve(ctx, amount)
 		if err != nil {
 			if ctx.Err() == nil {
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "reserve_budget", err))
 			}
 			return
 		}
@@ -760,10 +789,14 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		})
 		stageContextErr := stageCtx.Err()
 		if stageErr != nil || stageContextErr != nil {
+			d := generationFailureDiagnostic(string(next), "stage_run", stageErr)
+			if stageContextErr != nil {
+				d = generationFailureDiagnostic(string(next), "stage_context", stageContextErr)
+			}
 			cancel()
 			reservation.Release()
 			if ctx.Err() == nil {
-				s.fail(run)
+				s.fail(run, d)
 			}
 			return
 		}
@@ -773,7 +806,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		if !testgendomain.ValidTransition(run.State, result.Next) {
 			cancel()
 			reservation.Release()
-			s.fail(run)
+			s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "transition", Reason: "invalid_transition"})
 			return
 		}
 		record := run.Record
@@ -790,7 +823,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			if result.PreviewSet == nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "preview_set", Reason: "invalid_preview"})
 				return
 			}
 			previewRun := testgendomain.CloneRun(run)
@@ -799,21 +832,21 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			if setErr != nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "authoritative_set", setErr))
 				return
 			}
 			plan, planErr := s.publisher.Plan(stageCtx, set)
 			if planErr != nil {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic(string(next), "publish_plan", planErr))
 				return
 			}
 			planDiffHash := sha256.Sum256([]byte(plan.Diff))
 			if len(plan.Diff) == 0 || len(plan.Diff) > 262144 || hex.EncodeToString(planDiffHash[:]) != plan.DiffDigest {
 				cancel()
 				reservation.Release()
-				s.fail(run)
+				s.fail(run, testgendomain.FailureDiagnostic{Stage: string(next), Operation: "preview_diff", Reason: "invalid_preview"})
 				return
 			}
 			record.Preview = &testgendomain.PreviewIdentity{
@@ -823,7 +856,7 @@ func (s *generationService) run(ctx context.Context, runID string) {
 		}
 		cancel()
 		if err := reservation.Commit(); err != nil {
-			s.fail(run)
+			s.fail(run, generationFailureDiagnostic(string(next), "commit_budget", err))
 			return
 		}
 		committed, err := s.coord.CheckpointWithRecord(ctx, run.ID, run.Revision, result.Next, result.Candidates, result.Artifacts, record)
@@ -831,6 +864,14 @@ func (s *generationService) run(ctx context.Context, runID string) {
 			// The ledger is reconstructed from the committed record on the next
 			// attempt; a failed CAS never carries in-memory usage forward.
 			return
+		}
+		if committed.State == testgendomain.StateAwaitingConfirmation && committed.Request.ManagedSelectionID() != "" {
+			if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+				if err := finalizer.FinalizeManagedReview(ctx, committed); err != nil {
+					s.fail(committed, generationFailureDiagnostic("awaiting_confirmation", "finalize_review", err))
+					return
+				}
+			}
 		}
 		s.publishNewEvents(ctx, run, committed)
 		if committed.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(committed.State) {
@@ -852,7 +893,7 @@ func generationLedger(run testgendomain.Run) (*testgencoord.BudgetLedger, error)
 	return testgencoord.NewBudgetLedgerFromUsage(limits, run.CreatedAt, time.Now, used)
 }
 
-func (s *generationService) fail(run testgendomain.Run) {
+func (s *generationService) fail(run testgendomain.Run, d testgendomain.FailureDiagnostic) {
 	s.mu.Lock()
 	cancelling := s.cancelPending[run.ID]
 	s.mu.Unlock()
@@ -862,7 +903,7 @@ func (s *generationService) fail(run testgendomain.Run) {
 	if run.State == testgendomain.StateCancelled || testgendomain.IsTerminal(run.State) {
 		return
 	}
-	failed, err := s.coord.Fail(context.Background(), run.TaskID)
+	failed, err := s.coord.FailWithDiagnostic(context.Background(), run.ID, run.TaskID, run.Revision, d)
 	if err == nil {
 		s.publishNewEvents(context.Background(), run, failed)
 	}
@@ -903,10 +944,17 @@ func (s *generationService) ResumeAll(ctx context.Context) error {
 				continue
 			}
 			if run.State == testgendomain.StateAwaitingConfirmation {
+				if run.Request.ManagedSelectionID() != "" {
+					if finalizer, ok := s.driver.(managedReviewFinalizer); ok {
+						if err := finalizer.FinalizeManagedReview(ctx, run); err != nil {
+							s.fail(run, generationFailureDiagnostic("awaiting_confirmation", "finalize_review", err))
+						}
+					}
+				}
 				continue
 			}
 			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {
-				s.fail(run)
+				s.fail(run, generationFailureDiagnostic("unknown", "resume", resumeErr))
 				continue
 			}
 			s.launch(run.ID)
@@ -922,12 +970,17 @@ func (s *generationService) Close() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	for _, execution := range s.running {
-		execution.cancel()
-	}
-	s.mu.Unlock()
-	s.wg.Wait()
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		for _, execution := range s.running {
+			execution.cancel()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
+		if closer, ok := s.publisher.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	})
 }
 
 var _ session.GenerationBackend = (*generationService)(nil)

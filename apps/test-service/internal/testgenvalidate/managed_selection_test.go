@@ -33,6 +33,30 @@ type selectedFixtureRunner struct {
 	executedOverride   []string
 }
 
+type selectedFixtureExecutor struct {
+	runner     *selectedFixtureRunner
+	verifyFail bool
+}
+
+func (executor *selectedFixtureExecutor) Execute(ctx context.Context, selection testgenpublish.ManagedSelection, phase SelectedPhase, roots Roots) (SelectedStageResult, string, error) {
+	result, err := executor.runner.Run(ctx, phase, roots, SelectedCommand{})
+	return result, selectedTestSHA([]byte("dynamic-plan:" + string(phase))), err
+}
+
+func (executor *selectedFixtureExecutor) VerifyPlan(_ context.Context, _ testgenpublish.ManagedSelection, phases []SelectedPhaseReceipt, digest string) error {
+	if executor.verifyFail || len(phases) != len(selectedPhases) || selectedDynamicPlanDigest(phases) != digest {
+		return ErrSelectedValidation
+	}
+	for index, phase := range phases {
+		if phase.Phase != selectedPhases[index] || phase.CommandDigest != selectedTestSHA([]byte("dynamic-plan:"+string(phase.Phase))) {
+			return ErrSelectedValidation
+		}
+	}
+	return nil
+}
+
+func (executor *selectedFixtureExecutor) Release(testgenpublish.ManagedSelection, Roots) {}
+
 func (r *selectedFixtureRunner) Run(ctx context.Context, phase SelectedPhase, roots Roots, command SelectedCommand) (SelectedStageResult, error) {
 	r.called = append(r.called, phase)
 	if r.wait {
@@ -159,6 +183,33 @@ func TestSelectedValidatorRunsIsolatedFixedPhasesAndBindsReceipt(t *testing.T) {
 		if phase.Status != "passed" || phase.StartedAt.IsZero() || phase.FinishedAt.Before(phase.StartedAt) || phase.CommandDigest == "" {
 			t.Fatalf("phase not canonical: %+v", phase)
 		}
+	}
+}
+
+func TestSelectedValidatorRunsDynamicAttestedPlans(t *testing.T) {
+	legacy, selection, runner, _ := selectedFixture(t)
+	executor := &selectedFixtureExecutor{runner: runner}
+	config := legacy.config
+	config.Runner, config.Commands, config.ToolSHA256 = nil, nil, nil
+	config.Executor = executor
+	validator, err := NewSelectedValidator(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := validator.Validate(context.Background(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.Verify(context.Background(), selection, receipt); err != nil {
+		t.Fatal(err)
+	}
+	var body SelectedReceipt
+	if err := json.Unmarshal(receipt, &body); err != nil || body.CommandSetDigest != selectedDynamicPlanDigest(body.Phases) {
+		t.Fatalf("receipt=%+v error=%v", body, err)
+	}
+	executor.verifyFail = true
+	if receipt, err := validator.Validate(context.Background(), selection); err == nil || len(receipt) != 0 {
+		t.Fatal("unattested dynamic plan accepted")
 	}
 }
 

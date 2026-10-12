@@ -23,7 +23,7 @@ type managedReadFixture struct {
 	ready   bool
 }
 
-func TestManagedStartResolvesOnlyExactCurrentGapID(t *testing.T) {
+func TestManagedStartResolvesOnlyExactCurrentReportBoundID(t *testing.T) {
 	project, report, workspace := "core", strings.Repeat("a", 32), strings.Repeat("b", 64)
 	fileID, err := coveragedetail.StableFileID(project, "src/a.c")
 	if err != nil {
@@ -48,8 +48,18 @@ func TestManagedStartResolvesOnlyExactCurrentGapID(t *testing.T) {
 	if err != nil || resolved.FileID != fileID || resolved.FunctionID != functionID || resolved.GapID != gapID {
 		t.Fatalf("resolved=%+v err=%v", resolved, err)
 	}
+	input = generationv16.TestGenerationStartRequestV16{ProjectID: project, WorkspaceGeneration: workspace, Scope: generationv16.Symbol, FunctionID: &functionID, CoverageReportID: &report}
+	resolved, err = service.ResolveManagedStart(context.Background(), strings.Repeat("6", 64), input)
+	if err != nil || resolved.FileID != fileID || resolved.FunctionID != functionID || resolved.GapID != "" {
+		t.Fatalf("symbol resolved=%+v err=%v", resolved, err)
+	}
+	input = generationv16.TestGenerationStartRequestV16{ProjectID: project, WorkspaceGeneration: workspace, Scope: generationv16.File, FileID: &fileID, CoverageReportID: &report}
+	resolved, err = service.ResolveManagedStart(context.Background(), strings.Repeat("6", 64), input)
+	if err != nil || resolved.FileID != fileID || resolved.FunctionID != "" || resolved.GapID != "" {
+		t.Fatalf("file resolved=%+v err=%v", resolved, err)
+	}
 	unknown := strings.Repeat("f", 32)
-	input.CoverageGapID = &unknown
+	input = generationv16.TestGenerationStartRequestV16{ProjectID: project, WorkspaceGeneration: workspace, Scope: generationv16.TestGenerationScopeV16CoverageGap, CoverageGapID: &unknown, CoverageReportID: &report}
 	if _, err := service.ResolveManagedStart(context.Background(), strings.Repeat("6", 64), input); err == nil {
 		t.Fatal("unknown gap ID resolved")
 	}

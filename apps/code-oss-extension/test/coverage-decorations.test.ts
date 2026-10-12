@@ -18,6 +18,17 @@ test("line decorations show hits, branches, stale styling and a hard display bou
   assert.equal(lineDecorations(items, "current", 10)[1]!.style, "uncovered");
 });
 
+test("unavailable line history preserves current branches, hits and uncovered styling", () => {
+  const items = [
+    { line: 1, count: 1, baselineCount: null, branchesCovered: 3, branchesTotal: 4, baselineBranchesCovered: null, baselineBranchesTotal: null },
+    { line: 9, count: 0, baselineCount: null, branchesCovered: 0, branchesTotal: 0, baselineBranchesCovered: null, baselineBranchesTotal: null }
+  ];
+  assert.deepEqual(lineDecorations(items, "current"), [
+    { line: 1, style: "covered", label: "3/4 branches" }, { line: 9, style: "uncovered", label: "0 hits" }
+  ]);
+  assert.equal(lineDecorations([{ ...items[0]!, branchesCovered: 0, branchesTotal: 0 }], "current")[0]!.label, "1 hits");
+});
+
 test("decorations clear on report change and never apply an obsolete page", async () => {
   let resolve!: (value: CoverageLinePageV16) => void;
   let reportId = "r1";
@@ -47,4 +58,33 @@ test("function decorations request only that function's lines before styling the
   await decorations.load("f".repeat(32), "incomplete", "a".repeat(32));
   assert.deepEqual(requests, [{ coverageReportId: "r1", workspaceGeneration: "w", functionId: "a".repeat(32), limit: 200 }]);
   assert.deepEqual(applied.map((items) => items.map((item) => (item as { style: string }).style)), [["incomplete"]]);
+});
+
+test("null-history decorations clear after report, source or generation changes", async () => {
+  for (const change of ["report", "source", "generation"]) {
+    let reportId = "r1", workspaceGeneration = "w1";
+    let resolve!: (page: CoverageLinePageV16) => void;
+    const applied: unknown[][] = [];
+    const page: CoverageLinePageV16 = {
+      coverageReportId: "r1", workspaceGeneration: "w1", items: [
+        { line: 1, count: 1, baselineCount: null, branchesCovered: 3, branchesTotal: 4, baselineBranchesCovered: null, baselineBranchesTotal: null }
+      ]
+    };
+    let pending = false;
+    const client = { listCoverageLines: async (): Promise<CoverageLinePageV16> => pending
+      ? new Promise((done) => { resolve = done; }) : page };
+    const decorations = new CoverageDecorations(() => ({ reportId, workspaceGeneration, client }), (items) => applied.push([...items]));
+    await decorations.load("f".repeat(32), "current");
+    assert.deepEqual(applied[0], [{ line: 1, style: "covered", label: "3/4 branches" }]);
+    pending = true;
+    const loading = decorations.load("f".repeat(32), "current");
+    if (change === "report") reportId = "r2";
+    if (change === "generation") workspaceGeneration = "w2";
+    // Source changes invalidate the binding through the existing controller's clear path.
+    decorations.clear();
+    resolve(page);
+    await loading;
+    assert.equal(applied.length, 2, `${change} reapplied obsolete evidence`);
+    assert.deepEqual(applied.at(-1), []);
+  }
 });

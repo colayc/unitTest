@@ -5,9 +5,9 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { MAX_MESSAGE_BYTES } from "./client.js";
 import { Connection } from "./connection.js";
-import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
+import { decodeCoverageLinePageV16, decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
-import { ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
+import { ABSENT_BLOCK_DIGEST_V16, ManagedConflictChoiceV16, ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import { TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
 import type { TestGenerationStartRequestV16 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
@@ -435,8 +435,10 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
       },
       "managedTests/reviews/get": {
         reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, workspaceGeneration: WORKSPACE_GENERATION,
-        coverageReportId: REPORT_ID, cases: [{ caseId: CASE_ID, status: "conflicted",
-          acceptedDigest: "a".repeat(64), currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), diff: "@@" }]
+        coverageReportId: REPORT_ID, conflictKeys: [CASE_ID, "scaffold:tests/generated/src/a_test.cpp"],
+        scaffoldPreviews: [{ key: "scaffold:tests/generated/src/a_test.cpp", diff: "scaffold", diffDigest: createHash("sha256").update("scaffold").digest("hex") }],
+        cases: [{ caseId: CASE_ID, status: "conflicted", absentSides: ["accepted"],
+          acceptedDigest: ABSENT_BLOCK_DIGEST_V16, currentDigest: "b".repeat(64), generatedDigest: "c".repeat(64), diff: "@@" }]
       },
       "managedTests/reviews/apply": { reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST, applied: true }
     };
@@ -450,7 +452,11 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
   assert.equal((await fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })).items[0]?.functionId, FUNCTION_ID);
   assert.equal((await fixture.client.listCoverageLines({ ...context, functionId: FUNCTION_ID })).items[0]?.baselineCount, 2);
   assert.equal((await fixture.client.listManagedTests({ ...context, projectId: "core" })).items[0]?.caseId, CASE_ID);
-  assert.equal((await fixture.client.getManagedReview({ reviewId: REVIEW_ID })).cases[0]?.status, "conflicted");
+  const managedReview = await fixture.client.getManagedReview({ reviewId: REVIEW_ID });
+  assert.equal(managedReview.cases[0]?.status, "conflicted");
+  assert.deepEqual(managedReview.cases[0]?.absentSides, ["accepted"]);
+  assert.deepEqual(managedReview.conflictKeys, [CASE_ID, "scaffold:tests/generated/src/a_test.cpp"]);
+  assert.equal(managedReview.scaffoldPreviews?.[0]?.diff, "scaffold");
   assert.equal((await fixture.client.applyManagedReview({ reviewId: REVIEW_ID, reviewDigest: REVIEW_DIGEST,
     resolutions: [{ caseId: CASE_ID, choice: ManagedConflictChoiceV16.KeepCurrent }] })).applied, true);
   assert.deepEqual(fixture.requests.filter((request) => String(request.method).includes("details/") || String(request.method).startsWith("managedTests/"))
@@ -459,6 +465,95 @@ test("protocol 1.6 negotiates and routes detailed coverage and managed review wi
     "coverage/details/lines/list", "managedTests/records/list", "managedTests/reviews/get", "managedTests/reviews/apply"
   ]);
   fixture.client.close();
+});
+
+test("protocol 1.6 summary routes decode required null comparisons and reject mixed states", async () => {
+  const nullSummary = {
+    functions: { covered: 2, total: 4, coveredDelta: null },
+    lines: { covered: 2, total: 4, coveredDelta: null },
+    branches: { covered: 0, total: 0, coveredDelta: null }
+  };
+  for (const method of ["coverage/details/project/get", "coverage/details/files/list", "coverage/details/functions/list"]) {
+    for (const comparison of ["null", "number", "mixed", "missing", "undefined", "string", "fraction", "unsafe", "overcovered"] as const) {
+      const summary = structuredClone(nullSummary) as JsonObject;
+      if (comparison === "number") for (const key of ["functions", "lines", "branches"]) (summary[key] as JsonObject).coveredDelta = -1;
+      const lines = summary.lines as JsonObject;
+      if (comparison === "mixed") lines.coveredDelta = 0;
+      if (comparison === "missing") delete lines.coveredDelta;
+      // JSON transports omit undefined, which must not be interpreted as null.
+      if (comparison === "undefined") Object.assign(lines, { coveredDelta: undefined });
+      if (comparison === "string") lines.coveredDelta = "0";
+      if (comparison === "fraction") lines.coveredDelta = 0.5;
+      if (comparison === "unsafe") lines.coveredDelta = Number.MAX_SAFE_INTEGER + 1;
+      if (comparison === "overcovered") lines.covered = 5;
+      const entity = { status: "current", reasons: [], summary };
+      const context = { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID };
+      const payload = method === "coverage/details/project/get" ? { ...context, ...entity, projectId: "core", fileCount: 1 }
+        : method === "coverage/details/files/list" ? { ...context, items: [{ ...entity, fileId: FILE_ID, relativePath: "src/a.cpp", sourceSha256: "a".repeat(64), functionCount: 1 }] }
+        : { ...context, items: [{ ...entity, fileId: FILE_ID, functionId: FUNCTION_ID, qualifiedName: "core::add", startLine: 3, endLine: 6 }] };
+      const fixture = scriptedClient((request) => request.method === "handshake"
+        ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+        : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+        : response(request, payload, "1.6"));
+      try {
+        await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+        const call = async () => method === "coverage/details/project/get"
+          ? (await fixture.client.getCoverageProject({ ...context, projectId: "core" })).summary
+          : method === "coverage/details/files/list"
+            ? (await fixture.client.listCoverageFiles({ ...context, projectId: "core" })).items[0]!.summary
+            : (await fixture.client.listCoverageFunctions({ ...context, fileId: FILE_ID })).items[0]!.summary;
+        if (comparison === "null" || comparison === "number") {
+          const decoded = await call().catch((error: Error) => { throw new Error(`${method}/${comparison}: ${error.message.slice(0, 1200)}`); });
+          assert.equal(decoded.lines.coveredDelta, comparison === "null" ? null : -1);
+          assert.equal(decoded.lines.covered, 2);
+          assert.equal(decoded.lines.total, 4);
+        } else await assert.rejects(call, comparison === "mixed" ? /detail comparison state is inconsistent/ : /invalid|integer|total/i);
+      } finally { fixture.client.close(); }
+    }
+  }
+});
+
+test("protocol 1.6 line decoder requires consistent nullable history and exact current evidence", () => {
+  const line = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+    baselineCount: null, baselineBranchesCovered: null, baselineBranchesTotal: null };
+  const page = (items: unknown[]) => ({ workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, items });
+  assert.deepEqual(decodeCoverageLinePageV16(page([line])).items, [line]);
+  const zeros = { ...line, baselineCount: 0, baselineBranchesCovered: 0, baselineBranchesTotal: 0 };
+  assert.deepEqual(decodeCoverageLinePageV16(page([zeros])).items, [zeros]);
+  for (const key of ["baselineCount", "baselineBranchesCovered", "baselineBranchesTotal"]) {
+    const missing: JsonObject = { ...line };
+    delete missing[key];
+    assert.throws(() => decodeCoverageLinePageV16(page([missing])), /integer|comparison|invalid/i, `missing ${key}`);
+    for (const value of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0"]) {
+      assert.throws(() => decodeCoverageLinePageV16(page([{ ...line, [key]: value }])), /integer|comparison|invalid/i, `${key}=${value}`);
+    }
+  }
+  for (const malformed of [{ ...line, line: 0 }, { ...line, count: -1 }, { ...line, branchesCovered: -1 }, { ...line, branchesCovered: 5 },
+    { ...line, branchesTotal: Number.MAX_SAFE_INTEGER + 1 }, { ...zeros, baselineBranchesCovered: 1 },
+    { ...zeros, baselineCount: -1 }, { ...zeros, baselineBranchesCovered: -1 }, { ...zeros, baselineBranchesTotal: -1 }, { ...line, extra: true }]) {
+    assert.throws(() => decodeCoverageLinePageV16(page([malformed])), /integer|total|invalid/i);
+  }
+  assert.throws(() => decodeCoverageLinePageV16(page([line, line])), /duplicate/i);
+  assert.throws(() => decodeCoverageLinePageV16({ ...page([line]), extra: true }), /invalid/i);
+});
+
+test("protocol 1.6 line routes decode unavailable history without guessing from zeros", async () => {
+  for (const baseline of [null, 0]) {
+    const line = { line: 1, count: 1, branchesCovered: 3, branchesTotal: 4,
+      baselineCount: baseline, baselineBranchesCovered: baseline, baselineBranchesTotal: baseline };
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.6", serviceVersion: "0.7.0" }, "1.6")
+      : request.method === "capabilities/get" ? response(request, capabilitiesV16(), "1.6")
+      : response(request, { workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, items: [line] }, "1.6"));
+    try {
+      await fixture.client.handshake("0123456789abcdef", "test", "0.7.0");
+      for (const parent of [{ fileId: FILE_ID }, { functionId: FUNCTION_ID }]) {
+        const result = await fixture.client.listCoverageLines({ workspaceGeneration: WORKSPACE_GENERATION, coverageReportId: REPORT_ID, ...parent })
+          .catch((error: Error) => { throw new Error(`baseline=${baseline}: ${error.message.slice(0, 350)}`); });
+        assert.deepEqual(result.items, [line]);
+      }
+    } finally { fixture.client.close(); }
+  }
 });
 
 test("protocol 1.6 keeps pre-existing coverage and generation queries callable", async () => {
@@ -485,8 +580,8 @@ test("protocol 1.6 generation start sends stable function, file and coverage-gap
     budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
   };
   for (const coordinates of [
-    { scope: "symbol", functionId: FUNCTION_ID },
-    { scope: "file", fileId: FILE_ID },
+    { scope: "symbol", functionId: FUNCTION_ID, coverageReportId: REPORT_ID },
+    { scope: "file", fileId: FILE_ID, coverageReportId: REPORT_ID },
     { scope: "coverage-gap", coverageGapId: FUNCTION_ID, coverageReportId: REPORT_ID }
   ]) {
     const input = { ...base, ...coordinates } as unknown as TestGenerationStartRequestV16;
@@ -860,6 +955,23 @@ test("client prefers protocol 1.6 and accepts negotiated downgrades", async () =
     assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
     fixture.client.close();
   }
+});
+
+test("client can pin a legacy handshake ceiling for a coverage-only session", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.4",
+    serviceVersion: "0.5.0"
+  }, "1.4"));
+  const result = await fixture.client.handshake(
+    "0123456789abcdef",
+    "test",
+    "0.5.0",
+    ["1.4", "1.3", "1.2", "1.1", "1.0"]
+  );
+  assert.equal(result.negotiatedProtocolVersion, "1.4");
+  assert.equal(fixture.requests[0]?.protocolVersion, "1.4");
+  assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+  fixture.client.close();
 });
 
 test("client retries legacy services from the v1.6 ceiling", async () => {

@@ -549,6 +549,7 @@ export class ProtocolClient {
   #connection: Connection;
   readonly #connector: ConnectionConnector | undefined;
   #credentials: Credentials | undefined;
+  #supportedProtocolVersions: ReadonlyArray<ProtocolVersion> | undefined;
   #negotiatedVersion: ProtocolVersion | undefined;
   #activeSubscription: EventSubscription | undefined;
   #unsubscribeEvent: (() => void) | undefined;
@@ -565,11 +566,19 @@ export class ProtocolClient {
     this.#installConnectionListeners(connection);
   }
 
-  async handshake(token: string, clientName: string, clientVersion: string): Promise<HandshakeResult> {
+  async handshake(
+    token: string,
+    clientName: string,
+    clientVersion: string,
+    supportedProtocolVersions?: ReadonlyArray<ProtocolVersion>
+  ): Promise<HandshakeResult> {
     if (this.#closed) throw new Error("protocol client is closed");
     const credentials = { token, clientName, clientVersion };
-    const result = await this.#authenticate(this.#connection, credentials);
+    const result = await this.#authenticate(this.#connection, credentials, supportedProtocolVersions);
     this.#credentials = credentials;
+    this.#supportedProtocolVersions = supportedProtocolVersions === undefined
+      ? undefined
+      : [...supportedProtocolVersions];
     this.#negotiatedVersion = result.negotiatedProtocolVersion;
     this.#reviewBindings.clear();
     return result;
@@ -1143,7 +1152,7 @@ export class ProtocolClient {
       candidate = new Connection(candidateStream);
       candidateStream = undefined;
       this.#reconnectCandidate = candidate;
-      const negotiated = await this.#authenticate(candidate, credentials);
+      const negotiated = await this.#authenticate(candidate, credentials, this.#supportedProtocolVersions);
       this.#requireCurrentReconnect(generation, candidate);
       if (subscription && negotiated.negotiatedProtocolVersion === "1.0") {
         throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 or newer was not negotiated", false);
@@ -1203,8 +1212,12 @@ export class ProtocolClient {
     this.#connection.close();
   }
 
-  async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
-    const attempts: ReadonlyArray<{
+  async #authenticate(
+    connection: Connection,
+    credentials: Credentials,
+    supportedProtocolVersions?: ReadonlyArray<ProtocolVersion>
+  ): Promise<HandshakeResult> {
+    const defaultAttempts: ReadonlyArray<{
       version: "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1";
       offered: ProtocolVersion[];
     }> = [
@@ -1215,6 +1228,14 @@ export class ProtocolClient {
       { version: "1.2", offered: ["1.2", "1.1", "1.0"] },
       { version: "1.1", offered: ["1.1", "1.0"] }
     ];
+    const requested = supportedProtocolVersions === undefined
+      ? undefined
+      : [...new Set(supportedProtocolVersions)].filter((version) => version !== "1.0");
+    const attempts = requested === undefined
+      ? defaultAttempts
+      : requested.length === 0
+        ? []
+        : [{ version: requested[0] as "1.6" | "1.5" | "1.4" | "1.3" | "1.2" | "1.1", offered: [...requested, "1.0"] }];
     for (const attempt of attempts) {
       try {
         const payload = await connection.request(attempt.version, "handshake", {

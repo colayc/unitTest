@@ -39,11 +39,11 @@ func TestV16CoverageMetricInvariantRejectsCoveredGreaterThanTotal(t *testing.T) 
 		metric coveragev16.CoverageMetricV16
 		valid  bool
 	}{
-		{coveragev16.CoverageMetricV16{Covered: 4, Total: 5, CoveredDelta: -1}, true},
-		{coveragev16.CoverageMetricV16{Covered: 6, Total: 5, CoveredDelta: 1}, false},
+		{coveragev16.CoverageMetricV16{Covered: 4, Total: 5, CoveredDelta: detailDelta(-1)}, true},
+		{coveragev16.CoverageMetricV16{Covered: 6, Total: 5, CoveredDelta: detailDelta(1)}, false},
 		{coveragev16.CoverageMetricV16{Covered: -1, Total: 5}, false},
 		{coveragev16.CoverageMetricV16{Covered: 1, Total: 9007199254740992}, false},
-		{coveragev16.CoverageMetricV16{Covered: 1, Total: 5, CoveredDelta: -9007199254740992}, false},
+		{coveragev16.CoverageMetricV16{Covered: 1, Total: 5, CoveredDelta: detailDelta(-9007199254740992)}, false},
 	} {
 		if got := protocol.ValidCoverageMetricV16(tc.metric); got != tc.valid {
 			t.Fatalf("metric %+v valid=%t, want %t", tc.metric, got, tc.valid)

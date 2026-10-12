@@ -296,6 +296,38 @@ func TestManagedRuntimeStartRequiresExactReportBoundGapAndDurableRun(t *testing.
 	}
 }
 
+func TestManagedRuntimeStartPersistsReportBoundFunctionAndFileSelections(t *testing.T) {
+	for _, scope := range []testgendomain.Scope{testgendomain.ScopeSymbol, testgendomain.ScopeFile} {
+		t.Run(string(scope), func(t *testing.T) {
+			provider, reads, driver := managedBackendFixture(t)
+			owner := strings.Repeat("6", 64)
+			report := reads.index.ReportID
+			input := generationv16.TestGenerationStartRequestV16{IdempotencyKey: strings.Repeat("7", 32), ProjectID: "core", WorkspaceGeneration: reads.index.WorkspaceGeneration,
+				CoverageReportID: &report, Framework: generationv16.Auto,
+				Budgets: generationv16.TestGenerationBudgetsV16{WallTimeMS: 60000, CandidateCount: 2, MemoryMiB: 64, Concurrency: 1}}
+			if scope == testgendomain.ScopeSymbol {
+				input.Scope, input.FunctionID = generationv16.Symbol, &reads.index.Files[0].Functions[0].ID
+			} else {
+				input.Scope, input.FileID = generationv16.File, &reads.index.Files[0].ID
+			}
+			driver.start = func(_ context.Context, gotOwner string, got generationv16.TestGenerationStartRequestV16, target testgendomain.ManagedTarget) (testgendomain.Request, error) {
+				hash := strings.Repeat("d", 64)
+				return testgendomain.Request{SessionOwnerDigest: gotOwner, IdempotencyKey: got.IdempotencyKey, WorkspaceGeneration: got.WorkspaceGeneration, ProjectID: got.ProjectID,
+					Scope: scope, CoverageReportID: report, ManagedTargetID: target.SelectionID(scope), Framework: testgendomain.FrameworkAuto,
+					Budgets:               testgendomain.Budgets{WallTimeMS: got.Budgets.WallTimeMS, CandidateCount: got.Budgets.CandidateCount, MemoryMiB: got.Budgets.MemoryMiB, Concurrency: got.Budgets.Concurrency},
+					CompileSnapshotDigest: hash, CoverageSnapshotDigest: hash, SourceDigest: target.SourceDigest, CMakeTargetDigest: hash,
+					FrameworkBundleDigest: hash, AnalyzerBundleDigest: hash, BaselineReportDigest: hash, ProcessOwnerDigest: hash}, nil
+			}
+			if _, err := provider.StartManaged(context.Background(), owner, input); err != nil {
+				t.Fatalf("start %s: %v", scope, err)
+			}
+			if driver.starts != 1 {
+				t.Fatalf("starts=%d", driver.starts)
+			}
+		})
+	}
+}
+
 func TestManagedRuntimeStartRejectsDifferentSourceWithoutReservingIdempotency(t *testing.T) {
 	provider, reads, driver := managedBackendFixture(t)
 	owner := strings.Repeat("6", 64)

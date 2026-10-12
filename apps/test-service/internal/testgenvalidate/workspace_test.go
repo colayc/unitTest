@@ -9,6 +9,56 @@ import (
 	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
+func TestWorkspaceSnapshotDigestUsesValidatorIdentity(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "source.c")
+	if err := os.WriteFile(path, []byte("int value(void) { return 1; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, internal, err := sourceFingerprint(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := WorkspaceSnapshotDigest(root)
+	if err != nil || public != internal {
+		t.Fatalf("WorkspaceSnapshotDigest() = %q, %v; want %q", public, err, internal)
+	}
+	if err := os.WriteFile(path, []byte("int value(void) { return 2; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WorkspaceSnapshotDigest(root)
+	if err != nil || changed == public {
+		t.Fatalf("changed WorkspaceSnapshotDigest() = %q, %v; original %q", changed, err, public)
+	}
+}
+
+func TestWorkspaceSnapshotDigestIgnoresRepositoryMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "objects"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "objects", "state"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("build/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source.c"), []byte("int value;\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := WorkspaceSnapshotDigest(root)
+	if err != nil {
+		t.Fatalf("WorkspaceSnapshotDigest() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "objects", "state"), []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := WorkspaceSnapshotDigest(root)
+	if err != nil || before != after {
+		t.Fatalf("repository metadata changed source identity: before=%s after=%s error=%v", before, after, err)
+	}
+}
+
 func TestValidateRejectsEscapingAndHardLinkedSnapshotFiles(t *testing.T) {
 	for _, kind := range []string{"symlink", "hardlink"} {
 		t.Run(kind, func(t *testing.T) {

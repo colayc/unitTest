@@ -234,6 +234,44 @@ func TestCoverageArtifactSinkNeverPersistsRawProcessOutputOrDiagnostics(t *testi
 	}
 }
 
+func TestCoverageArtifactSinkPersistsBoundedDebugOutputWhenEnabled(t *testing.T) {
+	t.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "1")
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	taskID := id(45)
+	sink, err := store.OpenTask(context.Background(), taskID, task.KindCoverageRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.AppendOutput(context.Background(), "coverage-build", "stderr", []byte("clang++: error: missing header\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.AppendDiagnostic(context.Background(), diagnostic.Diagnostic{
+		TaskID: taskID, StepID: "coverage-build", Severity: "error",
+		Code: "COVERAGE_BUILD_FAILED", Message: "missing header",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := sink.Finalize(context.Background(), time.Date(2026, 8, 20, 4, 1, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 3 {
+		t.Fatalf("debug coverage artifacts = %#v, want bounded process streams and diagnostics", artifacts)
+	}
+	seen := map[string]bool{}
+	for _, artifact := range artifacts {
+		seen[artifact.Kind] = true
+	}
+	if !seen["stderr"] || !seen["diagnostics"] {
+		t.Fatalf("debug coverage artifacts = %#v, want stderr and diagnostics", seen)
+	}
+}
+
 func TestCoverageArtifactSinkRejectsInvalidBlobs(t *testing.T) {
 	store, err := New(t.TempDir())
 	if err != nil {

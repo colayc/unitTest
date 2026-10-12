@@ -82,8 +82,8 @@
         "framework": { "$ref": "#/$defs/framework" }, "goals": { "$ref": "#/$defs/goals" }, "budgets": { "$ref": "#/$defs/budgets" }
       },
       "oneOf": [
-        { "properties": { "scope": { "const": "symbol" } }, "required": ["functionId"], "not": { "anyOf": [{ "required": ["fileId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
-        { "properties": { "scope": { "const": "file" } }, "required": ["fileId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
+        { "properties": { "scope": { "const": "symbol" } }, "required": ["functionId", "coverageReportId"], "not": { "anyOf": [{ "required": ["fileId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }] } },
+        { "properties": { "scope": { "const": "file" } }, "required": ["fileId", "coverageReportId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }] } },
         { "properties": { "scope": { "const": "target" } }, "required": ["targetId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
         { "properties": { "scope": { "const": "workspace" } }, "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["targetId"] }, { "required": ["coverageGapId"] }, { "required": ["coverageReportId"] }] } },
         { "properties": { "scope": { "const": "coverage-gap" } }, "required": ["coverageGapId", "coverageReportId"], "not": { "anyOf": [{ "required": ["functionId"] }, { "required": ["fileId"] }, { "required": ["targetId"] }] } }

@@ -71,7 +71,7 @@ export interface CoverageSummaryV16 {
 
 export interface CoverageMetricV16 {
     covered:      number;
-    coveredDelta: number;
+    coveredDelta: number | null;
     total:        number;
 }
 
@@ -125,9 +125,9 @@ export interface CoverageLinePageV16 {
 }
 
 export interface CoverageLineDetailV16 {
-    baselineBranchesCovered: number;
-    baselineBranchesTotal:   number;
-    baselineCount:           number;
+    baselineBranchesCovered: number | null;
+    baselineBranchesTotal:   number | null;
+    baselineCount:           number | null;
     branchesCovered:         number;
     branchesTotal:           number;
     count:                   number;

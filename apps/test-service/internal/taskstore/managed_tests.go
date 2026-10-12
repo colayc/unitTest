@@ -727,6 +727,100 @@ func validateManagedRecordBinding(ctx context.Context, q managedBindingQuerier, 
 	return nil
 }
 
+// ReadAcceptedBlock recovers the exact immutable ancestor used by the
+// three-way managed-test reconciler. The registry record stores only its
+// digest; the bytes remain authenticated in the review that produced the last
+// accepted transition.
+func (r *ManagedRegistry) ReadAcceptedBlock(ctx context.Context, caseID string) ([]byte, error) {
+	if !r.usable() || r.store == nil || !r.store.reviewAvailable || r.store.reviewInvalid {
+		return nil, task.ErrStorageUnavailable
+	}
+	if ctx == nil || !strings.HasPrefix(caseID, "utc_") || !lowerHex(strings.TrimPrefix(caseID, "utc_"), 32) {
+		return nil, task.ErrInvalidArgument
+	}
+	tx, err := r.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, storageError("begin accepted managed block read", err)
+	}
+	defer tx.Rollback()
+	if err := noPendingManagedReads(ctx, tx); err != nil {
+		return nil, err
+	}
+	record, _, err := getManagedRecordTx(ctx, tx, caseID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateManagedRecordBinding(ctx, tx, record); err != nil {
+		return nil, err
+	}
+	var encoded string
+	if err := tx.QueryRowContext(ctx, `SELECT c.acceptance_json FROM managed_test_transitions t JOIN managed_test_commits c ON c.acceptance_id=t.acceptance_id WHERE t.case_id=? AND t.to_status='current' ORDER BY t.revision DESC LIMIT 1`, caseID).Scan(&encoded); err != nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	var acceptance managedtest.Acceptance
+	if decodeStrictJSON([]byte(encoded), &acceptance) != nil || !managedtest.ValidAcceptance(acceptance) || acceptance.Record.CaseID != caseID || acceptance.Record.AcceptedBlockDigest != record.AcceptedBlockDigest {
+		return nil, task.ErrStorageUnavailable
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT m.review_id FROM managed_review_manifests m JOIN managed_review_candidates c ON c.review_id=m.review_id WHERE m.review_digest=? AND c.candidate_id=? ORDER BY m.review_id LIMIT 2`, acceptance.ReviewDigest, caseID)
+	if err != nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	reviewIDs := []string{}
+	for rows.Next() {
+		var reviewID string
+		if rows.Scan(&reviewID) != nil {
+			rows.Close()
+			return nil, task.ErrStorageUnavailable
+		}
+		reviewIDs = append(reviewIDs, reviewID)
+	}
+	if rows.Err() != nil || rows.Close() != nil || len(reviewIDs) != 1 {
+		return nil, task.ErrStorageUnavailable
+	}
+	key, err := reviewKey(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := loadReview(ctx, tx, key, reviewIDs[0])
+	if err != nil || stored.digest != acceptance.ReviewDigest {
+		return nil, task.ErrStorageUnavailable
+	}
+	var candidate *managedtest.ReviewCandidate
+	for index := range stored.candidates {
+		if stored.candidates[index].CandidateID == caseID {
+			candidate = &stored.candidates[index]
+			break
+		}
+	}
+	if candidate == nil || candidate.TestRelativePath != record.TestRelativePath {
+		return nil, task.ErrStorageUnavailable
+	}
+	var accepted []byte
+	for _, documentBytes := range [][]byte{candidate.CurrentBytes, candidate.GeneratedBytes} {
+		document, parseErr := managedtest.ParseDocument(documentBytes, managedtest.MaxReviewBytes, 200)
+		if parseErr != nil {
+			return nil, task.ErrStorageUnavailable
+		}
+		for _, block := range document.Blocks {
+			if block.CaseID != caseID || block.FunctionID != record.FunctionID || block.Digest != record.AcceptedBlockDigest {
+				continue
+			}
+			value := document.Bytes[block.StartByte:block.EndByte]
+			if accepted != nil && !bytes.Equal(accepted, value) {
+				return nil, task.ErrStorageUnavailable
+			}
+			accepted = append([]byte(nil), value...)
+		}
+	}
+	if len(accepted) == 0 {
+		return nil, task.ErrStorageUnavailable
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, storageError("commit accepted managed block read", err)
+	}
+	return accepted, nil
+}
+
 func (r *ManagedRegistry) List(ctx context.Context, q managedtest.Query) (managedtest.Page, error) {
 	if !r.usable() {
 		return managedtest.Page{}, task.ErrStorageUnavailable

@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/probe"
+	"unit-test-ide.local/test-service/internal/toolhash"
 )
 
 const (
@@ -64,12 +65,14 @@ type compilerDescriptor struct {
 }
 
 type executableSnapshot struct {
-	path     string
-	file     *os.File
-	info     os.FileInfo
-	digest   string
-	identity string
-	maximum  int64
+	path         string
+	file         *os.File
+	info         os.FileInfo
+	digest       string
+	identity     string
+	maximum      int64
+	toolEvidence *toolhash.Evidence
+	onFullHash   func()
 }
 
 type gccCoverageSnapshot struct {
@@ -841,6 +844,21 @@ func openExecutableSnapshotWithLimitAndHook(
 	maximum int64,
 	beforeDigest func(),
 ) (*executableSnapshot, error) {
+	return openExecutableSnapshotWithDigestObserver(ctx, path, maximum, beforeDigest, nil)
+}
+
+func openExecutableSnapshotWithDigestObserver(
+	ctx context.Context,
+	path string,
+	maximum int64,
+	beforeDigest func(),
+	onFullHash func(),
+) (_ *executableSnapshot, resultErr error) {
+	defer func() {
+		if eligibleExecutableDigest(path) {
+			toolhash.RejectRetained(ctx, path, resultErr)
+		}
+	}()
 	if ctx == nil {
 		return nil, errors.New("snapshot context is nil")
 	}
@@ -883,9 +901,19 @@ func openExecutableSnapshotWithLimitAndHook(
 	if beforeDigest != nil {
 		beforeDigest()
 	}
-	digest, _, err := digestOpenFile(ctx, file, maximum)
+	result, protected, err := guardedExecutableDigest(ctx, canonical, file, maximum)
 	if err != nil {
 		return fail(err)
+	}
+	digest := result.SHA256
+	if !protected {
+		if onFullHash != nil {
+			onFullHash()
+		}
+		digest, _, err = digestOpenFile(ctx, file, maximum)
+		if err != nil {
+			return fail(err)
+		}
 	}
 	identityInput := struct {
 		Path   string `json:"path"`
@@ -899,6 +927,7 @@ func openExecutableSnapshotWithLimitAndHook(
 	snapshot := &executableSnapshot{
 		path: canonical, file: file, info: info, digest: digest,
 		identity: hex.EncodeToString(identitySum[:]), maximum: maximum,
+		toolEvidence: result.Evidence, onFullHash: onFullHash,
 	}
 	if err := snapshot.Verify(ctx); err != nil {
 		return fail(err)
@@ -913,7 +942,12 @@ func (snapshot *executableSnapshot) Close() error {
 	return snapshot.file.Close()
 }
 
-func (snapshot *executableSnapshot) Verify(ctx context.Context) error {
+func (snapshot *executableSnapshot) Verify(ctx context.Context) (resultErr error) {
+	defer func() {
+		if snapshot != nil {
+			snapshot.toolEvidence.Reject(resultErr)
+		}
+	}()
 	if snapshot == nil || snapshot.file == nil {
 		return errors.New("snapshot is closed")
 	}
@@ -941,7 +975,15 @@ func (snapshot *executableSnapshot) Verify(ctx context.Context) error {
 	if handleInfo.Size() != snapshot.info.Size() {
 		return errors.New("executable size changed")
 	}
-	digest, _, err := digestOpenFile(ctx, snapshot.file, snapshot.maximum)
+	var digest string
+	if snapshot.toolEvidence != nil {
+		digest, err = snapshot.toolEvidence.Verify(ctx, snapshot.path, snapshot.file, snapshot.maximum)
+	} else {
+		if snapshot.onFullHash != nil {
+			snapshot.onFullHash()
+		}
+		digest, _, err = digestOpenFile(ctx, snapshot.file, snapshot.maximum)
+	}
 	if err != nil {
 		return err
 	}

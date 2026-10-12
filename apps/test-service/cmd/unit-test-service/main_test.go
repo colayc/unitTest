@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	serviceruntime "unit-test-ide.local/test-service/internal/runtime"
 )
 
 func TestMain(m *testing.M) {
@@ -20,6 +22,13 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
+}
+
+func TestProductionRuntimeConfigEnablesAtomicGenerationProvider(t *testing.T) {
+	config := productionRuntimeConfig(serviceruntime.Config{})
+	if config.ProductionGenerationFactory == nil {
+		t.Fatal("production generation factory is disabled")
+	}
 }
 
 func TestRunPrepareTokenFileModeCreatesEmptyFile(t *testing.T) {
@@ -186,6 +195,44 @@ func TestRunServiceModeRequiresWorkspaceRootBeforeConsumingToken(t *testing.T) {
 	}
 }
 
+func TestRunServiceModeRequiresEveryProductBundleRootBeforeConsumingToken(t *testing.T) {
+	directory := t.TempDir()
+	bundleParent := filepath.Join(directory, "bundles")
+	roots := map[string]string{
+		"--cmake-bundle-root":    filepath.Join(bundleParent, "cmake"),
+		"--coverage-bundle-root": filepath.Join(bundleParent, "coverage"),
+		"--testgen-bundle-root":  filepath.Join(bundleParent, "testgen"),
+	}
+	for _, root := range roots {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for omitted := range roots {
+		t.Run(omitted, func(t *testing.T) {
+			tokenPath := preparedServiceToken(t, directory)
+			args := []string{
+				"--endpoint", "unused-endpoint", "--token-file", tokenPath,
+				"--data-dir", filepath.Join(directory, "data"),
+				"--workspace-root", directory,
+			}
+			for flagName, root := range roots {
+				if flagName != omitted {
+					args = append(args, flagName, root)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 ||
+				!strings.Contains(stderr.String(), "product bundle roots are required") {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if contents, err := os.ReadFile(tokenPath); err != nil || string(contents) != "0123456789abcdef" {
+				t.Fatalf("token was consumed before product bundle validation: %q, %v", contents, err)
+			}
+		})
+	}
+}
+
 func TestRunTrustedWorkspaceRequiresExplicitBoolean(t *testing.T) {
 	for _, args := range [][]string{
 		{"--trusted-workspace"},
@@ -204,6 +251,8 @@ func TestRunRejectsWorkspaceAndCMakeFlagsInInternalModes(t *testing.T) {
 		{"--workspace-root", t.TempDir()},
 		{"--trusted-workspace=true"},
 		{"--cmake-bundle-root", t.TempDir()},
+		{"--coverage-bundle-root", t.TempDir()},
+		{"--testgen-bundle-root", t.TempDir()},
 		{"--dev-cmake-executable", os.Args[0]},
 	} {
 		args := append([]string{"--task-fixture", "success"}, extra...)
@@ -231,11 +280,12 @@ func TestRunInvalidWorkspaceRootNeverCreatesListenerOrPrintsReady(t *testing.T) 
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	args := []string{
 		"--endpoint", "unused-endpoint", "--token-file", tokenPath,
 		"--data-dir", filepath.Join(directory, "data"),
 		"--workspace-root", workspacePath,
-	}, strings.NewReader(""), &stdout, &stderr)
+	}
+	code := run(append(args, productBundleArgs(t)...), strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1; stderr = %q", code, stderr.String())
 	}
@@ -266,10 +316,11 @@ func TestRunUnsafeDataDirNeverCreatesListenerOrPrintsReady(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	args := []string{
 		"--endpoint", "unused-endpoint", "--token-file", tokenPath,
 		"--data-dir", unsafePath, "--workspace-root", directory,
-	}, strings.NewReader(""), &stdout, &stderr)
+	}
+	code := run(append(args, productBundleArgs(t)...), strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1; stderr = %q", code, stderr.String())
 	}
@@ -291,10 +342,11 @@ func TestRunSanitizesListenerSetupFailure(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	args := []string{
 		"--endpoint", "test-endpoint", "--token-file", tokenPath,
 		"--data-dir", filepath.Join(directory, "data"), "--workspace-root", directory,
-	}, strings.NewReader(""), &stdout, &stderr)
+	}
+	code := run(append(args, productBundleArgs(t)...), strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1", code)
 	}
@@ -313,10 +365,11 @@ func TestRunSanitizesServeFailureAfterReady(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	args := []string{
 		"--endpoint", "test-endpoint", "--token-file", tokenPath,
 		"--data-dir", filepath.Join(directory, "data"), "--workspace-root", directory,
-	}, strings.NewReader(""), &stdout, &stderr)
+	}
+	code := run(append(args, productBundleArgs(t)...), strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1", code)
 	}
@@ -347,10 +400,11 @@ func TestRunSanitizesConsumeTokenFailure(t *testing.T) {
 	defer func() { consumeTokenFileForRun = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	args := []string{
 		"--endpoint", "test-endpoint", "--token-file", `C:\secret\token-file`, "--data-dir", filepath.Join(t.TempDir(), "data"),
 		"--workspace-root", t.TempDir(),
-	}, strings.NewReader(""), &stdout, &stderr)
+	}
+	code := run(append(args, productBundleArgs(t)...), strings.NewReader(""), &stdout, &stderr)
 	if code != 1 || stdout.Len() != 0 || stderr.String() != "authentication token unavailable\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -366,6 +420,27 @@ func preparedServiceToken(t *testing.T, directory string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func productBundleArgs(t *testing.T) []string {
+	t.Helper()
+	parent := filepath.Join(t.TempDir(), "bundles")
+	args := make([]string, 0, 6)
+	for _, item := range []struct {
+		flag string
+		leaf string
+	}{
+		{"--cmake-bundle-root", "cmake"},
+		{"--coverage-bundle-root", "coverage"},
+		{"--testgen-bundle-root", "testgen"},
+	} {
+		root := filepath.Join(parent, item.leaf)
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, item.flag, root)
+	}
+	return args
 }
 
 type failingListener struct{ err error }

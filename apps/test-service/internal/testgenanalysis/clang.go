@@ -31,6 +31,10 @@ func normalizedArguments(input []string, root string) ([]string, error) {
 			standard = true
 			result = append(result, arg)
 		case definePattern.MatchString(arg):
+			name, _, _ := strings.Cut(strings.TrimPrefix(arg, "-D"), "=")
+			if reservedIntegerABIMacro(name) {
+				return nil, errors.New("compiler ABI macro redefinition is unsupported")
+			}
 			result = append(result, arg)
 		case strings.HasPrefix(arg, "-I") && len(arg) > 2:
 			rel := strings.TrimPrefix(arg, "-I")

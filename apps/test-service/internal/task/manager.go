@@ -949,6 +949,14 @@ func (m *Manager) observePrivateCoverageOutput(
 	if current.execution.currentCause() != "" {
 		return
 	}
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" && current.artifactSink != nil {
+		if err := current.artifactSink.AppendOutput(
+			context.Background(), current.task.ActiveStep, output.Stream, output.Data,
+		); err != nil {
+			m.tripStorage(active)
+			return
+		}
+	}
 	observer, ok := current.resultInterpreter.(ResultOutputObserver)
 	if !ok {
 		return

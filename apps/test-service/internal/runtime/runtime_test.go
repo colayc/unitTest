@@ -132,8 +132,19 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 	}
 	var stages []string
 	deps := testDependencies(&recordingRunner{}, func(stage string) { stages = append(stages, stage) })
-	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
-		return cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}, nil
+	var openedProductBundles int
+	deps.openProductBundles = func(roots ProductBundleRoots, platform string) (*ProductBundles, error) {
+		openedProductBundles++
+		if platform != platformForTest() {
+			t.Fatalf("bundle platform = %q", platform)
+		}
+		return &ProductBundles{roots: roots, testgen: fakeVerifiedTestgenBundle{}}, nil
+	}
+	installation := cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}
+	var capturedResolver cmake.ResolverConfig
+	deps.resolveCMake = func(_ context.Context, _ probe.Runner, config cmake.ResolverConfig) (cmake.Installation, error) {
+		capturedResolver = config
+		return installation, nil
 	}
 	buildCoordinator := &fakeRuntimeCoordinator{}
 	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
@@ -150,10 +161,22 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 		return executor, nil
 	}
 	dataDir := filepath.Join(base, "data")
+	bundleParent := filepath.Join(base, "bundles")
+	coverageBundleRoot := filepath.Join(bundleParent, "coverage")
+	productBundles := ProductBundleRoots{
+		CMake: filepath.Join(bundleParent, "cmake"), Coverage: coverageBundleRoot,
+		Testgen: filepath.Join(bundleParent, "testgen"),
+	}
+	for _, root := range []string{productBundles.CMake, productBundles.Coverage, productBundles.Testgen} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	active, err := Open(Config{
 		DataDir: dataDir, ServiceExecutable: os.Args[0], WorkspaceRoot: workspaceRoot,
 		TrustedWorkspace: true, DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
-		dependencies: deps,
+		ProductBundleRoots: productBundles, CMakeBundleRoot: productBundles.CMake,
+		dependencies:       deps,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -166,12 +189,24 @@ func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t
 	if active.coverageExecutor != executor {
 		t.Fatal("trusted runtime did not retain its coverage executor")
 	}
+	if active.installation != installation || active.probeRunner == nil || !validProductionObjectID(active.serviceInstanceID) ||
+		active.buildDataRoot != layout.Build || active.coverageDataRoot != layout.Coverage || active.controlDataRoot != layout.Controls {
+		t.Fatalf("trusted runtime production resources = installation=%#v probe=%T service=%q build=%q coverage=%q control=%q",
+			active.installation, active.probeRunner, active.serviceInstanceID, active.buildDataRoot, active.coverageDataRoot, active.controlDataRoot)
+	}
+	if openedProductBundles != 1 || active.productBundles == nil {
+		t.Fatalf("opened product bundles = %d, retained = %#v", openedProductBundles, active.productBundles)
+	}
+	if capturedResolver.BundleRoot != "" || capturedResolver.DevExecutable != os.Args[0] {
+		t.Fatalf("development CMake resolver config = %#v", capturedResolver)
+	}
 	if _, ok := active.CoverageBackend().(*queuedCoverageBackend); !ok {
 		t.Fatalf("trusted coverage backend = %T", active.CoverageBackend())
 	}
 	if captured.Platform != platformForTest() || captured.Tasks == nil || captured.Store == nil ||
 		captured.Build == nil || captured.Tests != testCoordinator ||
-		captured.WorkspaceRoot.NativePath != workspaceRoot || captured.ExecutionRoot != layout.Coverage {
+		captured.WorkspaceRoot.NativePath != workspaceRoot || captured.ExecutionRoot != layout.Coverage ||
+		captured.CoverageBundleRoot != coverageBundleRoot {
 		t.Fatalf("coverage execution config = %#v", captured)
 	}
 	wantStages := []string{
@@ -1900,6 +1935,9 @@ func platformForTest() string { return goruntime.GOOS }
 func testDependencies(runner processcontrol.Runner, stage func(string)) *dependencies {
 	value := defaultDependencies()
 	value.newRunner = func(string) processcontrol.Runner { return runner }
+	value.openProductBundles = func(roots ProductBundleRoots, _ string) (*ProductBundles, error) {
+		return &ProductBundles{roots: roots, testgen: fakeVerifiedTestgenBundle{}}, nil
+	}
 	value.newTestCoordinator = func(
 		testCoordinatorConfig,
 	) (runtimeTestCoordinator, io.Closer, error) {
@@ -1941,6 +1979,13 @@ func testDependencies(runner processcontrol.Runner, stage func(string)) *depende
 	}
 	return &value
 }
+
+type fakeVerifiedTestgenBundle struct{}
+
+func (fakeVerifiedTestgenBundle) ClangPath() string      { return "clang" }
+func (fakeVerifiedTestgenBundle) ResourceDir() string    { return "resource" }
+func (fakeVerifiedTestgenBundle) ManifestSHA256() string { return strings.Repeat("a", 64) }
+func (fakeVerifiedTestgenBundle) Verify() error          { return nil }
 
 type stageStore struct {
 	runtimeStore

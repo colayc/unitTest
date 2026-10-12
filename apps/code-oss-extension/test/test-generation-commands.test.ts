@@ -109,12 +109,12 @@ test("managed commands use only authoritative IDs and leave the v1.5 command set
   const generation = { startManaged: async (selection: unknown) => { managedCalls.push(["generate", selection]); } };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
   registerManagedTestCommands({ subscriptions: [] }, generation, review, status, managedHost, { appendLine: (line: string) => output.push(line), dispose() {} });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "1".repeat(32) });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ fileId: "2".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "1".repeat(32), coverageReportId: "4".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ fileId: "2".repeat(32), coverageReportId: "4".repeat(32) });
   await fixture.handlers.get("unitTestIde.generateManagedTestsForCoverageGap")!({ coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) });
   assert.deepEqual(managedCalls.slice(0, 3), [
-    ["generate", { scope: "symbol", functionId: "1".repeat(32) }],
-    ["generate", { scope: "file", fileId: "2".repeat(32) }],
+    ["generate", { scope: "symbol", functionId: "1".repeat(32), coverageReportId: "4".repeat(32) }],
+    ["generate", { scope: "file", fileId: "2".repeat(32), coverageReportId: "4".repeat(32) }],
     ["generate", { scope: "coverage-gap", coverageGapId: "3".repeat(32), coverageReportId: "4".repeat(32) }]
   ]);
   await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ functionId: "../wrong" });
@@ -127,21 +127,25 @@ test("managed command delegates explicit Apply only when its review facade repor
   const calls: unknown[] = [];
   const reviewId = "c".repeat(32);
   const caseId = `utc_${"a".repeat(32)}`;
+  const authoritativeDiff = "--- a/tests/generated/src/a_test.cpp\n+++ b/tests/generated/src/a_test.cpp\n+TEST(foo)\n";
+  const authoritativePreview = { candidateSetDigest: "1".repeat(64), diff: authoritativeDiff, diffDigest: createHash("sha256").update(authoritativeDiff).digest("hex"), confirmationDigest: "2".repeat(64) };
+  let refreshed = 0;
   let state: any = { review: undefined, choices: {}, canApply: false, applying: false };
   const review: any = {
     getState: () => state, available: async () => true, list: async () => ({ items: [] }),
-    load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+TEST(foo)\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, choices: {}, canApply: false, applying: false, previewAvailable: true }; return state; },
+    load: async () => { state = { review: { reviewId, reviewDigest: "d".repeat(64), cases: [{ caseId, status: "conflicted", diff: "+UNTRUSTED()\n", acceptedDigest: "1".repeat(64), currentDigest: "2".repeat(64), generatedDigest: "3".repeat(64) }] }, authoritativePreview, choices: {}, canApply: false, applying: false, previewAvailable: true }; return state; },
     choose: (_id: string, choice: string) => { calls.push(choice); state = { ...state, canApply: true }; },
     markDisplayed: () => state,
     apply: async (digest: string) => { calls.push(["apply", digest]); return { state: "confirmed", result: { reviewId, reviewDigest: digest, applied: true } }; }, reject: () => { calls.push("reject"); }
   };
   const host: any = { ...fixture.host, pickManagedConflictChoice: async () => "convert-to-manual", openManagedCaseDiff: async (_title: string, diff: string) => { calls.push(["diff", diff]); } };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
-  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, host, { appendLine() {}, dispose() {} });
+  registerManagedTestCommands({ subscriptions: [] }, { startManaged: async () => undefined }, review, status, host, { appendLine() {}, dispose() {} }, async () => { refreshed++; });
   await fixture.handlers.get("unitTestIde.reviewManagedTests")!({ reviewId });
-  assert.deepEqual(calls, [["diff", "+TEST(foo)\n"], "convert-to-manual"]);
+  assert.deepEqual(calls, [["diff", authoritativeDiff], "convert-to-manual"]);
   await fixture.handlers.get("unitTestIde.applyManagedReview")!();
   assert.deepEqual(calls.at(-1), ["apply", "d".repeat(64)]);
+  assert.equal(refreshed, 1);
 });
 
 test("coverage tree context supplies authoritative file and function IDs to managed generation", async () => {
@@ -150,9 +154,12 @@ test("coverage tree context supplies authoritative file and function IDs to mana
   const review: any = { available: async () => true };
   const status: CommandStatus = { trustState: "trusted", isActive: () => true, refreshTrust: () => "trusted", projectService() {} };
   registerManagedTestCommands({ subscriptions: [] }, { startManaged: async (value: unknown) => { starts.push(value); } }, review, status, fixture.host, { appendLine() {}, dispose() {} });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ kind: "file", id: "1".repeat(32) });
-  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ kind: "function", id: "2".repeat(32) });
-  assert.deepEqual(starts, [{ scope: "file", fileId: "1".repeat(32) }, { scope: "symbol", functionId: "2".repeat(32) }]);
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFile")!({ kind: "file", id: "1".repeat(32), coverageReportId: "3".repeat(32) });
+  await fixture.handlers.get("unitTestIde.generateManagedTestsForFunction")!({ kind: "function", id: "2".repeat(32), coverageReportId: "3".repeat(32) });
+  assert.deepEqual(starts, [
+    { scope: "file", fileId: "1".repeat(32), coverageReportId: "3".repeat(32) },
+    { scope: "symbol", functionId: "2".repeat(32), coverageReportId: "3".repeat(32) }
+  ]);
 });
 
 test("a digest-only review stays visible but never arms Apply", async () => {

@@ -15,7 +15,7 @@ import (
 
 func attestedDetailFixture(t *testing.T, s *Store, number int) coveragedetail.Index {
 	t.Helper()
-	index := detailStoreFixture(t, s, number)
+	index := detailStoreFixtureWithPrefix(t, s, number, fmt.Sprintf("attested-%d/", number))
 	fn := &index.Files[0].Functions[0]
 	oldID := fn.ID
 	semantic := fmt.Sprintf("linkage:%d:%s:signature:", len(fn.LinkageName), fn.LinkageName)
@@ -48,6 +48,9 @@ func TestValidatedCoverageIndexRejectsReportWorkspaceProjectMismatch(t *testing.
 	got, err := s.ReadValidatedCoverageIndex(ctx, q)
 	if err != nil || got.ProjectID != index.ProjectID || len(got.Files) != 2 || len(got.Gaps) != 3 {
 		t.Fatalf("current index = %#v, %v", got, err)
+	}
+	if got.ToolchainID != "workspace-toolchain" {
+		t.Fatalf("current index toolchain ID = %q", got.ToolchainID)
 	}
 	for _, bad := range []coveragedetail.CurrentIndexQuery{
 		{ProjectID: "wrong", ReportID: q.ReportID, WorkspaceGeneration: q.WorkspaceGeneration},

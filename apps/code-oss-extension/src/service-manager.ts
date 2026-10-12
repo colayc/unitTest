@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { ProtocolClient } from "@unit-test-ide/test-client";
+import { ProtocolClient, type ProtocolVersion } from "@unit-test-ide/test-client";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   createEndpointResource,
@@ -17,6 +17,10 @@ import {
   redactServiceError,
   type EndpointResource
 } from "./service-resources.js";
+import {
+  validateProductLayout,
+  type ProductLayout
+} from "./service-layout.js";
 import { canStartService } from "./trust-gate.js";
 
 const execFile = promisify(execFileCallback);
@@ -31,6 +35,7 @@ class WorkspaceTrustRevokedError extends Error {
 }
 
 export interface ServiceOperations {
+  validateProductLayout(layout: ProductLayout): Promise<void>;
   prepareTokenFile(binary: string, tokenFile: string, token: string): Promise<void>;
   spawnService(binary: string, args: string[]): ChildProcessWithoutNullStreams;
   connect(endpoint: string): Promise<ProtocolClient>;
@@ -38,10 +43,12 @@ export interface ServiceOperations {
 
 export interface ServiceManagerOptions {
   serviceExecutable: string;
+  productLayout?: ProductLayout;
   workspaceRoot: string;
   dataDirectory: string;
   timeoutMs: number;
   trusted: () => boolean;
+  handshakeSupportedProtocolVersions?: ReadonlyArray<ProtocolVersion>;
   operations?: Partial<ServiceOperations>;
 }
 
@@ -90,6 +97,7 @@ async function prepareTokenFile(binary: string, tokenFile: string, token: string
 }
 
 const defaultOperations: ServiceOperations = {
+  validateProductLayout,
   prepareTokenFile,
   spawnService: (binary, args) => spawn(binary, args, { windowsHide: true }),
   connect: connectProtocolClient
@@ -275,6 +283,10 @@ export class ServiceManager {
     let startupFailureReason: Error | undefined;
 
     try {
+      if (this.#options.productLayout) {
+        await this.#operations.validateProductLayout(this.#options.productLayout);
+      }
+      this.#assertTrusted();
       sessionDirectory = await createSessionDirectory("unit-test-ide-session-");
       this.#assertTrusted();
       endpointResource = await createEndpointResource(process.platform);
@@ -288,12 +300,20 @@ export class ServiceManager {
         this.#options.timeoutMs
       );
       this.#assertTrusted();
+      const productLayoutArguments = this.#options.productLayout
+        ? [
+            "--cmake-bundle-root", this.#options.productLayout.cmakeBundleRoot,
+            "--coverage-bundle-root", this.#options.productLayout.coverageBundleRoot,
+            "--testgen-bundle-root", this.#options.productLayout.testgenBundleRoot
+          ]
+        : [];
       child = this.#operations.spawnService(this.#options.serviceExecutable, [
         "--endpoint", endpointResource.path,
         "--token-file", tokenFile,
         "--data-dir", this.#options.dataDirectory,
         "--workspace-root", this.#options.workspaceRoot,
-        "--trusted-workspace=true"
+        "--trusted-workspace=true",
+        ...productLayoutArguments
       ]);
       const launchedChild = child;
       exit = new Promise<Exit>((resolve) => launchedChild.once("exit", (code, signal) => {
@@ -339,7 +359,7 @@ export class ServiceManager {
       requireChildAlive();
       await withTimeout(
         "task protocol handshake",
-        whileChildAlive(client.handshake(token, CLIENT_NAME, CLIENT_VERSION)),
+        whileChildAlive(client.handshake(token, CLIENT_NAME, CLIENT_VERSION, this.#options.handshakeSupportedProtocolVersions)),
         this.#options.timeoutMs
       );
       this.#assertTrusted();
@@ -473,6 +493,9 @@ export class ServiceManager {
       tokenFile,
       sessionDirectory ?? "",
       this.#options.serviceExecutable,
+      this.#options.productLayout?.cmakeBundleRoot ?? "",
+      this.#options.productLayout?.coverageBundleRoot ?? "",
+      this.#options.productLayout?.testgenBundleRoot ?? "",
       this.#options.workspaceRoot,
       this.#options.dataDirectory
     ];

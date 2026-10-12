@@ -11,24 +11,70 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/diagnostic"
-	"unit-test-ide.local/test-service/internal/offlineboundary"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 type PlanInput struct {
-	Installation   cmake.Installation
-	WorkspaceRoot  workspace.Root
-	Project        workspace.ProjectConfig
-	Profile        cmake.BuildProfile
-	Toolchain      toolchain.Instance
-	Targets        []cmake.Target
-	TargetIDs      []string
-	Jobs           int
-	Configure      bool
-	ConfigureState json.RawMessage
-	Coverage       *CoverageOptions
+	Installation       cmake.Installation
+	WorkspaceRoot      workspace.Root
+	Project            workspace.ProjectConfig
+	Profile            cmake.BuildProfile
+	Toolchain          toolchain.Instance
+	Targets            []cmake.Target
+	TargetIDs          []string
+	Jobs               int
+	Configure          bool
+	ConfigureState     json.RawMessage
+	Coverage           *CoverageOptions
+	WindowsLinkLibrary *windowsLinkLibraryBinding
+	launchPreparation  *cmakeLaunchPreparation
+}
+
+type cmakeLaunchPreparation struct {
+	plan             []string
+	inputs           []cmake.FingerprintFile
+	windowsLibrary   *windowsLinkLibraryBinding
+	windowsConsumers []string
+}
+
+func prepareCMakePlan(input PlanInput, sourceDir string) (*cmakeLaunchPreparation, error) {
+	if input.launchPreparation != nil {
+		prepared := input.launchPreparation
+		for _, file := range prepared.inputs {
+			if cmake.VerifyLaunchInput(file, maxCMakeLaunchFileBytes) != nil {
+				return nil, task.ErrInvalidArgument
+			}
+		}
+		if prepared.windowsLibrary != nil && verifyWindowsWinMMLibrary(prepared.windowsLibrary) != nil {
+			return nil, task.ErrInvalidArgument
+		}
+		return prepared, nil
+	}
+	launchPlan, err := nativeBuildLaunchPlan(input)
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	prepared := &cmakeLaunchPreparation{plan: launchPlan}
+	input.launchPreparation = prepared
+	// All Windows production plans use the same bounded declaration closure.
+	// SDK capture remains lazy: unrelated static graphs add no SDK dependency.
+	if runtime.GOOS == "windows" {
+		prepared.plan, prepared.inputs, err = validateCMakeLaunchPlan(input, sourceDir, launchPlan)
+		if err != nil {
+			return nil, task.ErrInvalidArgument
+		}
+	}
+	if prepared.windowsLibrary != nil {
+		// Capture has a 4 MiB cap; execution retains the existing stricter
+		// per-input cap. Do not emit a plan that its lease owner cannot retain.
+		if len(prepared.inputs) >= maxCMakeLaunchFiles || cmake.VerifyLaunchInput(prepared.windowsLibrary.File, maxCMakeLaunchFileBytes) != nil {
+			return nil, task.ErrInvalidArgument
+		}
+		prepared.inputs = append(prepared.inputs, prepared.windowsLibrary.File)
+	}
+	return prepared, nil
 }
 
 func Plan(input PlanInput) (task.ExecutionPlan, error) {
@@ -49,16 +95,14 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	if err != nil {
 		return task.ExecutionPlan{}, err
 	}
-	launchPlan, err := nativeBuildLaunchPlan(input)
+	prepared, err := prepareCMakePlan(input, sourceDir)
 	if err != nil {
 		return task.ExecutionPlan{}, task.ErrInvalidArgument
 	}
-	var launchInputs []cmake.FingerprintFile
-	if runtime.GOOS == "windows" && (input.Coverage != nil || offlineboundary.ExecutableRegistrationActive()) {
-		launchPlan, launchInputs, err = validateCMakeLaunchPlan(input, sourceDir, launchPlan)
-		if err != nil {
-			return task.ExecutionPlan{}, task.ErrInvalidArgument
-		}
+	launchPlan, launchInputs := prepared.plan, prepared.inputs
+	input.WindowsLinkLibrary = prepared.windowsLibrary
+	if !input.Configure && input.WindowsLinkLibrary != nil && verifyWindowsLinkLibraryEvidence(input.WindowsLinkLibrary, input.Targets, prepared.windowsConsumers) != nil {
+		return task.ExecutionPlan{}, task.ErrInvalidArgument
 	}
 	steps := make([]task.ExecutionStep, 0, 2)
 	if input.Configure {
@@ -159,6 +203,9 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 		)
 	default:
 		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	if input.WindowsLinkLibrary != nil {
+		args = append(args, "-D"+windowsWinMMVariable+":FILEPATH="+filepath.ToSlash(input.WindowsLinkLibrary.File.Path))
 	}
 	if input.Coverage != nil {
 		launchInclude, includeErr := cmakeLaunchPath(input.Coverage.TopLevelInclude.Path)

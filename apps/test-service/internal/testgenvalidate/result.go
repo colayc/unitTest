@@ -54,8 +54,10 @@ type StageReceipt struct {
 type CoverageDelta = testgendomain.Coverage
 
 type ValidationResult struct {
-	Retained   bool
-	Diagnostic Diagnostic
-	Receipts   []StageReceipt
-	Delta      CoverageDelta
+	Retained        bool
+	Diagnostic      Diagnostic
+	Receipts        []StageReceipt
+	Delta           CoverageDelta
+	BaselinePercent testgendomain.CoveragePercent
+	DeltaPercent    testgendomain.CoveragePercent
 }

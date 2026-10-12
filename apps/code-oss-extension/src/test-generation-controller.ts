@@ -26,8 +26,8 @@ export type GenerationSelection = {
 };
 
 export type ManagedGenerationSelection =
-  | { readonly scope: "symbol"; readonly functionId: string; readonly fileId?: never; readonly coverageGapId?: never; readonly coverageReportId?: never }
-  | { readonly scope: "file"; readonly fileId: string; readonly functionId?: never; readonly coverageGapId?: never; readonly coverageReportId?: never }
+  | { readonly scope: "symbol"; readonly functionId: string; readonly coverageReportId: string; readonly fileId?: never; readonly coverageGapId?: never }
+  | { readonly scope: "file"; readonly fileId: string; readonly coverageReportId: string; readonly functionId?: never; readonly coverageGapId?: never }
   | { readonly scope: "coverage-gap"; readonly coverageGapId: string; readonly coverageReportId: string; readonly functionId?: never; readonly fileId?: never };
 
 export interface GenerationContext {
@@ -143,7 +143,7 @@ export class TestGenerationController {
 
   async startManaged(selection: ManagedGenerationSelection): Promise<TestGenerationControllerState> {
     this.#assertOpen();
-    const ids = selection.scope === "symbol" ? [selection.functionId] : selection.scope === "file" ? [selection.fileId] : [selection.coverageGapId, selection.coverageReportId];
+    const ids = selection.scope === "symbol" ? [selection.functionId, selection.coverageReportId] : selection.scope === "file" ? [selection.fileId, selection.coverageReportId] : [selection.coverageGapId, selection.coverageReportId];
     if (ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) throw new Error("Invalid authoritative managed-generation selection ID.");
     const operation = ++this.#operation;
     const epoch = ++this.#epoch;
