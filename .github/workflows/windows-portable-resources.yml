@@ -1,0 +1,155 @@
+name: Windows portable resource inputs
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_commit:
+        description: Approved full producer commit on master (includes runtime CLI version query)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resources:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      WR_EXPECTED_COMMIT: ${{ inputs.expected_source_commit }}
+    steps:
+      - name: Checkout expected committed source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.expected_source_commit }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Source, retention and VS2022 Spectre preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'Preflight' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Repository Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24.18.0
+      - name: Prepare frozen repository dependencies once without hooks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'PrepareRepositoryDependencies' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: One finite hosted contract check batch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'VerifyChecks' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Fetch fixed upstream source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'FetchSource' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Verify upstream source and lock inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'VerifySource' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Upstream build Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 20.14.0
+      - name: Fixed Yarn and upstream dependencies
+        shell: pwsh
+        env:
+          WR_READ_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'CodeOssDependencies' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Build Windows runtime only
+        shell: pwsh
+        env:
+          WR_READ_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'BuildRuntime' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Authorized isolated runtime CLI version query
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'CheckRuntimeVersion' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Restore repository Node without reinstalling dependencies
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24.18.0
+      - name: Prepare and self-check fixed resource bundles
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'PrepareBundles' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Validate RESOURCE_STATIC_VALIDATED payload
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          $complete=Invoke-WindowsResourceStage -Stage 'PackageResources' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+          if ($complete.state -cne 'RESOURCE_STATIC_VALIDATED' -or $null -ne $complete.failure) {
+            throw 'WR_PACKAGE_NOT_VALIDATED'
+          }
+      - name: Upload validated resource payload
+        id: upload-payload
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-portable-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.package.outputs.payload_directory }}
+          retention-days: 7
+          if-no-files-found: error
+      - name: Bind uploaded payload
+        id: origin
+        if: success()
+        shell: pwsh
+        env:
+          WR_RESULT_PATH: ${{ steps.package.outputs.result_path }}
+          WR_RESULT_SIZE: ${{ steps.package.outputs.result_size }}
+          WR_RESULT_SHA256: ${{ steps.package.outputs.result_sha256 }}
+          WR_PAYLOAD_ARTIFACT_ID: ${{ steps.upload-payload.outputs.artifact-id }}
+          WR_PAYLOAD_ARTIFACT_DIGEST: ${{ steps.upload-payload.outputs.artifact-digest }}
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'WriteOrigin' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Upload resource origin
+        id: upload-origin
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-portable-resources-origin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.origin.outputs.origin_path }}
+          retention-days: 7
+          if-no-files-found: error
+      - name: Export safe failure receipt
+        id: failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          . ./tools/release/producer/windows-resource-build.ps1
+          Invoke-WindowsResourceStage -Stage 'FailureReceipt' -ExpectedCommit $env:WR_EXPECTED_COMMIT
+      - name: Upload failure records only
+        if: ${{ failure() && steps.failure.outputs.failure_directory != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-portable-resources-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.failure.outputs.failure_directory }}
+          retention-days: 7
+          if-no-files-found: error

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "kind": "WINDOWS_RESOURCE_POLICY",
+  "repository": "colayc/unitTest",
+  "workflowPath": ".github/workflows/windows-portable-resources.yml",
+  "event": "workflow_dispatch",
+  "ref": "refs/heads/master",
+  "recipeBaseline": "59928bac784fedff614f7d154ef227f15b191eee",
+  "codeOssCommit": "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+  "codeOssVersion": "1.92.0",
+  "buildNodeVersion": "20.14.0",
+  "repositoryNodeVersion": "24.18.0",
+  "yarnVersion": "1.22.22",
+  "pnpmVersion": "11.4.0",
+  "retentionDays": 7,
+  "requiredRoles": ["runtime", "cmake", "coverage", "testgen", "licenses"],
+  "maximumArchiveBytes": 4294967296,
+  "maximumExpandedBytes": 8589934592,
+  "maximumManifestBytes": 67108864
+}
