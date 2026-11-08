@@ -177,15 +177,40 @@ function Get-WindowsResourceStep([string]$ID,$Context) {
     $tool=Get-WRTool $Context $role
     return [ordered]@{id=$ID;toolBinding=(Get-WRToolBinding $tool);arguments=@($arguments);workdir=$workdir;safeEnvironment=(Get-WRSafeEnvironment $Context $ID $tool.path);timeoutSeconds=$timeout;passReadToken=($ID -cin @('YarnDependencies','CodeOssBuild'))}
 }
+function Assert-WRRunnerTrackingId([string]$Value) {
+    if([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 256){throw 'WR_RUNNER_TRACKING_ID'}
+    foreach($character in $Value.ToCharArray()){if([char]::IsControl($character)){throw 'WR_RUNNER_TRACKING_ID'}}
+}
+function Protect-WRRecordedText([string]$Text,[string]$RunnerTrackingId,[string]$ReadToken='') {
+    $redactions=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($value in @($RunnerTrackingId,$ReadToken)) {
+        if(-not [string]::IsNullOrEmpty($value)) {
+            [void]$redactions.Add($value)
+            [void]$redactions.Add([Uri]::EscapeDataString($value))
+            [void]$redactions.Add([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value)))
+        }
+    }
+    foreach($value in @($redactions | Sort-Object Length -Descending)){$Text=$Text.Replace($value,'[REDACTED]')}
+    return $Text
+}
+function New-WRCommandRecord($Description,[int]$TimeoutSeconds,[bool]$RunnerTrackingConfigured) {
+    if(-not $RunnerTrackingConfigured -or $Description.safeEnvironment.Keys -icontains 'RUNNER_TRACKING_ID'){throw 'WR_RUNNER_TRACKING_ID'}
+    return [ordered]@{
+        id=$Description.id;toolBinding=$Description.toolBinding;arguments=$Description.arguments
+        workdir=$Description.workdir;safeEnvironment=$Description.safeEnvironment
+        timeoutSeconds=$TimeoutSeconds;automaticRetries=0;runnerTrackingConfigured=$true
+    }
+}
 function Invoke-WRBoundProcess($Description,$Context) {
     Assert-WRActiveContext $Context
     Assert-WRCurrentBinding $Description.toolBinding
     [void](Assert-LocalPath $Description.workdir '.' $true)
     $seconds=Get-WRRemainingSeconds $Context $Description.timeoutSeconds
+    $runnerTrackingId=[Environment]::GetEnvironmentVariable('RUNNER_TRACKING_ID')
+    Assert-WRRunnerTrackingId $runnerTrackingId
     $directory=Join-Path $Context.executionRoot ('native/'+$Description.id)
     if(Test-Path -LiteralPath $directory){throw 'WR_NATIVE_RETRY_FORBIDDEN'}
     [void](New-SafeDirectory $directory)
-    Write-NewJson (Join-Path $directory 'command.json') ([ordered]@{id=$Description.id;toolBinding=$Description.toolBinding;arguments=$Description.arguments;workdir=$Description.workdir;safeEnvironment=$Description.safeEnvironment;timeoutSeconds=$seconds;automaticRetries=0})
     $info=[Diagnostics.ProcessStartInfo]::new()
     $info.FileName=$Description.toolBinding.path;$info.WorkingDirectory=$Description.workdir
     $info.UseShellExecute=$false;$info.CreateNoWindow=$true
@@ -194,6 +219,11 @@ function Invoke-WRBoundProcess($Description,$Context) {
     foreach($argument in $Description.arguments){$info.ArgumentList.Add($argument)}
     $info.Environment.Clear()
     foreach($name in $Description.safeEnvironment.Keys){$info.Environment[$name]=[string]$Description.safeEnvironment[$name]}
+    $info.Environment['RUNNER_TRACKING_ID']=$runnerTrackingId
+    $trackingConfigured=[string]::Equals(
+        $info.Environment['RUNNER_TRACKING_ID'],$runnerTrackingId,[StringComparison]::Ordinal)
+    $command=New-WRCommandRecord $Description $seconds $trackingConfigured
+    Write-NewJson (Join-Path $directory 'command.json') $command
     $secret=$null
     if($Description.passReadToken -and -not [string]::IsNullOrEmpty($env:WR_READ_TOKEN)){$secret=$env:WR_READ_TOKEN;$info.Environment['GITHUB_TOKEN']=$secret}
     $process=[Diagnostics.Process]::new();$process.StartInfo=$info
@@ -222,19 +252,15 @@ function Invoke-WRBoundProcess($Description,$Context) {
         if($null -ne $outTask -and $outTask.IsCompletedSuccessfully){$stdout=$outTask.GetAwaiter().GetResult()}
         if($null -ne $errTask -and $errTask.IsCompletedSuccessfully){$stderr=$errTask.GetAwaiter().GetResult()}
         try {$process.Dispose()}catch{$result.cleanupFailure='DISPOSE_FAILED '+$_.Exception.Message}
-        if($null -ne $secret){
-            # Never persist token values, their hashes, or common reversible encodings.
-            $redactions=@($secret,[Uri]::EscapeDataString($secret),[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($secret)))
-            foreach($redaction in $redactions){
-                $stdout=$stdout.Replace($redaction,'[REDACTED]');$stderr=$stderr.Replace($redaction,'[REDACTED]')
-                if($null -ne $result.firstFailure){$result.firstFailure=$result.firstFailure.Replace($redaction,'[REDACTED]')}
-                if($null -ne $result.cleanupFailure){$result.cleanupFailure=$result.cleanupFailure.Replace($redaction,'[REDACTED]')}
-            }
+        $stdout=Protect-WRRecordedText $stdout $runnerTrackingId $secret
+        $stderr=Protect-WRRecordedText $stderr $runnerTrackingId $secret
+        foreach($field in @('firstFailure','cleanupFailure')) {
+            if($null -ne $result[$field]){$result[$field]=Protect-WRRecordedText $result[$field] $runnerTrackingId $secret}
         }
         try {
             Write-NewJson (Join-Path $directory 'raw-output.json') ([ordered]@{stdout=$stdout;stderr=$stderr;secretRedactionApplied=($null -ne $secret)})
             Write-NewJson (Join-Path $directory 'raw-exit.json') ([ordered]@{schemaVersion=1;startedAtUtc=$startedAt;finishedAtUtc=[DateTimeOffset]::UtcNow.ToString('o');completion=$result;automaticRetries=0})
-        } catch {$result.cleanupFailure=([string]$result.cleanupFailure+' LOG_WRITE_FAILED '+$_.Exception.Message).Trim()}
+        } catch {$result.cleanupFailure=Protect-WRRecordedText (([string]$result.cleanupFailure+' LOG_WRITE_FAILED '+$_.Exception.Message).Trim()) $runnerTrackingId $secret}
     }
     Assert-WRNativeCompletion $result
     Assert-WRCurrentBinding $Description.toolBinding
@@ -386,42 +412,219 @@ function Write-WROutput([string]$Name,[string]$Value) {
     [void](Assert-AbsoluteLocalPath $env:GITHUB_OUTPUT)
     [IO.File]::AppendAllText($env:GITHUB_OUTPUT,($Name+'='+$Value+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
 }
-function New-WRFailureReceipt($Context,[string]$Code) {
-    $directory=Join-Path $Context.executionRoot 'failure'
-    if(Test-Path -LiteralPath $directory){return Get-BasicBinding (Join-Path $directory 'failure.json')}
-    [void](New-SafeDirectory $directory)
-    Write-NewJson (Join-Path $directory 'failure.json') ([ordered]@{schemaVersion=1;state='FAILED_RESOURCE_PRODUCTION';stage=$Context.activeStage;failure=$Code;automaticRetries=0;generationStatus='PAUSED_RUNTIME_DISABLED';signingStatus='UNSIGNED_TEST_ONLY'})
-    $native=Join-Path $Context.executionRoot 'native'
-    if(Test-Path -LiteralPath $native){
-        foreach($relative in (Get-TreeFilePaths $native)){
-            if($relative -cnotmatch '^(?:metadata-(?:Head|Tree|Dirty|Tracked|UpstreamHead|VisualStudio)-[0-9]+|FetchInit|FetchRemote|FetchCommit|FetchCheckout|Verify|YarnInstall|YarnDependencies|CodeOssBuild|RuntimeVersion|PnpmInstall|RepositoryDependencies|PowerShellModels|WorkflowTests|TarParserTests|CMake|Coverage|TestgenPrepare|TestgenCheck|ValidateRuntime|RuntimeInventory)/(?:command|raw-output|raw-exit)\.json$'){throw 'WR_FAILURE_LOG_SET'}
-            $binding=Get-WRRelativeBinding $native $relative;$target=Join-Path $directory ('native/'+$relative)
-            [void](New-SafeDirectory ([IO.Path]::GetDirectoryName($target)))
-            [void](Copy-BoundFile (Join-Path $native $relative) $target $binding.size $binding.sha256)
+function Get-WRFailureLayout($Context) {
+    $execution=Assert-LocalPath $Context.executionRoot '.' $true
+    $layout=[ordered]@{execution=$execution;native=(Join-Path $execution 'native')
+        root=(Join-Path $execution 'failure');work=(Join-Path $execution 'failure-collection-work')
+        start=(Join-Path $execution 'failure-collection-start.json')
+        primary=(Join-Path $execution 'failure/failure.json')
+        terminal=(Join-Path $execution 'failure/failure-collection.json')}
+    foreach($path in $layout.Values){[void](Assert-AbsoluteLocalPath $path)}
+    Assert-NoPathOverlap $layout.native $layout.root
+    Assert-NoPathOverlap $layout.native $layout.work
+    Assert-NoPathOverlap $layout.root $layout.work
+    return $layout
+}
+function Test-WRFailureEvidence($Layout) {
+    foreach($name in @('root','work','start','primary','terminal')) {
+        try {Assert-ObservedAttributes ([IO.File]::GetAttributes($Layout[$name]));return $true}
+        catch {
+            $base=$_.Exception.GetBaseException()
+            if($base -is [IO.FileNotFoundException] -or $base -is [IO.DirectoryNotFoundException]){continue}
+            throw
         }
     }
-    return Get-BasicBinding (Join-Path $directory 'failure.json')
+    return $false
+}
+function Assert-WRFailureLogPath([string]$Path) {
+    Assert-PortableRelativePath $Path
+    $id='(?:metadata-(?:Head|Tree|Dirty|Tracked|UpstreamHead|VisualStudio)-[0-9]+|FetchInit|FetchRemote|FetchCommit|FetchCheckout|Verify|YarnInstall|YarnDependencies|CodeOssBuild|RuntimeVersion|PnpmInstall|RepositoryDependencies|PowerShellModels|WorkflowTests|TarParserTests|CMake|Coverage|TestgenPrepare|TestgenCheck|ValidateRuntime|RuntimeInventory)'
+    if($Path -cnotmatch ('^native/'+$id+'/(?:command|raw-output|raw-exit)\.json$')){throw 'WR_FAILURE_LOG_SET'}
+}
+function New-WRCollectionError([string]$Path,[string]$Code,[Exception]$Exception) {
+    if($Path -cne 'native'){Assert-WRFailureLogPath $Path}
+    $base=$Exception.GetBaseException()
+    return [ordered]@{path=$Path;code=$Code
+        message=($base.GetType().FullName+' HRESULT=0x'+$base.HResult.ToString('X8'))}
+}
+function Get-WRFailureInventory([string]$ExecutionRoot) {
+    $paths=[Collections.Generic.List[string]]::new()
+    $bindings=[Collections.Generic.List[object]]::new()
+    $complete=$false;$collectionError=$null;$errorPath='native'
+    try {
+        [void](Assert-LocalPath $ExecutionRoot '.' $true)
+        $native=Join-Path $ExecutionRoot 'native'
+        [void](Assert-AbsoluteLocalPath $native)
+        try {$attributes=[IO.File]::GetAttributes($native)}
+        catch {
+            $base=$_.Exception.GetBaseException()
+            if($base -is [IO.FileNotFoundException] -or $base -is [IO.DirectoryNotFoundException]) {
+                return [ordered]@{expectedLogSetComplete=$true;expectedLogPaths=@();sourceLogBindings=@();error=$null}
+            }
+            throw
+        }
+        Assert-ObservedAttributes $attributes
+        if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){throw 'WR_FAILURE_LOG_SET'}
+        $directories=[Collections.Generic.Dictionary[string,IO.DirectoryInfo]]::new([StringComparer]::Ordinal)
+        $aliases=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach($entry in ([IO.DirectoryInfo]::new($native)).EnumerateFileSystemInfos()) {
+            Assert-ObservedAttributes $entry.Attributes
+            if($entry -isnot [IO.DirectoryInfo] -or -not $aliases.Add($entry.Name)){throw 'WR_FAILURE_LOG_SET'}
+            Assert-WRFailureLogPath ('native/'+$entry.Name+'/command.json')
+            $directories.Add($entry.Name,$entry)
+        }
+        foreach($name in (Get-OrdinalStrings ([string[]]@($directories.Keys)))) {
+            foreach($leaf in @('command.json','raw-output.json','raw-exit.json')){$paths.Add('native/'+$name+'/'+$leaf)}
+            foreach($entry in $directories[$name].EnumerateFileSystemInfos()) {
+                Assert-ObservedAttributes $entry.Attributes
+                if($entry -isnot [IO.FileInfo] -or $entry.Name -cnotin @('command.json','raw-output.json','raw-exit.json')){throw 'WR_FAILURE_LOG_SET'}
+            }
+        }
+        $complete=$true
+        foreach($relative in (Get-OrdinalStrings $paths.ToArray())) {
+            $errorPath=$relative
+            $bindings.Add((Get-WRRelativeBinding $ExecutionRoot $relative))
+        }
+    } catch {$collectionError=New-WRCollectionError $errorPath 'WR_FAILURE_LOG_READ' $_.Exception}
+    return [ordered]@{expectedLogSetComplete=$complete
+        expectedLogPaths=@(Get-OrdinalStrings $paths.ToArray())
+        sourceLogBindings=$bindings.ToArray();error=$collectionError}
+}
+function Publish-WRFailureLog($Layout,$File) {
+    Assert-WRBinding $File;Assert-WRFailureLogPath $File.path
+    $source=Assert-LocalPath $Layout.execution $File.path $false
+    $temporary=Join-Path $Layout.work $File.path
+    $target=Join-Path $Layout.root $File.path
+    [void](New-SafeDirectory ([IO.Path]::GetDirectoryName($temporary)))
+    [void](New-SafeDirectory ([IO.Path]::GetDirectoryName($target)))
+    [void](Assert-AbsoluteLocalPath $temporary);[void](Assert-AbsoluteLocalPath $target)
+    [void](Copy-BoundFile $source $temporary $File.size $File.sha256)
+    [IO.File]::Move($temporary,$target,$false)
+    $actual=Get-WRRelativeBinding $Layout.root $File.path
+    Assert-WRSame $File $actual 'WR_FAILURE_PUBLISH_DRIFT'
+    return $actual
+}
+function Copy-WRFailureLogs($Layout,$Inventory) {
+    $copied=[Collections.Generic.List[object]]::new()
+    $collectionError=$Inventory.error
+    if($null -eq $collectionError) {
+        foreach($file in $Inventory.sourceLogBindings) {
+            try {$copied.Add((Publish-WRFailureLog $Layout $file))}
+            catch {$collectionError=New-WRCollectionError $file.path 'WR_FAILURE_LOG_COPY' $_.Exception;break}
+        }
+    }
+    return [ordered]@{copiedLogBindings=$copied.ToArray();collectionError=$collectionError}
+}
+function Assert-WRFailureCollection($Value) {
+    Assert-WRKeys $Value @('schemaVersion','state','primaryFailureBinding','expectedLogSetComplete',
+        'expectedLogPaths','copiedLogBindings','collectionError','automaticRetries')
+    if(($Value.schemaVersion -isnot [int] -and $Value.schemaVersion -isnot [long]) -or
+       ($Value.automaticRetries -isnot [int] -and $Value.automaticRetries -isnot [long])){throw 'WR_FAILURE_COLLECTION_SHAPE'}
+    if($Value.schemaVersion -ne 1 -or $Value.state -cnotin @('COMPLETE','PARTIAL') -or
+       $Value.expectedLogSetComplete -isnot [bool] -or $Value.expectedLogPaths -isnot [array] -or
+       $Value.copiedLogBindings -isnot [array] -or $Value.automaticRetries -ne 0){throw 'WR_FAILURE_COLLECTION_SHAPE'}
+    Assert-WRBinding $Value.primaryFailureBinding 'failure.json'
+    $expected=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($path in $Value.expectedLogPaths) {
+        if(-not $expected.Add($path)){throw 'WR_FAILURE_COLLECTION_PATHS'}
+        Assert-WRFailureLogPath $path
+    }
+    Assert-WRSame (Get-OrdinalStrings ([string[]]$Value.expectedLogPaths)) $Value.expectedLogPaths 'WR_FAILURE_COLLECTION_PATHS'
+    $copied=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $copiedPaths=@(foreach($binding in $Value.copiedLogBindings) {
+        Assert-WRBinding $binding;Assert-WRFailureLogPath $binding.path
+        if(-not $copied.Add($binding.path) -or $binding.path -cnotin $Value.expectedLogPaths){throw 'WR_FAILURE_COLLECTION_PATHS'}
+        $binding.path
+    })
+    Assert-WRSame (Get-OrdinalStrings ([string[]]$copiedPaths)) $copiedPaths 'WR_FAILURE_COLLECTION_PATHS'
+    if($Value.state -ceq 'COMPLETE') {
+        if(-not $Value.expectedLogSetComplete -or $null -ne $Value.collectionError){throw 'WR_FAILURE_COLLECTION_STATE'}
+        Assert-WRSame $Value.expectedLogPaths $copiedPaths 'WR_FAILURE_COLLECTION_STATE'
+    } else {
+        Assert-WRKeys $Value.collectionError @('path','code','message')
+        if($Value.collectionError.path -cne 'native'){Assert-WRFailureLogPath $Value.collectionError.path}
+        if($Value.collectionError.code -cnotin @('WR_FAILURE_LOG_READ','WR_FAILURE_LOG_COPY') -or
+           $Value.collectionError.message -cnotmatch '^[A-Za-z0-9_.]+ HRESULT=0x[0-9A-F]{8}$'){throw 'WR_FAILURE_COLLECTION_ERROR'}
+    }
+}
+function Read-WRFailureCollection($Context) {
+    try {
+        $layout=Get-WRFailureLayout $Context
+        $start=(Read-BasicBoundJson $layout.start).value
+        Assert-WRKeys $start @('schemaVersion','state','startedAtUtc')
+        if(($start.schemaVersion -isnot [int] -and $start.schemaVersion -isnot [long]) -or $start.startedAtUtc -isnot [string]){throw 'WR_FAILURE_COLLECTION_START'}
+        if($start.schemaVersion -ne 1 -or $start.state -cne 'STARTED' -or
+           [DateTimeOffset]::ParseExact($start.startedAtUtc,'o',[Globalization.CultureInfo]::InvariantCulture).Offset -ne [TimeSpan]::Zero){throw 'WR_FAILURE_COLLECTION_START'}
+        $terminal=Read-BasicBoundJson $layout.terminal
+        $value=$terminal.value;Assert-WRFailureCollection $value
+        $primary=Read-BasicBoundJson $layout.primary $value.primaryFailureBinding.sha256 $value.primaryFailureBinding.size
+        Assert-WRKeys $primary.value @('schemaVersion','state','stage','failure','automaticRetries','generationStatus','signingStatus')
+        if($primary.value.schemaVersion -ne 1 -or $primary.value.state -cne 'FAILED_RESOURCE_PRODUCTION' -or
+           $primary.value.automaticRetries -ne 0 -or $primary.value.generationStatus -cne 'PAUSED_RUNTIME_DISABLED' -or
+           $primary.value.signingStatus -cne 'UNSIGNED_TEST_ONLY'){throw 'WR_FAILURE_PRIMARY'}
+        $wanted=@('failure.json','failure-collection.json')+@($value.copiedLogBindings|ForEach-Object path)
+        Assert-WRSame (Get-OrdinalStrings ([string[]]$wanted)) (Get-TreeFilePaths $layout.root) 'WR_FAILURE_UPLOAD_SET'
+        foreach($binding in $value.copiedLogBindings) {
+            Assert-WRSame $binding (Get-WRRelativeBinding $layout.root $binding.path) 'WR_FAILURE_LOG_DRIFT'
+        }
+        Assert-WRCurrentBinding $primary.binding
+        Assert-WRCurrentBinding $terminal.binding
+        return [ordered]@{primaryBinding=$primary.binding;collectionBinding=$terminal.binding
+            value=$value;directory=$layout.root}
+    } catch {throw 'WR_FAILURE_COLLECTION_UNCONFIRMED'}
+}
+function New-WRFailureReceipt($Context,[string]$Code) {
+    $layout=Get-WRFailureLayout $Context
+    if(Test-WRFailureEvidence $layout){return (Read-WRFailureCollection $Context).primaryBinding}
+    $phase='START'
+    try {
+        Write-NewJson $layout.start ([ordered]@{schemaVersion=1;state='STARTED';startedAtUtc=[DateTimeOffset]::UtcNow.ToString('o')})
+        $phase='PRIMARY'
+        [void](New-SafeDirectory $layout.root)
+        [void](New-SafeDirectory $layout.work)
+        Write-NewJson $layout.primary ([ordered]@{schemaVersion=1;state='FAILED_RESOURCE_PRODUCTION'
+            stage=$Context.activeStage;failure=$Code;automaticRetries=0
+            generationStatus='PAUSED_RUNTIME_DISABLED';signingStatus='UNSIGNED_TEST_ONLY'})
+        $primary=Get-WRRelativeBinding $layout.root 'failure.json'
+        $phase='COLLECTION'
+        $inventory=Get-WRFailureInventory $layout.execution
+        $transfer=Copy-WRFailureLogs $layout $inventory
+        $state=if($inventory.expectedLogSetComplete -and $null -eq $transfer.collectionError){'COMPLETE'}else{'PARTIAL'}
+        $value=[ordered]@{schemaVersion=1;state=$state;primaryFailureBinding=$primary
+            expectedLogSetComplete=$inventory.expectedLogSetComplete
+            expectedLogPaths=$inventory.expectedLogPaths;copiedLogBindings=$transfer.copiedLogBindings
+            collectionError=$transfer.collectionError;automaticRetries=0}
+        Assert-WRFailureCollection $value
+        $phase='TERMINAL'
+        Write-NewJson $layout.terminal $value
+        return (Read-WRFailureCollection $Context).primaryBinding
+    } catch {
+        $base=$_.Exception.GetBaseException()
+        throw ('WR_FAILURE_COLLECTION_UNCONFIRMED '+$phase+' '+$base.GetType().FullName+' HRESULT=0x'+$base.HResult.ToString('X8'))
+    }
 }
 function Invoke-WindowsResourceStage([string]$Stage,[string]$ExpectedCommit) {
     Assert-WRStageName $Stage
     $ErrorActionPreference='Stop'
     $context=New-WRContext $ExpectedCommit
     if($Stage -ceq 'FailureReceipt'){
-        $directory=Join-Path $context.executionRoot 'failure'
-        if(-not (Test-Path -LiteralPath (Join-Path $directory 'failure.json'))){
-            # Action/setup/upload failure outside a Stage has no native exit to invent.
+        $layout=Get-WRFailureLayout $context
+        if(-not (Test-WRFailureEvidence $layout)) {
             $preflight=Join-Path $context.executionRoot 'stages/00-Preflight.json'
             if(-not (Test-Path -LiteralPath $preflight)){throw 'WR_FAILURE_RECEIPT_UNAVAILABLE'}
             $context.activeStage='ExternalWorkflowStep'
             [void](New-WRFailureReceipt $context 'EXTERNAL_WORKFLOW_STEP_FAILED_DETAILS_IN_ACTION_LOG')
         }
-        Write-WROutput 'failure_directory' $directory
-        return Get-BasicBinding (Join-Path $directory 'failure.json')
+        $verified=Read-WRFailureCollection $context
+        Write-WROutput 'failure_directory' $verified.directory
+        return $verified.primaryBinding
     }
-    if(Test-Path -LiteralPath (Join-Path $context.executionRoot 'failure')){throw 'WR_FIRST_FAILURE_STOP'}
-    if($Stage -cne 'Preflight'){$context=Read-WRStageContext $context $Stage $ExpectedCommit}
-    $script:WRActiveContext=$context
+    $context.activeStage=$Stage
+    if($Stage -cne 'Preflight' -and
+       (Test-WRFailureEvidence (Get-WRFailureLayout $context))){throw 'WR_FIRST_FAILURE_STOP'}
     try {
+        if($Stage -cne 'Preflight'){$context=Read-WRStageContext $context $Stage $ExpectedCommit}
+        $script:WRActiveContext=$context
         if($Stage -ceq 'Preflight'){Initialize-WRPreflight $context $ExpectedCommit}
         else {
             Assert-WRInputSnapshot $context
@@ -501,8 +704,14 @@ function Invoke-WindowsResourceStage([string]$Stage,[string]$ExpectedCommit) {
         Write-WRStageReceipt $context $Stage
         if($Stage -ceq 'PackageResources'){return $packageResult}
     } catch {
-        $firstCause=$_.Exception.Message
-        try {[void](New-WRFailureReceipt $context $firstCause)}catch{throw ('WR_STAGE_FAILED '+$firstCause+' | failure receipt: '+$_.Exception.Message)}
+        $trackingForRedaction=[Environment]::GetEnvironmentVariable('RUNNER_TRACKING_ID')
+        $tokenForRedaction=[Environment]::GetEnvironmentVariable('WR_READ_TOKEN')
+        $firstCause=Protect-WRRecordedText $_.Exception.Message $trackingForRedaction $tokenForRedaction
+        try {[void](New-WRFailureReceipt $context $firstCause)}
+        catch {
+            $receiptFailure=Protect-WRRecordedText $_.Exception.Message $trackingForRedaction $tokenForRedaction
+            throw ('WR_STAGE_FAILED '+$firstCause+' | failure receipt: '+$receiptFailure)
+        }
         throw ('WR_STAGE_FAILED '+$firstCause)
     } finally {$script:WRActiveContext=$null}
 }

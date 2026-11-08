@@ -42,6 +42,17 @@ function New-WRModelFixture {
     $artifacts=[ordered]@{complete=$true;total_count=2;items=$items;origin=$origin;files=@($originBinding,$archive,$manifestBinding,$inventory)}
     return [ordered]@{observed=$observed;manifest=$manifest;expected=[ordered]@{source=$source;execution=$execution;upstream=$upstream;inputs=@($inputBinding);tools=$tools;policyBinding=$policy};coordinate=$coordinate;approval=$approval;run=$run;artifacts=$artifacts}
 }
+function New-WRCollectionFixture([string]$RecordDirectory,[string]$Name) {
+    Assert-PortableRelativePath $Name
+    if($Name.Contains('/')){throw 'WR_MODEL_FIXTURE_NAME'}
+    $root=Join-Path $RecordDirectory $Name
+    if(Test-Path -LiteralPath $root){throw 'WR_MODEL_FIXTURE_EXISTS'}
+    [void](New-SafeDirectory (Join-Path $root 'native/metadata-Head-0'))
+    foreach($leaf in @('command.json','raw-output.json','raw-exit.json')) {
+        Write-NewUtf8File (Join-Path $root ('native/metadata-Head-0/'+$leaf)) '{}'
+    }
+    return [ordered]@{executionRoot=$root;activeStage='VerifyChecks'}
+}
 function Invoke-WindowsResourceModels([string]$RecordDirectory) {
     . (Join-Path $PSScriptRoot 'windows-resource-contract.ps1')
     . (Join-Path $PSScriptRoot 'windows-resource-package.ps1')
@@ -84,12 +95,83 @@ function Invoke-WindowsResourceModels([string]$RecordDirectory) {
         }
         flow=[ordered]@{
             'unknown stage and id'={Assert-WRModelError {Assert-WRStageName 'BuildApplication'} 'WR_STAGE';Assert-WRModelError {Get-WindowsResourceStep 'arbitrary' @{}} 'WR_STEP'}
-            'argument injection'={Assert-WRModelError {Assert-WindowsResourceInvocation $fixture.observed ('a'*40+'; calc')} 'WR_INVOCATION';Assert-WRModelError {Get-WindowsResourceStep 'CMake --evil' @{}} 'WR_STEP'}
+            'argument injection'={Assert-WRModelError {Assert-WindowsResourceInvocation $fixture.observed ('a'*40+'; calc')} 'WR_INVOCATION';Assert-WRModelError {Get-WindowsResourceStep 'CMake --evil' @{}} 'WR_STEP'
+                $marker='github_model-only-marker'
+                Assert-WRRunnerTrackingId $marker
+                foreach($badMarker in @('', ' ', ('x'*257), ('x'+[char]10), ('x'+[char]0))) {
+                    Assert-WRModelError {Assert-WRRunnerTrackingId $badMarker} 'WR_RUNNER_TRACKING_ID'
+                }
+                $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($marker))
+                $text=Protect-WRRecordedText ('echo '+$marker+' '+$encoded+' model-token') $marker 'model-token'
+                foreach($forbidden in @($marker,$encoded,'model-token')) {
+                    if($text.Contains($forbidden)){throw 'WR_MODEL_MARKER_LEAK'}
+                }
+                $description=[ordered]@{
+                    id='WorkflowTests';toolBinding=[ordered]@{path='C:/model/node.txt';size=1;sha256=('c'*64)}
+                    arguments=@('--test');workdir='C:/model';safeEnvironment=[ordered]@{CI='true'}
+                    timeoutSeconds=120;passReadToken=$false
+                }
+                $record=New-WRCommandRecord $description 120 $true
+                if(-not $record.runnerTrackingConfigured -or
+                   ($record|ConvertTo-Json -Depth 20 -Compress).Contains($marker)){throw 'WR_MODEL_COMMAND_MARKER'}
+                Assert-WRModelError {New-WRCommandRecord $description 120 $false} 'WR_RUNNER_TRACKING_ID'
+            }
             'first failure halts later work'={Assert-WRModelError {Assert-WRNextStage @('Preflight','FAILED') 'VerifyChecks'} 'WR_ORDER'}
             'timeout and cancellation'={foreach($field in @('timedOut','cancelled')){$value=New-WRCompletionFixture;$value[$field]=$true;Assert-WRModelError {Assert-WRNativeCompletion $value} 'WR_NATIVE'}}
             'exit captured before disposal'={$value=New-WRCompletionFixture;$value.capturedBeforeDispose=$false;Assert-WRModelError {Assert-WRNativeCompletion $value} 'WR_NATIVE';$value=New-WRCompletionFixture;$value.rawExit=$null;Assert-WRModelError {Assert-WRNativeCompletion $value} 'WR_NATIVE'}
-            'incomplete output'={$value=New-WRCompletionFixture;$value.outputComplete=$false;Assert-WRModelError {Assert-WRNativeCompletion $value} 'WR_NATIVE'}
-            'first cause and cleanup failure'={$value=New-WRCompletionFixture;$value.firstFailure='first';$value.cleanupFailure='cleanup';$value.rawExit=1;try{Assert-WRNativeCompletion $value;throw 'WR_MODEL_NO_ERROR'}catch{if($_.Exception.Message -cne 'WR_NATIVE first | cleanup: cleanup'){throw}}}
+            'incomplete output'={$value=New-WRCompletionFixture;$value.outputComplete=$false;Assert-WRModelError {Assert-WRNativeCompletion $value} 'WR_NATIVE'
+                $context=New-WRCollectionFixture $RecordDirectory 'collection-unconfirmed'
+                $layout=Get-WRFailureLayout $context
+                Write-NewJson $layout.start ([ordered]@{schemaVersion=1;state='STARTED';startedAtUtc=[DateTimeOffset]::UtcNow.ToString('o')})
+                Assert-WRModelError {Read-WRFailureCollection $context} 'WR_FAILURE_COLLECTION_UNCONFIRMED'
+                Assert-WRModelError {New-WRFailureReceipt $context 'must-not-retry'} 'WR_FAILURE_COLLECTION_UNCONFIRMED'
+                $missing=New-WRCollectionFixture $RecordDirectory 'collection-missing'
+                [IO.File]::Delete((Join-Path $missing.executionRoot 'native/metadata-Head-0/raw-exit.json'))
+                [void](New-WRFailureReceipt $missing 'model-missing')
+                $partial=Read-WRFailureCollection $missing
+                if($partial.value.state -cne 'PARTIAL' -or $null -eq $partial.value.collectionError){throw 'WR_MODEL_MISSING_LOG'}
+                [IO.File]::WriteAllText((Get-WRFailureLayout $missing).terminal,'{')
+                Assert-WRModelError {Read-WRFailureCollection $missing} 'WR_FAILURE_COLLECTION_UNCONFIRMED'
+            }
+            'first cause and cleanup failure'={$value=New-WRCompletionFixture;$value.firstFailure='first';$value.cleanupFailure='cleanup';$value.rawExit=1;try{Assert-WRNativeCompletion $value;throw 'WR_MODEL_NO_ERROR'}catch{if($_.Exception.Message -cne 'WR_NATIVE first | cleanup: cleanup'){throw}}
+                $context=New-WRCollectionFixture $RecordDirectory 'collection-complete'
+                $first=New-WRFailureReceipt $context 'model-first'
+                $observed=Read-WRFailureCollection $context
+                if($observed.value.state -cne 'COMPLETE' -or $observed.value.copiedLogBindings.Count -ne 3){throw 'WR_MODEL_COLLECTION_COMPLETE'}
+                $primary=(Read-BasicBoundJson $first.path).value
+                if($primary.failure -cne 'model-first'){throw 'WR_MODEL_PRIMARY_CAUSE'}
+                $invalid=Copy-WRModel $observed.value
+                $invalid.unknown=1
+                Assert-WRModelError {Assert-WRFailureCollection $invalid} 'WR_KEYS'
+                $invalid=Copy-WRModel $observed.value
+                $invalid.expectedLogPaths+=@($invalid.expectedLogPaths[0].ToUpperInvariant())
+                Assert-WRModelError {Assert-WRFailureCollection $invalid} 'WR_FAILURE_COLLECTION_PATHS'
+                $invalid=Copy-WRModel $observed.value
+                $invalid.copiedLogBindings=@($invalid.copiedLogBindings[0])
+                Assert-WRModelError {Assert-WRFailureCollection $invalid} 'WR_FAILURE_COLLECTION_STATE'
+                $invalid=Copy-WRModel $observed.value
+                $invalid.primaryFailureBinding.path='other.json'
+                Assert-WRModelError {Assert-WRFailureCollection $invalid} 'WR_BINDING'
+                $invalid=Copy-WRModel $observed.value
+                $invalid.schemaVersion='1'
+                Assert-WRModelError {Assert-WRFailureCollection $invalid} 'WR_FAILURE_COLLECTION_SHAPE'
+                # 修改源日志而不修改已收集副本：重入必须只核对原终态，不能重新复制。
+                [IO.File]::WriteAllText((Join-Path $context.executionRoot 'native/metadata-Head-0/command.json'),'changed')
+                $second=New-WRFailureReceipt $context 'replacement-must-not-win'
+                Assert-WRSame $first $second 'WR_MODEL_PRIMARY_REPLACED'
+
+                $partialContext=New-WRCollectionFixture $RecordDirectory 'collection-transfer'
+                $layout=Get-WRFailureLayout $partialContext
+                $inventory=Get-WRFailureInventory $partialContext.executionRoot
+                [void](New-SafeDirectory $layout.root)
+                [void](New-SafeDirectory $layout.work)
+                $drift=$inventory.sourceLogBindings[1]
+                # 先固定清单、后改第二个源文件，定点产生摘要漂移，不引入复制回调。
+                [IO.File]::WriteAllText((Join-Path $partialContext.executionRoot $drift.path),'changed')
+                $transfer=Copy-WRFailureLogs $layout $inventory
+                if($transfer.copiedLogBindings.Count -ne 1 -or $null -eq $transfer.collectionError){throw 'WR_MODEL_COLLECTION_PARTIAL'}
+                if((Get-TreeFilePaths $layout.root).Count -ne 1){throw 'WR_MODEL_HALF_FILE_UPLOADED'}
+            }
             'new input never becomes legacy'={$value=ConvertTo-PortableWindowsResourceInput $fixture.coordinate $fixture.approval $fixture.manifest.files;if($value.kind -cne 'WINDOWS_RESOURCE_SET_V1' -or $value.fileBindings[0].Contains('role')){throw 'WR_MODEL_ADAPTER'};$coordinate=Copy-WRModel $fixture.coordinate;$coordinate.kind='legacyFoundation';Assert-WRModelError {ConvertTo-PortableWindowsResourceInput $coordinate $fixture.approval $fixture.manifest.files} 'WR_COORDINATE'}
         }
     }
