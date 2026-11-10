@@ -12,13 +12,249 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'windows-inputs-read' || format('windows-inputs-no-private-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
+  windows-inputs-identity:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-2022
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      receipt_base64: ${{ steps.identity.outputs.receipt_base64 }}
+      receipt_sha256: ${{ steps.identity.outputs.receipt_sha256 }}
+      artifact_id: ${{ steps.identity-upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.identity-upload.outputs.artifact-digest }}
+    steps:
+      - name: Record Windows input approval identity
+        id: identity
+        shell: pwsh
+        env:
+          WI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WI_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          WI_EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
+          WI_IDENTITY_METADATA_TOKEN: ${{ github.token }}
+        run: &wi_identity_script |
+          # WI_IDENTITY_CORE_BEGIN
+          function Get-WIIdentityHash([byte[]]$Bytes) {
+              $h=[Security.Cryptography.SHA256]::Create()
+              try { return [Convert]::ToHexString($h.ComputeHash($Bytes)).ToLowerInvariant() }
+              finally { $h.Dispose() }
+          }
+          function Get-WIIdentityBatch([Collections.IDictionary]$L) {
+              if($L.repository -cne 'colayc/unitTest' -or $L.repositoryId -cne '1307775492' -or
+                 $L.runnerEnvironment -cne 'github-hosted' -or $L.runnerOS -cne 'Windows'){throw 'WI_ID_ROUTE'}
+              foreach($k in @('repositoryId','runId','runAttempt')){
+                  if($L[$k] -isnot [string] -or $L[$k] -cnotmatch '^[1-9][0-9]*$'){throw 'WI_ID_ROUTE'}
+              }
+              foreach($k in @('workflowSha','triggerSha')){
+                  if($L[$k] -isnot [string] -or $L[$k] -cnotmatch '^[0-9a-f]{40}$'){throw 'WI_ID_ROUTE'}
+              }
+              $wf=$null
+              foreach($p in @('.github/workflows/foundation.yml','.github/workflows/windows-portable-resources.yml')){
+                  if($L.workflowRef -ceq ('colayc/unitTest/'+$p+'@'+$L.ref)){$wf=$p}
+              }
+              if($null -eq $wf){throw 'WI_ID_ROUTE'}
+              if($wf -ceq '.github/workflows/foundation.yml'){
+                  if($L.event -ceq 'pull_request'){
+                      if($L.ref -cne 'refs/pull/40/merge' -or $L.headRepository -cne 'colayc/unitTest' -or
+                         $L.headSha -isnot [string] -or $L.headSha -cnotmatch '^[0-9a-f]{40}$'){throw 'WI_ID_ROUTE'}
+                      $candidate=$L.headSha
+                      $jobs=@('verify-windows','verify-framework-windows')
+                      $routes=[ordered]@{'verify-windows'='windows-2025-vs2026';'verify-framework-windows'='windows-2022'}
+                  } elseif($L.event -ceq 'workflow_dispatch' -and $L.ref -ceq 'refs/heads/master'){
+                      $candidate=$L.triggerSha
+                      $jobs=@('verify-windows','verify-framework-windows','package-windows')
+                      $routes=[ordered]@{'verify-windows'='windows-2025-vs2026';'verify-framework-windows'='windows-2022';'package-windows'='windows-2025-vs2026'}
+                  } else {throw 'WI_ID_ROUTE'}
+              } else {
+                  if($L.event -cne 'workflow_dispatch' -or $L.ref -cne 'refs/heads/master' -or
+                     $L.expectedSourceCommit -isnot [string] -or $L.expectedSourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+                     $L.expectedSourceCommit -cne $L.triggerSha -or $L.expectedSourceCommit -cne $L.workflowSha){throw 'WI_ID_ROUTE'}
+                  $candidate=$L.expectedSourceCommit;$jobs=@('resources');$routes=[ordered]@{'resources'='windows-2022'}
+              }
+              return [ordered]@{workflowPath=$wf;candidate=$candidate;jobs=$jobs;routes=$routes}
+          }
+          function New-WIIdentity([Collections.IDictionary]$L,[long]$LockSize,[string]$LockSha) {
+              $b=Get-WIIdentityBatch $L
+              if($LockSize -ne 417 -or $LockSha -cne '4cfc73931b46693f738181f7479d910cc01a29f3f515d0d3dc0d053fcb1f1678'){throw 'WI_ID_LOCK'}
+              return [ordered]@{
+                  schemaVersion=[long]1;kind='WINDOWS_INPUT_APPROVAL_IDENTITY_V1'
+                  repository=$L.repository;repositoryId=$L.repositoryId;event=$L.event;ref=$L.ref;isFork=$false
+                  runId=$L.runId;runAttempt=$L.runAttempt;workflowPath=$b.workflowPath
+                  workflowRef=$L.workflowRef;workflowSha=$L.workflowSha;expectedCheckoutSha=$b.candidate
+                  sourceLockPath='tools/release/producer/windows-input-source.json';sourceLockSize=[long]$LockSize;sourceLockSha256=$LockSha
+                  environmentName='windows-inputs-read';allowedConsumerJobKeys=@($b.jobs);declaredHostedRunnerRoute=$b.routes
+              }
+          }
+          function Assert-WIIdentityJsonNames([System.Text.Json.JsonElement]$Element) {
+              if($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object){
+                  $names=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                  foreach($p in $Element.EnumerateObject()){
+                      if(-not $names.Add($p.Name)){throw 'WI_ID_SCHEMA'}
+                      Assert-WIIdentityJsonNames $p.Value
+                  }
+              } elseif($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array){
+                  foreach($v in $Element.EnumerateArray()){Assert-WIIdentityJsonNames $v}
+              }
+          }
+          function Read-WIIdentityJson([string]$Text) {
+              $doc=$null
+              try {
+                  if([Text.Encoding]::UTF8.GetByteCount($Text) -gt 8192){throw 'WI_ID_SCHEMA'}
+                  $doc=[System.Text.Json.JsonDocument]::Parse([string]$Text)
+                  if($doc.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){throw 'WI_ID_SCHEMA'}
+                  Assert-WIIdentityJsonNames $doc.RootElement
+                  return ConvertFrom-Json -AsHashtable -Depth 16 $Text
+              } catch {throw 'WI_ID_SCHEMA'}
+              finally {if($null -ne $doc){$doc.Dispose()}}
+          }
+          function Assert-WIIdentitySet($Actual,[string[]]$Expected) {
+              if($Actual -isnot [array]){throw 'WI_ID_SCHEMA'}
+              $set=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              foreach($s in $Actual){
+                  if($s -isnot [string] -or -not $set.Add($s)){throw 'WI_ID_SCHEMA'}
+              }
+              if($set.Count -ne $Expected.Count){throw 'WI_ID_BINDING'}
+              foreach($s in $Expected){if(-not $set.Contains($s)){throw 'WI_ID_BINDING'}}
+          }
+          function Assert-WIIdentity([Collections.IDictionary]$R,[Collections.IDictionary]$L,[string]$Job) {
+              $e=New-WIIdentity $L 417 '4cfc73931b46693f738181f7479d910cc01a29f3f515d0d3dc0d053fcb1f1678'
+              if($R.Count -ne $e.Count){throw 'WI_ID_SCHEMA'}
+              foreach($k in @($R.Keys)){if($k -cnotin @($e.Keys)){throw 'WI_ID_SCHEMA'}}
+              foreach($k in @($e.Keys)){
+                  if($k -cin @('allowedConsumerJobKeys','declaredHostedRunnerRoute')){continue}
+                  $v=$R[$k];$expected=$e[$k]
+                  if($k -cin @('schemaVersion','sourceLockSize')){
+                      if(($v -isnot [long] -and $v -isnot [int]) -or [long]$v -ne [long]$expected){throw 'WI_ID_BINDING'}
+                  } elseif($k -ceq 'isFork'){
+                      if($v -isnot [bool] -or $v -ne $false){throw 'WI_ID_BINDING'}
+                  } else {
+                      if($v -isnot [string] -or $v -cne $expected){throw 'WI_ID_BINDING'}
+                  }
+              }
+              Assert-WIIdentitySet $R.allowedConsumerJobKeys @($e.allowedConsumerJobKeys)
+              if($R.declaredHostedRunnerRoute -isnot [Collections.IDictionary]){throw 'WI_ID_SCHEMA'}
+              Assert-WIIdentitySet @($R.declaredHostedRunnerRoute.Keys) @($e.declaredHostedRunnerRoute.Keys)
+              foreach($k in @($e.declaredHostedRunnerRoute.Keys)){
+                  if($R.declaredHostedRunnerRoute[$k] -isnot [string] -or $R.declaredHostedRunnerRoute[$k] -cne $e.declaredHostedRunnerRoute[$k]){throw 'WI_ID_BINDING'}
+              }
+              if($Job -cnotin @($e.allowedConsumerJobKeys)){throw 'WI_ID_JOB'}
+          }
+          # WI_IDENTITY_CORE_END
+          function Get-WIIdentityLive {
+              return [ordered]@{
+                  repository=$env:GITHUB_REPOSITORY;repositoryId=$env:GITHUB_REPOSITORY_ID
+                  event=$env:GITHUB_EVENT_NAME;ref=$env:GITHUB_REF;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT
+                  workflowRef=$env:GITHUB_WORKFLOW_REF;workflowSha=$env:GITHUB_WORKFLOW_SHA;triggerSha=$env:GITHUB_SHA
+                  headSha=$env:WI_PR_HEAD_SHA;headRepository=$env:WI_PR_HEAD_REPOSITORY;expectedSourceCommit=$env:WI_EXPECTED_SOURCE_COMMIT
+                  runnerEnvironment=$env:RUNNER_ENVIRONMENT;runnerOS=$env:RUNNER_OS
+              }
+          }
+          function Read-WIIdentityPublicLock([string]$Candidate) {
+              $handler=[Net.Http.HttpClientHandler]::new();$handler.AllowAutoRedirect=$false
+              $client=[Net.Http.HttpClient]::new($handler);$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(30))
+              $response=$null;$stream=$null;$memory=[IO.MemoryStream]::new()
+              try {
+                  $client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
+                  $client.DefaultRequestHeaders.UserAgent.ParseAdd('unitTest-windows-input-identity/1')
+                  $client.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github.raw+json')
+                  $token=$env:WI_IDENTITY_METADATA_TOKEN
+                  if([string]::IsNullOrWhiteSpace($token)){throw 'WI_ID_LOCK_FETCH'}
+                  $client.DefaultRequestHeaders.Authorization=[Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$token)
+                  $uri=[Uri]::new('https://api.github.com/repos/colayc/unitTest/contents/tools/release/producer/windows-input-source.json?ref='+$Candidate)
+                  $response=$client.GetAsync($uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cts.Token).GetAwaiter().GetResult()
+                  if([int]$response.StatusCode -ne 200){throw 'WI_ID_LOCK_FETCH'}
+                  if($null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -ne 417){throw 'WI_ID_LOCK_FETCH'}
+                  $stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                  $buffer=[byte[]]::new(418);[long]$size=0
+                  while(($count=$stream.ReadAsync($buffer,0,$buffer.Length,$cts.Token).GetAwaiter().GetResult()) -gt 0){
+                      $size+=$count;if($size -gt 417){throw 'WI_ID_LOCK_FETCH'};$memory.Write($buffer,0,$count)
+                  }
+                  if($size -ne 417){throw 'WI_ID_LOCK_FETCH'}
+                  return ,$memory.ToArray()
+              } catch {throw 'WI_ID_LOCK_FETCH'}
+              finally {
+                  $token=$null;[Environment]::SetEnvironmentVariable('WI_IDENTITY_METADATA_TOKEN',$null,'Process')
+                  $client.DefaultRequestHeaders.Authorization=$null
+                  if($null -ne $stream){$stream.Dispose()};if($null -ne $response){$response.Dispose()}
+                  $memory.Dispose();$cts.Dispose();$client.Dispose();$handler.Dispose()
+              }
+          }
+          # WI_IDENTITY_ENTRY_BEGIN
+          $ErrorActionPreference='Stop'
+          if(-not [string]::IsNullOrEmpty($env:WI_INPUT_READ_TOKEN)){throw 'WI_ID_EARLY_CREDENTIAL'}
+          $live=Get-WIIdentityLive
+          if($env:GITHUB_JOB -ceq 'windows-inputs-identity'){
+              $batch=Get-WIIdentityBatch $live
+              [byte[]]$lock=Read-WIIdentityPublicLock $batch.candidate
+              $r=New-WIIdentity $live $lock.Length (Get-WIIdentityHash $lock)
+              $json=$r|ConvertTo-Json -Depth 8 -Compress
+              $bytes=[Text.Encoding]::UTF8.GetBytes($json)
+              if($bytes.Length -gt 8192){throw 'WI_ID_SCHEMA'}
+              $dir=Join-Path $env:RUNNER_TEMP ('windows-inputs-identity-'+$live.runId+'-'+$live.runAttempt)
+              if(Test-Path -LiteralPath $dir){throw 'WI_ID_OUTPUT_EXISTS'}
+              [void][IO.Directory]::CreateDirectory($dir)
+              $file=[IO.FileStream]::new((Join-Path $dir 'identity.json'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              try {$file.Write($bytes,0,$bytes.Length);$file.Flush($true)}finally{$file.Dispose()}
+              $sha=Get-WIIdentityHash $bytes;$lf=[string][char]10
+              [IO.File]::AppendAllText($env:GITHUB_OUTPUT,'receipt_base64='+[Convert]::ToBase64String($bytes)+$lf+'receipt_sha256='+$sha+$lf,[Text.UTF8Encoding]::new($false))
+              $f=[string][char]96+[char]96+[char]96
+              [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY,'# Windows input approval identity'+$lf+$lf+'Receipt SHA-256: '+$sha+$lf+$lf+$f+'json'+$lf+$json+$lf+$f+$lf,[Text.UTF8Encoding]::new($false))
+          } else {
+              if($env:WI_IDENTITY_JOB_RESULT -cne 'success'){throw 'WI_ID_UPSTREAM'}
+              if($env:WI_IDENTITY_RECEIPT -cnotmatch '^[A-Za-z0-9+/=]{1,10924}$' -or
+                 $env:WI_IDENTITY_RECEIPT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                 $env:WI_IDENTITY_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or
+                 $env:WI_IDENTITY_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$'){throw 'WI_ID_OUTPUTS'}
+              try {$bytes=[Convert]::FromBase64String($env:WI_IDENTITY_RECEIPT)}catch{throw 'WI_ID_SCHEMA'}
+              if($bytes.Length -gt 8192 -or (Get-WIIdentityHash $bytes) -cne $env:WI_IDENTITY_RECEIPT_SHA256){throw 'WI_ID_BINDING'}
+              $json=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+              $r=Read-WIIdentityJson $json
+              Assert-WIIdentity $r $live $env:GITHUB_JOB
+              $head=@(& git --no-optional-locks -C $env:GITHUB_WORKSPACE rev-parse HEAD 2>$null)
+              if($LASTEXITCODE -ne 0 -or ($head -join '').Trim() -cne $r.expectedCheckoutSha){throw 'WI_ID_SOURCE'}
+              $dirty=@(& git --no-optional-locks -C $env:GITHUB_WORKSPACE status --porcelain=v1 --untracked-files=all 2>$null)
+              if($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrWhiteSpace(($dirty -join ''))){throw 'WI_ID_SOURCE'}
+              # Source is the independently reviewed, clean H before loading the existing source-proof functions.
+              . (Join-Path $env:GITHUB_WORKSPACE 'tools/release/producer/windows-input-import.ps1')
+              $proof=Get-WIHostedObservation $env:GITHUB_WORKSPACE
+              if($proof.bindings.Count -ne 58 -or $proof.observed.candidateSha -cne $r.expectedCheckoutSha -or
+                 $proof.observed.workflowSha -cne $r.workflowSha){throw 'WI_ID_SOURCE'}
+              $lockPath=Assert-LocalPath $env:GITHUB_WORKSPACE 'tools/release/producer/windows-input-source.json' $false
+              $binding=Get-BasicBinding $lockPath
+              if($binding.size -ne $r.sourceLockSize -or $binding.sha256 -cne $r.sourceLockSha256){throw 'WI_ID_LOCK'}
+              Assert-WIHostedSourceProof $env:GITHUB_WORKSPACE $proof.bindings
+          }
+          # WI_IDENTITY_ENTRY_END
+      - name: Retain Windows input approval identity
+        id: identity-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-inputs-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-inputs-identity-${{ github.run_id }}-${{ github.run_attempt }}/identity.json
+          retention-days: 7
+          if-no-files-found: error
+
   resources:
+    needs: windows-inputs-identity
+    if: ${{ !cancelled() }}
     runs-on: windows-2022
     timeout-minutes: 120
+    environment: windows-inputs-read
     env:
       WR_EXPECTED_COMMIT: ${{ inputs.expected_source_commit }}
     steps:
+      - name: Reject failed or missing Windows input identity
+        shell: pwsh
+        env:
+          WI_IDENTITY_JOB_RESULT: ${{ needs.windows-inputs-identity.result }}
+        run: |
+          if ($env:WI_IDENTITY_JOB_RESULT -cne 'success') { throw 'WI_ID_UPSTREAM' }
       - name: Checkout expected committed source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         env:
@@ -31,8 +267,31 @@ jobs:
           ref: ${{ inputs.expected_source_commit }}
           persist-credentials: false
           fetch-depth: 1
+      - name: Verify Windows input identity before credential step
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          WI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WI_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          WI_EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
+          WI_CANDIDATE_SHA: ${{ inputs.expected_source_commit }}
+          WI_HOSTED_WINDOWS: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' }}
+          WI_IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          WI_IDENTITY_JOB_RESULT: ${{ needs.windows-inputs-identity.result }}
+          WI_IDENTITY_RECEIPT: ${{ needs.windows-inputs-identity.outputs.receipt_base64 }}
+          WI_IDENTITY_RECEIPT_SHA256: ${{ needs.windows-inputs-identity.outputs.receipt_sha256 }}
+          WI_IDENTITY_ARTIFACT_ID: ${{ needs.windows-inputs-identity.outputs.artifact_id }}
+          WI_IDENTITY_ARTIFACT_DIGEST: ${{ needs.windows-inputs-identity.outputs.artifact_digest }}
+        run: *wi_identity_script
       - name: Source, retention and VS2022 Spectre preflight
         shell: pwsh
+        env:
+          WI_INPUT_READ_TOKEN: ${{ secrets.WINDOWS_INPUTS_READ_TOKEN }}
+          WI_APPROVED_CANDIDATE_SHA: ${{ vars.WINDOWS_INPUTS_APPROVED_CANDIDATE_SHA }}
+          WI_APPROVED_WORKFLOW_SHA: ${{ vars.WINDOWS_INPUTS_APPROVED_WORKFLOW_SHA }}
+          WI_CANDIDATE_SHA: ${{ inputs.expected_source_commit }}
+          WI_HOSTED_WINDOWS: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' }}
+          WI_IS_FORK: 'false'
         run: |
           $ErrorActionPreference='Stop'
           . ./tools/release/producer/windows-resource-build.ps1

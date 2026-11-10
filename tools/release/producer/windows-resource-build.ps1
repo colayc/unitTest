@@ -1,5 +1,6 @@
 . (Join-Path $PSScriptRoot 'windows-resource-contract.ps1')
 . (Join-Path $PSScriptRoot 'windows-resource-package.ps1')
+. (Join-Path $PSScriptRoot 'windows-input-import.ps1')
 
 function Get-WRStages {
     return ,@('Preflight','PrepareRepositoryDependencies','VerifyChecks','FetchSource','VerifySource','CodeOssDependencies','BuildRuntime','CheckRuntimeVersion','PrepareBundles','PackageResources','WriteOrigin')
@@ -24,7 +25,7 @@ function Assert-WRNativeCompletion($Result) {
     }
 }
 function Get-WRInputPaths {
-    # Exact Task 0 source closure plus the eight new producer files.
+    # Original 52 paths plus five private-input files and the original framework lock.
     return ,@(
         'package.json'
         'pnpm-lock.yaml'
@@ -78,6 +79,12 @@ function Get-WRInputPaths {
         'tools/release/producer/windows-resource-models.ps1'
         'tools/release/producer/windows-resource-workflow.test.mjs'
         'tools/release/producer/README.windows-resources.zh-CN.txt'
+        'tools/release/producer/windows-input-source.json'
+        'tools/release/producer/windows-input-contract.ps1'
+        'tools/release/producer/windows-input-pack.ps1'
+        'tools/release/producer/windows-input-import.ps1'
+        'tools/release/producer/windows-input-models.ps1'
+        'tools/framework-bundle/manifest.json'
     )
 }
 function Get-WRTool($Context,[string]$Role) {
@@ -378,6 +385,15 @@ function Initialize-WRPreflight($Context,[string]$ExpectedCommit) {
     $tar=(Get-Command tar.exe -CommandType Application -ErrorAction Stop).Source
     Add-WRTool $Context 'tar' $tar (Get-Item -LiteralPath $tar).VersionInfo.FileVersion
     Write-NewJson (Join-Path $Context.executionRoot 'retention-preflight.json') ([ordered]@{defaultDays=[long]$env:GITHUB_RETENTION_DAYS;requiredDays=7;repositorySettingProof='REQUIRED_BEFORE_DISPATCH';artifactActualLifetime='REQUIRED_BEFORE_APPROVAL'})
+    Assert-WRInputSnapshot $Context
+    # No new stage or native command: source verification and original budget precede HTTP.
+    $observedInput=[ordered]@{repository=$Context.source.repository;event=$Context.execution.event;
+        isFork=$false;isHostedWindows=($env:WI_HOSTED_WINDOWS -ceq 'true');
+        candidateSha=$Context.source.commit;workflowSha=$env:GITHUB_WORKFLOW_SHA;
+        approvedCandidateSha=$env:WI_APPROVED_CANDIDATE_SHA;approvedWorkflowSha=$env:WI_APPROVED_WORKFLOW_SHA}
+    $inputRoot=Join-Path $env:RUNNER_TEMP ('windows-inputs-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT+'-resources')
+    $transfer=Read-WITransfer $Context.sourceRoot $inputRoot $observedInput (Get-WRRemainingSeconds $Context 900)
+    $Context['privateInputs']=Import-WindowsInputSnapshot $Context.sourceRoot $transfer.snapshotRoot
     Assert-WRInputSnapshot $Context
 }
 function Read-WRStageContext($Fresh,[string]$Stage,[string]$ExpectedCommit) {
@@ -713,5 +729,8 @@ function Invoke-WindowsResourceStage([string]$Stage,[string]$ExpectedCommit) {
             throw ('WR_STAGE_FAILED '+$firstCause+' | failure receipt: '+$receiptFailure)
         }
         throw ('WR_STAGE_FAILED '+$firstCause)
-    } finally {$script:WRActiveContext=$null}
+    } finally {
+        [Environment]::SetEnvironmentVariable('WI_INPUT_READ_TOKEN',$null,'Process')
+        $script:WRActiveContext=$null
+    }
 }

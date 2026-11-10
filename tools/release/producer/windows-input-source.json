@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "kind": "LOCAL_VERIFIED_WINDOWS_TOOL_INPUTS_V1",
+  "repository": "colayc/unitTest-inputs",
+  "approvalState": "APPROVED",
+  "coordinate": {
+    "commit": "417e3f28e7ed2852ef3ca6503443c69bfeef6cc8",
+    "manifest": {
+      "path": "snapshots/windows-inputs-v1/manifest.json",
+      "size": 46255,
+      "sha256": "e035c900961888aac71b8bf6704ffcadf4ae95257c9bc54797d8788a6baea765"
+    }
+  }
+}
