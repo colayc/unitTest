@@ -1056,8 +1056,9 @@ test("foundation validates producer identity before downloading one exact proven
   const packageWindows = foundationJobBlock("package-windows");
   const packageLinux = foundationJobBlock("package-linux");
   const predicate = "${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}";
+  const windowsPredicate = "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && needs.verify-windows.result == 'success' && needs.verify-linux.result == 'success' && needs.verify-release-input-run.result == 'success' }}";
   assert.equal(directMappingValue(trust, 4, "if"), predicate);
-  assert.equal(directMappingValue(packageWindows, 4, "if"), predicate);
+  assert.equal(directMappingValue(packageWindows, 4, "if"), windowsPredicate);
   assert.equal(directMappingValue(packageLinux, 4, "if"), predicate);
 
   assert.deepEqual(jobOutputKeys(trust), [
@@ -1189,7 +1190,10 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
     }],
   ]) {
     const job = foundationJobBlock(name);
-    assert.deepEqual(directList(job, 4, "needs"), ["verify-windows", "verify-linux", "verify-release-input-run"]);
+    const expectedNeeds = name === "package-windows"
+      ? ["verify-windows", "verify-linux", "verify-release-input-run", "windows-inputs-identity"]
+      : ["verify-windows", "verify-linux", "verify-release-input-run"];
+    assert.deepEqual(directList(job, 4, "needs"), expectedNeeds);
     assert.doesNotMatch(job, rawCoordinates, `${name} must not read unvalidated coordinates`);
     for (const [key, value] of Object.entries(expectedEnv)) assert.equal(directMappingValue(job, 6, key), value);
 
