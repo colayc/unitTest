@@ -72,6 +72,212 @@ function workflowActionUses(workflow) {
     .map((match) => match[1]);
 }
 
+const FW_CREDENTIAL_HEADER = [
+  "  verify-framework-windows:",
+  "    needs: windows-inputs-identity",
+  "    if: ${{ !cancelled() }}",
+  "    runs-on: windows-2022",
+  "    timeout-minutes: 60",
+  "    environment:",
+  "      name: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'windows-inputs-read' || 'windows-inputs-no-access' }}",
+  "    env:",
+  "      WI_PRIVATE_INPUT_ROUTE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}",
+  "    steps:",
+  ""
+].join("\n");
+
+const FW_CREDENTIAL_STEPS = [
+  [
+    "      - name: Reject failed or missing Windows input identity",
+    "        if: ${{ env.WI_PRIVATE_INPUT_ROUTE == 'true' }}",
+    "        shell: pwsh",
+    "        env:",
+    "          WI_IDENTITY_JOB_RESULT: ${{ needs.windows-inputs-identity.result }}",
+    "        run: |",
+    "          if ($env:WI_IDENTITY_JOB_RESULT -cne 'success') { throw 'WI_ID_UPSTREAM' }",
+    ""
+  ].join("\n"),
+  [
+    "      - name: Reject unapproved fork input source",
+    "        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}",
+    "        shell: pwsh",
+    "        run: throw 'WI_FORK_UNAPPROVED'",
+    ""
+  ].join("\n"),
+  [
+    "      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+    "        env:",
+    "          GIT_CONFIG_COUNT: '2'",
+    "          GIT_CONFIG_KEY_0: 'core.autocrlf'",
+    "          GIT_CONFIG_VALUE_0: 'false'",
+    "          GIT_CONFIG_KEY_1: 'core.eol'",
+    "          GIT_CONFIG_VALUE_1: 'lf'",
+    "        with:",
+    "          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+    "          persist-credentials: false",
+    ""
+  ].join("\n"),
+  [
+    "      - name: Verify Windows input identity before credential step",
+    "        if: ${{ env.WI_PRIVATE_INPUT_ROUTE == 'true' }}",
+    "        shell: pwsh",
+    "        timeout-minutes: 5",
+    "        env: *wi_identity_guard_env",
+    "        run: *wi_identity_script",
+    "      # WI_PRIVATE_INPUT_ROUTE: prepare/check still run after complete import.",
+    ""
+  ].join("\n"),
+  [
+    "      - name: Import independently approved Windows input bytes",
+    "        if: ${{ env.WI_PRIVATE_INPUT_ROUTE == 'true' }}",
+    "        shell: pwsh",
+    "        env:",
+    "          WI_INPUT_READ_TOKEN: ${{ secrets.WINDOWS_INPUTS_READ_TOKEN }}",
+    "          WI_APPROVED_CANDIDATE_SHA: ${{ vars.WINDOWS_INPUTS_APPROVED_CANDIDATE_SHA }}",
+    "          WI_APPROVED_WORKFLOW_SHA: ${{ vars.WINDOWS_INPUTS_APPROVED_WORKFLOW_SHA }}",
+    "          WI_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+    "          WI_HOSTED_WINDOWS: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' }}",
+    "          WI_IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}",
+    "        run: |",
+    "          $ErrorActionPreference='Stop'",
+    "          . ./tools/release/producer/windows-input-import.ps1",
+    "          Invoke-WIHostedImport $env:GITHUB_WORKSPACE | ConvertTo-Json -Depth 10",
+    ""
+  ].join("\n")
+];
+
+const FW_CREDENTIAL_GUARD_ENV = [
+  "        env: &wi_identity_guard_env",
+  "          WI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+  "          WI_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}",
+  "          WI_EXPECTED_SOURCE_COMMIT: ''",
+  "          WI_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+  "          WI_HOSTED_WINDOWS: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' }}",
+  "          WI_IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}",
+  "          WI_IDENTITY_JOB_RESULT: ${{ needs.windows-inputs-identity.result }}",
+  "          WI_IDENTITY_RECEIPT: ${{ needs.windows-inputs-identity.outputs.receipt_base64 }}",
+  "          WI_IDENTITY_RECEIPT_SHA256: ${{ needs.windows-inputs-identity.outputs.receipt_sha256 }}",
+  "          WI_IDENTITY_ARTIFACT_ID: ${{ needs.windows-inputs-identity.outputs.artifact_id }}",
+  "          WI_IDENTITY_ARTIFACT_DIGEST: ${{ needs.windows-inputs-identity.outputs.artifact_digest }}",
+  ""
+].join("\n");
+
+function assertFrameworkWindowsCredentialContract(input) {
+  const yaml = input.replace(/\r\n/gu, "\n");
+  assert.equal((yaml.match(/^jobs:\n/gmu) ?? []).length, 1, "[fw:shape]");
+  const preamble = yaml.slice(0, yaml.indexOf("\njobs:\n") + 1);
+  assert.doesNotMatch(preamble, /^(?:env|"env"|'env')[ \t]*:/mu, "[fw:workflow-env]");
+  assert.doesNotMatch(preamble, /\bsecrets\b/iu, "[fw:workflow-secret]");
+  assert.doesNotMatch(yaml, /^[ \t]*<<[ \t]*:/mu, "[fw:merge]");
+  assert.equal((yaml.match(/^ {2}verify-framework-windows:\n/gmu) ?? []).length, 1, "[fw:job-count]");
+  const body = workflowJob(yaml, "verify-framework-windows");
+  assert.doesNotMatch(body, /unit-test-wfp|windows-2025-vs2026|administrator|WFP/iu, "[fw:privilege]");
+  const starts = [...body.matchAll(/^ {6}- /gmu)].map((m) => m.index);
+  assert.ok(starts.length >= 5, "[fw:steps]");
+  const steps = starts.map((start, i) => body.slice(start, starts[i + 1] ?? body.length));
+  assert.equal(body.slice(0, starts[0]), FW_CREDENTIAL_HEADER, "[fw:job-header]");
+  assert.equal(steps.filter((step) => /^ {6}- name: Import independently approved Windows input bytes$/mu.test(step)).length, 1, "[fw:import-count]");
+  const aliases = [...body.matchAll(/(?:^|[ \t])([*&][A-Za-z_][\w-]*)/gmu)].map((m) => m[1]);
+  assert.deepEqual(aliases, ["*wi_identity_guard_env", "*wi_identity_script"], "[fw:alias]");
+  assert.equal((yaml.match(/&wi_identity_guard_env\b/gu) ?? []).length, 1, "[fw:guard-env]");
+  const guardEnv = [...yaml.matchAll(/^ {8}env: &wi_identity_guard_env\n(?: {10}[^\n]*\n)+/gmu)];
+  assert.equal(guardEnv.length, 1, "[fw:guard-env]");
+  assert.equal(guardEnv[0][0], FW_CREDENTIAL_GUARD_ENV, "[fw:guard-env]");
+  assert.equal((yaml.match(/&wi_identity_script\b/gu) ?? []).length, 1, "[fw:script-alias]");
+  assert.equal((yaml.match(/^ {8}run: &wi_identity_script \|\n/gmu) ?? []).length, 1, "[fw:script-alias]");
+  for (let i = 0; i < FW_CREDENTIAL_STEPS.length; i += 1) {
+    assert.equal(steps[i], FW_CREDENTIAL_STEPS[i], "[fw:step-" + (i + 1) + "]");
+  }
+  const allowedLine = FW_CREDENTIAL_STEPS[4].split("\n")
+    .find((line) => line.startsWith("          WI_INPUT_READ_TOKEN:")) + "\n";
+  assert.equal(body.split(allowedLine).length - 1, 1, "[fw:token-count]");
+  const at = body.indexOf(allowedLine);
+  const residual = body.slice(0, at) + body.slice(at + allowedLine.length);
+  assert.doesNotMatch(residual, /\bsecrets\b/iu, "[fw:secret-residual]");
+}
+
+function replaceFrameworkCredentialOnce(text, from, to) {
+  assert.notEqual(from, "", "[fixture:empty-selector]");
+  assert.equal(text.split(from).length - 1, 1, "[fixture:selector-count]");
+  assert.notEqual(from, to, "[fixture:no-change]");
+  return text.replace(from, to);
+}
+
+function mutateFrameworkCredentialJob(yaml, mutate) {
+  const before = workflowJob(yaml, "verify-framework-windows");
+  const after = mutate(before);
+  assert.notEqual(after, before, "[fixture:no-job-change]");
+  return replaceFrameworkCredentialOnce(yaml, before, after);
+}
+
+function assertFrameworkWindowsCredentialInputs(workflow) {
+  const lf = workflow.replace(/\r\n/gu, "\n");
+  const ctx = (value) => "$" + "{{ " + value + " }}";
+  const envLine = (name, value) => "          " + name + ": " + ctx(value) + "\n";
+  const changeStep = (yaml, index, from, to) => mutateFrameworkCredentialJob(yaml, (body) =>
+    replaceFrameworkCredentialOnce(body, FW_CREDENTIAL_STEPS[index],
+      replaceFrameworkCredentialOnce(FW_CREDENTIAL_STEPS[index], from, to)));
+  const token = ctx("secrets.WINDOWS_INPUTS_READ_TOKEN");
+  const extra = (value) => "\n      - name: Unapproved extra credential\n        env:\n          EXTRA: " + value + "\n        run: echo blocked\n";
+  const later = "      - name: Prepare locked Windows framework inputs\n        run: pnpm prepare:framework-bundle\n";
+  const negatives = [
+    ["N1", "step-5", (w) => changeStep(w, 4, token, ctx("secrets.WRONG_TOKEN"))],
+    ["N2", "secret-residual", (w) => mutateFrameworkCredentialJob(w, (b) => b + extra(ctx("secrets.EXTRA")))],
+    ["N3", "step-5", (w) => changeStep(w, 4, token, ctx("secrets['WINDOWS_INPUTS_READ_TOKEN']"))],
+    ["N4", "secret-residual", (w) => mutateFrameworkCredentialJob(w, (b) => b + extra(ctx("toJSON(secrets)")))],
+    ["N5", "job-header", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, "\n    env:\n", "\n    env:\n      WI_INPUT_READ_TOKEN: " + token + "\n"))],
+    ["N6", "workflow-env", (w) => replaceFrameworkCredentialOnce(w, "jobs:\n",
+      "env:\n  WI_INPUT_READ_TOKEN: " + token + "\njobs:\n")],
+    ["N7", "token-count", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, later, later.replace("        run:", "        env:\n          WI_INPUT_READ_TOKEN: " + token + "\n        run:")))],
+    ["N8", "import-count", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, FW_CREDENTIAL_STEPS[4], FW_CREDENTIAL_STEPS[4] + FW_CREDENTIAL_STEPS[4]))],
+    ["N9", "step-5", (w) => changeStep(w, 4, envLine("WI_APPROVED_CANDIDATE_SHA", "vars.WINDOWS_INPUTS_APPROVED_CANDIDATE_SHA"), "")],
+    ["N10", "step-5", (w) => changeStep(w, 4, envLine("WI_APPROVED_WORKFLOW_SHA", "vars.WINDOWS_INPUTS_APPROVED_WORKFLOW_SHA"), "")],
+    ["N11", "step-5", (w) => changeStep(w, 4,
+      ctx("github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha"), ctx("github.sha"))],
+    ["N12", "job-header", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, "    needs: windows-inputs-identity\n", ""))],
+    ["N13", "alias", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, FW_CREDENTIAL_STEPS[3], ""))],
+    ["N14", "step-4", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, FW_CREDENTIAL_STEPS[3] + FW_CREDENTIAL_STEPS[4], FW_CREDENTIAL_STEPS[4] + FW_CREDENTIAL_STEPS[3]))],
+    ["N15", "step-2", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, FW_CREDENTIAL_STEPS[1], ""))],
+    ["N16", "job-header", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b,
+        "      WI_PRIVATE_INPUT_ROUTE: " + ctx("github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)") + "\n",
+        "      WI_PRIVATE_INPUT_ROUTE: " + ctx("true") + "\n"))],
+    ["N17", "job-header", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      replaceFrameworkCredentialOnce(b, "'windows-inputs-read'", "'unprotected-inputs'"))],
+    ...[
+      ["N18", "unit-test-wfp"], ["N19", "windows-2025-vs2026"],
+      ["N20", "administrator"], ["N21", "WFP"]
+    ].map(([id, marker]) => [id, "privilege", (w) => mutateFrameworkCredentialJob(w, (b) => b + "\n      # " + marker + "\n")]),
+    ["N22", "guard-env", (w) => replaceFrameworkCredentialOnce(w, FW_CREDENTIAL_GUARD_ENV,
+      FW_CREDENTIAL_GUARD_ENV + envLine("EXTRA", "secrets.EXTRA"))],
+    ["N23", "alias", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      b + "\n      - name: Unreviewed alias\n        env: *other\n        run: echo blocked\n")],
+    ["N24", "merge", (w) => mutateFrameworkCredentialJob(w, (b) =>
+      b + "\n      - name: Unreviewed merge\n        <<: *other\n        run: echo blocked\n")]
+  ];
+  assert.equal(negatives.length, 24, "[fixture:negative-count]");
+  assert.deepEqual(negatives.map(([id]) => id), Array.from({ length: 24 }, (_, i) => "N" + (i + 1)), "[fixture:ids]");
+  assert.doesNotThrow(() => assertFrameworkWindowsCredentialContract(lf), "P1");
+  assert.doesNotThrow(() => assertFrameworkWindowsCredentialContract(lf.replace(/\n/gu, "\r\n")), "P2");
+  for (const [id, reason, mutate] of negatives) {
+    const changed = mutate(lf);
+    assert.notEqual(changed, lf, id + ": fixture did not change");
+    assert.throws(
+      () => assertFrameworkWindowsCredentialContract(changed),
+      (error) => error?.code === "ERR_ASSERTION" && error.message.includes("[fw:" + reason + "]"),
+      id + ": expected contract rejection"
+    );
+  }
+  return { positive: 2, negative: 24 };
+}
+
 async function productionGoSources(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   return Promise.all(entries
@@ -374,7 +580,8 @@ test("fixed hosted framework producers preserve privileged Windows paths and pub
   );
 
   assert.match(frameworkWindows, /^ {4}runs-on: windows-2022\s*$/mu);
-  assert.doesNotMatch(frameworkWindows, /secrets:|secrets\.|unit-test-wfp|windows-2025-vs2026|administrator|WFP/iu);
+  const credentialInputs = assertFrameworkWindowsCredentialInputs(workflow);
+  assert.deepEqual(credentialInputs, { positive: 2, negative: 24 });
   for (const source of [frameworkWindows, frameworkLinux, aggregator]) {
     for (const use of workflowActionUses(source)) {
       assert.match(use, /@[0-9a-f]{40}$/u, `framework action is not pinned: ${use}`);
